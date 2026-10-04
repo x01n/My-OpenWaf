@@ -7,13 +7,19 @@ import (
 	"strings"
 )
 
-// PageConfig holds customizable branding/theme settings for WAF pages.
+// 页面模板的设置键：分别指向 captcha / challenge / block 三类页面的存储值。
 const (
 	SettingKeyCaptchaPage   = "page_template_captcha"
 	SettingKeyChallengePage = "page_template_challenge"
 	SettingKeyBlockPage     = "page_template_block"
 )
 
+/**
+ * PageConfig 保存 WAF 页面可自定义的品牌与主题设置。
+ *
+ * 它是三类页面配置（CaptchaPageConfig / ChallengePageConfig / BlockPageConfig）的内嵌公共部分，
+ * 字段值经 Safe* 系列函数净化后才进入模板渲染。
+ */
 type PageConfig struct {
 	BrandName    string `json:"brand_name"`
 	PrimaryColor string `json:"primary_color"`
@@ -24,7 +30,9 @@ type PageConfig struct {
 	CustomCSS    string `json:"custom_css"`
 }
 
-// CaptchaPageConfig extends PageConfig for captcha challenge pages.
+/**
+ * CaptchaPageConfig 在 PageConfig 基础上扩展 captcha 验证页专属文案。
+ */
 type CaptchaPageConfig struct {
 	PageConfig
 	Subtitle   string `json:"subtitle"`
@@ -32,7 +40,9 @@ type CaptchaPageConfig struct {
 	SubmitText string `json:"submit_text"`
 }
 
-// ChallengePageConfig extends PageConfig for JS challenge pages.
+/**
+ * ChallengePageConfig 在 PageConfig 基础上扩展 JS 挑战页专属文案。
+ */
 type ChallengePageConfig struct {
 	PageConfig
 	CheckingText   string `json:"checking_text"`
@@ -41,7 +51,9 @@ type ChallengePageConfig struct {
 	WaitTextZh     string `json:"wait_text_zh"`
 }
 
-// BlockPageConfig extends PageConfig for block/intercept pages.
+/**
+ * BlockPageConfig 在 PageConfig 基础上扩展拦截页与限流页专属文案。
+ */
 type BlockPageConfig struct {
 	PageConfig
 	BlockTitle     string `json:"block_title"`
@@ -50,7 +62,11 @@ type BlockPageConfig struct {
 	RateLimitMsg   string `json:"rate_limit_message"`
 }
 
-// DefaultPageConfig returns the default page branding configuration.
+/**
+ * DefaultPageConfig 返回默认的页面品牌配置。
+ *
+ * @return 带内置品牌名、主色、背景渐变、标题与页脚文案的 PageConfig。
+ */
 func DefaultPageConfig() PageConfig {
 	return PageConfig{
 		BrandName:    "My-OpenWAF",
@@ -61,7 +77,11 @@ func DefaultPageConfig() PageConfig {
 	}
 }
 
-// DefaultCaptchaPageConfig returns the default captcha page configuration.
+/**
+ * DefaultCaptchaPageConfig 返回默认的 captcha 页面配置。
+ *
+ * @return 内嵌默认品牌配置、并带默认提示文案的 CaptchaPageConfig。
+ */
 func DefaultCaptchaPageConfig() CaptchaPageConfig {
 	return CaptchaPageConfig{
 		PageConfig: DefaultPageConfig(),
@@ -71,7 +91,11 @@ func DefaultCaptchaPageConfig() CaptchaPageConfig {
 	}
 }
 
-// DefaultChallengePageConfig returns the default JS challenge page configuration.
+/**
+ * DefaultChallengePageConfig 返回默认的 JS 挑战页面配置。
+ *
+ * @return 内嵌默认品牌配置、并带默认提示文案的 ChallengePageConfig。
+ */
 func DefaultChallengePageConfig() ChallengePageConfig {
 	return ChallengePageConfig{
 		PageConfig:     DefaultPageConfig(),
@@ -82,7 +106,11 @@ func DefaultChallengePageConfig() ChallengePageConfig {
 	}
 }
 
-// DefaultBlockPageConfig returns the default block page configuration.
+/**
+ * DefaultBlockPageConfig 返回默认的拦截页配置。
+ *
+ * @return 内嵌默认品牌配置、并带拦截与限流文案的 BlockPageConfig。
+ */
 func DefaultBlockPageConfig() BlockPageConfig {
 	return BlockPageConfig{
 		PageConfig:     DefaultPageConfig(),
@@ -134,7 +162,16 @@ func SanitizeCSS(css string) string {
 	return css
 }
 
-// SafePrimaryColor returns a restricted CSS color value or the supplied fallback.
+/**
+ * SafePrimaryColor 返回受限的 CSS 颜色值，非法时回落到调用方给出的 fallback。
+ *
+ * 先经 sanitizeCSSValue 剔除可注入的构造，再校验是否命中 #hex / rgb() / rgba() / hsl() / hsla()
+ * 这几种颜色写法；颜色值会直接进入模板样式，任何一项不满足都必须回落而不是原样透出。
+ *
+ * @param raw 用户配置的原始颜色值。
+ * @param fallback 校验失败时使用的值。
+ * @return 合法颜色值或 fallback。
+ */
 func SafePrimaryColor(raw, fallback string) string {
 	value := sanitizeCSSValue(raw)
 	if value == "" || !isCSSColor(value) {
@@ -143,7 +180,16 @@ func SafePrimaryColor(raw, fallback string) string {
 	return value
 }
 
-// SafeBackground returns a restricted CSS background value or the supplied fallback.
+/**
+ * SafeBackground 返回受限的 CSS 背景值，非法时回落到调用方给出的 fallback。
+ *
+ * 只接受以 linear-gradient( / radial-gradient( 开头且以 ) 结尾的渐变表达式；
+ * 背景值同样是直接进入模板的样式片段，因此比颜色多一层前缀白名单。
+ *
+ * @param raw 用户配置的原始背景值。
+ * @param fallback 校验失败时使用的值。
+ * @return 合法背景值或 fallback。
+ */
 func SafeBackground(raw, fallback string) string {
 	value := sanitizeCSSValue(raw)
 	lower := strings.ToLower(value)
@@ -153,7 +199,16 @@ func SafeBackground(raw, fallback string) string {
 	return value
 }
 
-// SafeLogoURL permits same-origin paths and explicitly http(s) image URLs only.
+/**
+ * SafeLogoURL 只放行同源路径与显式 http(s) 图片地址。
+ *
+ * 返回 template.URL 类型，使该值在 html/template 中不再被二次转义；
+ * 正因如此，这里的白名单必须自己扛住注入：协议相对地址（//evil.example）
+ * 与非 http(s) 协议一律拒绝。
+ *
+ * @param raw 用户配置的原始 Logo 地址。
+ * @return 合法的 template.URL；不合法时返回空值。
+ */
 func SafeLogoURL(raw string) template.URL {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -208,7 +263,12 @@ func isCSSColor(value string) bool {
 	return (strings.HasPrefix(lower, "rgb(") || strings.HasPrefix(lower, "rgba(") || strings.HasPrefix(lower, "hsl(") || strings.HasPrefix(lower, "hsla(")) && strings.HasSuffix(value, ")")
 }
 
-// SafeHTMLAttr escapes a string for safe use in HTML attribute context.
+/**
+ * SafeHTMLAttr 转义字符串，使其可安全用于 HTML 属性上下文。
+ *
+ * @param s 待转义的原始字符串。
+ * @return 转义后的字符串。
+ */
 func SafeHTMLAttr(s string) string {
 	return template.HTMLEscapeString(s)
 }

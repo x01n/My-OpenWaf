@@ -7,10 +7,14 @@ import (
 )
 
 /**
- * ensureJSPluginEngine creates the process-scoped QuickJS executor on first use.
+ * ensureJSPluginEngine 在首次需要时创建进程级 QuickJS 执行器。
  *
- * An empty script generation never closes the current executor because requests that
- * already captured the previous snapshot can still execute its scripts.
+ * 脚本代次为空时绝不关闭现有执行器：已经捕获了旧快照的请求仍要执行其中的脚本，
+ * 提前销毁会让这些请求失去脚本能力。
+ *
+ * @param current 当前已持有的执行器。
+ * @param scripts 本次快照编译出的脚本集合。
+ * @return 可用的执行器。
  */
 func ensureJSPluginEngine(current *jsplugin.Engine, scripts []*jsplugin.Script) (*jsplugin.Engine, error) {
 	if len(scripts) == 0 || current != nil {
@@ -23,9 +27,15 @@ func ensureJSPluginEngine(current *jsplugin.Engine, scripts []*jsplugin.Script) 
 	return created, nil
 }
 
-// ensureJSPluginEngineForDryRun lazily creates the process-scoped executor for the
-// admin dry-run endpoint even when the current snapshot has no enabled scripts.
-// The caller must serialize creation with reload and shutdown.
+/**
+ * ensureJSPluginEngineForDryRun 为管理端 dry-run 端点惰性创建进程级执行器，
+ * 即使当前快照里没有任何启用的脚本也要能跑。
+ *
+ * 调用方必须把创建过程与 reload、shutdown 串行化，否则会与热替换竞争。
+ *
+ * @param current 当前已持有的执行器。
+ * @return 可用的 JS 插件执行器。
+ */
 func ensureJSPluginEngineForDryRun(current *jsplugin.Engine) (*jsplugin.Engine, error) {
 	if current != nil {
 		return current, nil

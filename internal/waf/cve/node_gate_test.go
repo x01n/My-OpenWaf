@@ -20,36 +20,36 @@ type nodeGateCase struct {
 func nodeGateSampleWorker() []nodeGateCase {
 	trip := func(s string) []string { return []string{s, "x" + s + "y"} }
 	return []nodeGateCase{
-		// [0] CVE-2019-10744
+		// gate 索引 [0] CVE-2019-10744
 		{ruleIdx: 0, gateIdx: 0, hit: trip(`"__proto__":`), miss: []string{`"__proto__".`}},
 		{ruleIdx: 0, gateIdx: 1, hit: trip(`__proto__[`), miss: []string{`__proto__ `}},
 		{ruleIdx: 0, gateIdx: 2, hit: trip(`__proto__=`), miss: []string{`__proto__ `}},
 		{ruleIdx: 0, gateIdx: 3, hit: []string{`constructor ["prototype"]`, `CONSTRUCTOR[ "PROTOTYPE" ]`, `constructor[prototype]`}, miss: []string{`constructor . prototype`}},
 		{ruleIdx: 0, gateIdx: 4, hit: trip(`constructor.prototype`), miss: []string{"constructor . prototype", "constructor"}},
-		// [1] CVE-2020-REACT-SSR
+		// gate 索引 [1] CVE-2020-REACT-SSR
 		{ruleIdx: 1, gateIdx: 0, hit: []string{"dangerouslysetinnerhtml", "DANGEROUSLYSETINNERHTML"}, miss: []string{"dangerously"}},
 		{ruleIdx: 1, gateIdx: 1, hit: trip("__next_data__"), miss: []string{"next_data"}},
 		{ruleIdx: 1, gateIdx: 2, hit: []string{"`a${b}`", "`${}`"}, miss: []string{"${}", "a${b"}},
-		// [2] CVE-2019-NODE-CMD
+		// gate 索引 [2] CVE-2019-NODE-CMD
 		{ruleIdx: 2, gateIdx: 0, hit: trip("child_process"), miss: []string{"child process"}},
 		{ruleIdx: 2, gateIdx: 1, hit: []string{`require("child_process")`, `REQUIRE ('CHILD_PROCESS')`, `require( "child_process" )`}, miss: []string{`require child_process`, "require('x')"}},
 		{ruleIdx: 2, gateIdx: 2, hit: []string{"; id", ";ID", ";\t CAT ", "; pom  whoami "}, miss: []string{"; x", ";;"}},
 		{ruleIdx: 2, gateIdx: 3, hit: []string{"| CAT /", "|id /", "|  WHOAMI\t/"}, miss: []string{`| cat \`, "| x /"}},
 		{ruleIdx: 2, gateIdx: 4, hit: []string{"`ls`", "`x PWD y`", "`whoami`"}, miss: []string{"`look`", "`prow`"}},
-		// [3] CVE-2017-14849
+		// gate 索引 [3] CVE-2017-14849
 		{ruleIdx: 3, gateIdx: 0, hit: []string{"..%2f", "../..%2F"}, miss: []string{".%2f"}},
 		{ruleIdx: 3, gateIdx: 1, hit: []string{"..%5c", "..%5C"}, miss: []string{".%5c"}},
 		{ruleIdx: 3, gateIdx: 2, hit: []string{"..;", "../../", "a../b"}, miss: []string{".p", "..:"}},
 		{ruleIdx: 3, gateIdx: 3, hit: []string{`..\`, `a..\b`}, miss: []string{".\\"}},
-		// [4] CVE-2022-29078
+		// gate 索引 [4] CVE-2022-29078
 		{ruleIdx: 4, gateIdx: 0, hit: []string{"<%- include", "<% PROCESS", "<%= require", "<%\tglobal", "<%- console("}, miss: []string{"<% printf"}},
 		{ruleIdx: 4, gateIdx: 1, hit: []string{`settings["view options"]`, `SETTINGS [ "VIEW OPTIONS" ]`}, miss: []string{`settings["view"]`, `settings["options"]`}},
-		// [5] CVE-2023-32314
+		// gate 索引 [5] CVE-2023-32314
 		{ruleIdx: 5, gateIdx: 0, hit: []string{"this.constructor.constructor", "THIS.CONSTRUCTOR.CONSTRUCTOR"}, miss: []string{"this.constructor"}},
 		{ruleIdx: 5, gateIdx: 1, hit: []string{`Function("return process")`, `function ( 'RETURN PROCESS' )`}, miss: []string{`function x process`, `function("return")`}},
-		// [6] CVE-2024-34351
+		// gate 索引 [6] CVE-2024-34351
 		{ruleIdx: 6, gateIdx: 0, hit: []string{"x-middleware-subrequest", "X-Middleware-Subrequest"}, miss: []string{"x-middleware-represent"}},
-		// [7] CVE-2025-55182 React2Shell
+		// gate 索引 [7] CVE-2025-55182 React2Shell
 		{ruleIdx: 7, gateIdx: 0, hit: []string{"__proto__[\"constructor\"]", "__PROTO__ . 'CONSTRUCTOR'"}, miss: []string{"__proto__ constructor", "constructor __proto__"}},
 		{ruleIdx: 7, gateIdx: 1, hit: []string{"constructor[\"constructor\"]"}, miss: []string{"constructor"}},
 		{ruleIdx: 7, gateIdx: 2, hit: []string{"Function('process')", `Function('spawn')`, "function ('require')"}, miss: []string{`function ("x")`}},
@@ -57,11 +57,11 @@ func nodeGateSampleWorker() []nodeGateCase {
 		{ruleIdx: 7, gateIdx: 4, hit: []string{`require('child_process').exec`, `require("child_process").spawn`}, miss: []string{`require('child_process') x`}},
 		{ruleIdx: 7, gateIdx: 5, hit: []string{".then(eval(", ".then  ( Function("}, miss: []string{".then (x)"}},
 		{ruleIdx: 7, gateIdx: 6, hit: []string{`import("fs")`, "import( 'HTTP' )"}, miss: []string{"import fx"}},
-		// [8] CVE-2025-55182 FlightRef
+		// gate 索引 [8] CVE-2025-55182 FlightRef
 		{ruleIdx: 8, gateIdx: 0, hit: []string{"$1:A", "$123:Z"}, miss: []string{"$1a", "1:A", "$"}},
-		// [9] CVE-2025-29927
+		// gate 索引 [9] CVE-2025-29927
 		{ruleIdx: 9, gateIdx: 0, hit: []string{"x-middleware-subrequest: middleware"}, miss: []string{"x-middleware-subrequest"}},
-		// [10] CVE-2025-55184
+		// gate 索引 [10] CVE-2025-55184
 		{ruleIdx: 10, gateIdx: 0, hit: []string{"/_next/data/x.json?__nextDataReq"}, miss: []string{"/_next/data/xjson?__nextDataReq"}},
 	}
 }
@@ -81,7 +81,7 @@ func nodeGatePlace(sample, target string) *CVERequest {
 		return BuildCVERequest("/", "", headers, nil, "")
 	case "body":
 		return BuildCVERequest("/", "", headers, []byte(sample), "")
-	default: // all / url_body
+	default: // target 取 all / url_body
 		return BuildCVERequest("/", "", headers, []byte(sample), "")
 	}
 }

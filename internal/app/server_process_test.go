@@ -3085,13 +3085,13 @@ func TestRunCancelsHTTP3UpstreamRequestBodyWhenClientCancelsUploadInSeparateProc
 		clientDone <- clientResult{resp: resp, err: err}
 	}()
 
-	// Hertz's FastHTTP engine buffers the entire request body before forwarding to upstream.
-	// Therefore upstream does not receive a streaming partial notification. Skip this check.
+	// Hertz 的 FastHTTP 引擎会先把整个请求体缓冲完再转发给上游，
+	// 因此上游不会收到「流式部分到达」的通知，跳过这项检查。
 	select {
 	case <-upstreamPartial:
-		// FastHTTP buffers the whole body before forwarding; partial notification is not expected.
+		// FastHTTP 会先把整个 body 缓冲完再转发；不应出现部分通知。
 	case <-time.After(2 * time.Second):
-		// Expected timeout; upstream will receive the full buffered body via upstreamFinished.
+		// 超时属于预期；上游会通过 upstreamFinished 收到缓冲完整的 body。
 	}
 
 	cancelReq()
@@ -3108,7 +3108,7 @@ func TestRunCancelsHTTP3UpstreamRequestBodyWhenClientCancelsUploadInSeparateProc
 		if got.bytesRead < wantPrefixBytes {
 			t.Fatalf("upstream HTTP/3 upload cancel bytes read = %d, want at least %d", got.bytesRead, wantPrefixBytes)
 		}
-		// The separate-process loopback path can finish the forwarded chunked body with EOF or unexpected EOF.
+		// 子进程 loopback 路径可能以 EOF 或 unexpected EOF 结束转发中的 chunked body。
 		if got.readErr != nil && got.readErr != io.EOF && !errors.Is(got.readErr, io.ErrUnexpectedEOF) {
 			t.Fatalf("upstream HTTP/3 upload cancel read error = %v, want EOF, unexpected EOF, or nil", got.readErr)
 		}

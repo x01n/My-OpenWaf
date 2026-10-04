@@ -737,8 +737,8 @@ func parseJSONInteger(raw []byte, bits int) (int64, error) {
  * DecryptEnvFingerprint 使用会话绑定密钥解密加密的环境指纹。
  */
 /**
- * DecryptEnvFingerprintWithAAD verifies the versioned WASM envelope before
- * parsing it. AAD binds the ciphertext to its server-issued challenge scope.
+ * DecryptEnvFingerprintWithAAD 在解析之前先校验带版本的 WASM 信封。
+ * AAD 把密文绑定到服务端签发的挑战作用域。
  */
 func DecryptEnvFingerprintWithAAD(encrypted string, sessionKey []byte, aad string) *EnvFingerprint {
 	if len(sessionKey) != envSessionKeySize || aad == "" {
@@ -857,9 +857,8 @@ func envContainsCI(s, substr string) bool {
 }
 
 /**
- * EnvFingerprintAAD creates the authenticated-data binding for a fingerprint
- * envelope. The session/token remains the server authorization root; this
- * binding rejects cross-scope and cross-site ciphertext replay.
+ * EnvFingerprintAAD 为指纹信封构造认证数据绑定。
+ * session/token 仍是服务端授权根；该绑定用于拒绝跨作用域与跨站的密文重放。
  */
 func EnvFingerprintAAD(scope, sessionID string, binding ChallengeSessionBinding) string {
 	binding = binding.normalized()
@@ -869,9 +868,8 @@ func EnvFingerprintAAD(scope, sessionID string, binding ChallengeSessionBinding)
 }
 
 /**
- * EnvCheckJSEncrypted returns a loader which only initializes WASM and carries
- * its opaque encrypted result. Fingerprint collection, canonical JSON encoding,
- * hashing, and SM4-GCM/SM2 信封封装 execute in Rust WASM.
+ * EnvCheckJSEncrypted 返回一个只初始化 WASM 并携带其不透明加密结果的加载器。
+ * 指纹采集、规范化 JSON 编码、哈希与 SM4-GCM/SM2 信封封装均在 Rust WASM 中执行。
  */
 func EnvCheckJSEncrypted(keyHex, aad string) string {
 	return envCheckJSEncryptedWithBehavior(keyHex, aad, false)

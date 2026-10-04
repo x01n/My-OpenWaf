@@ -26,9 +26,9 @@ var (
 )
 
 const (
-	// BackendQuickJS identifies binaries that include the native QuickJS executor.
+	// BackendQuickJS 标识带原生 QuickJS 执行器的构建。
 	BackendQuickJS = "quickjs"
-	// BackendUnavailable identifies builds without an executable JavaScript backend.
+	// BackendUnavailable 标识没有可执行 JavaScript 后端的构建。
 	BackendUnavailable = "unavailable"
 )
 
@@ -78,9 +78,11 @@ const (
 	MaxResponseSnapshotBytes = 128 << 10
 )
 
-// RequestSnapshot 是传给 JavaScript 脚本的只读请求快照。
-//
-// 所有 map 在进入引擎前都会深拷贝并序列化，脚本无法直接修改调用方数据。
+/**
+ * RequestSnapshot 是传给 JavaScript 脚本的只读请求快照。
+ *
+ * 所有 map 在进入引擎前都会深拷贝并序列化，脚本无法直接修改调用方数据。
+ */
 type RequestSnapshot struct {
 	RequestID   string            `json:"request_id,omitempty"`
 	SiteID      uint              `json:"site_id"`
@@ -96,8 +98,15 @@ type RequestSnapshot struct {
 	QueryParams map[string]string `json:"query_params,omitempty"`
 }
 
-// CanonicalValidationRequest returns the deterministic request used by both
-// persistence-time and snapshot-time executable contract checks.
+/**
+ * CanonicalValidationRequest 返回确定性的验证请求，供持久化期与快照期的可执行契约检查共用。
+ *
+ * request_id 与 site_id 固定、其余字段取最小合法值，同一站点每次校验都得到逐字相同的输入；
+ * 校验结论因此可比较、可复现，不受调用时刻或调用方数据影响。
+ *
+ * @param siteID 站点标识，写入快照的 site_id 字段。
+ * @return 确定性的 RequestSnapshot。
+ */
 func CanonicalValidationRequest(siteID uint) RequestSnapshot {
 	return RequestSnapshot{
 		RequestID:   "js-plugin-validation",
@@ -111,10 +120,12 @@ func CanonicalValidationRequest(siteID uint) RequestSnapshot {
 	}
 }
 
-// CanonicalValidationResponse 返回持久化校验可执行契约使用的确定性响应。
-//
-// 与 CanonicalValidationRequest 对称：request_id/site_id 固定，path 与
-// content type 取全站最通用的示例形态，脚本可对其做有意义的可执行断言。
+/**
+ * CanonicalValidationResponse 返回持久化校验可执行契约使用的确定性响应。
+ *
+ * 与 CanonicalValidationRequest 对称：request_id/site_id 固定，path 与
+ * content type 取全站最通用的示例形态，脚本可对其做有意义的可执行断言。
+ */
 func CanonicalValidationResponse(siteID uint) ResponseSnapshot {
 	return ResponseSnapshot{
 		RequestID:   "js-plugin-validation",
@@ -127,15 +138,17 @@ func CanonicalValidationResponse(siteID uint) ResponseSnapshot {
 	}
 }
 
-// MutationPlan 是脚本返回的请求变更计划。
-//
-// 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
-// SetHeaders 用于新增或覆盖请求头，DeleteHeaders 用于删除请求头。该计划
-// 只描述意图，不会在本包内直接修改 Hertz 或 net/http 请求。
-//
-// 计划同时可以携带裁决：Action 非空时请求不再走上游，而是按该动作终止。
-// 动作字符串经 internal/core/action 的 Normalize/IsValid 归一化与校验，
-// 与内置规则、Lua 插件共用同一套动作词汇，不另立第二套。
+/**
+ * MutationPlan 是脚本返回的请求变更计划。
+ *
+ * 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
+ * SetHeaders 用于新增或覆盖请求头，DeleteHeaders 用于删除请求头。该计划
+ * 只描述意图，不会在本包内直接修改 Hertz 或 net/http 请求。
+ *
+ * 计划同时可以携带裁决：Action 非空时请求不再走上游，而是按该动作终止。
+ * 动作字符串经 internal/core/action 的 Normalize/IsValid 归一化与校验，
+ * 与内置规则、Lua 插件共用同一套动作词汇，不另立第二套。
+ */
 type MutationPlan struct {
 	Method        *string           `json:"method,omitempty"`
 	Path          *string           `json:"path,omitempty"`
@@ -157,14 +170,16 @@ type MutationPlan struct {
 	Tags *[]string `json:"tags,omitempty"`
 }
 
-// ResponseMutationPlan 是 response 阶段脚本返回的响应变更计划。
-//
-// 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
-// SetHeaders 用于新增或覆盖响应头，DeleteHeaders 用于删除响应头。该计划
-// 与 MutationPlan 一样只描述意图，由 proxy 变换链消费。
-//
-// 状态码取值放宽到 100..999：脚本可以直接把上游响应改写成 4xx/5xx 的自定义
-// 错误页，这是用户实测最常用的形态。
+/**
+ * ResponseMutationPlan 是 response 阶段脚本返回的响应变更计划。
+ *
+ * 指针字段为 nil 表示不修改；非 nil（包括指向空字符串）表示显式替换。
+ * SetHeaders 用于新增或覆盖响应头，DeleteHeaders 用于删除响应头。该计划
+ * 与 MutationPlan 一样只描述意图，由 proxy 变换链消费。
+ *
+ * 状态码取值放宽到 100..999：脚本可以直接把上游响应改写成 4xx/5xx 的自定义
+ * 错误页，这是用户实测最常用的形态。
+ */
 type ResponseMutationPlan struct {
 	Status        *int              `json:"status,omitempty"`
 	Body          *string           `json:"body,omitempty"`
@@ -172,11 +187,13 @@ type ResponseMutationPlan struct {
 	DeleteHeaders []string          `json:"delete_headers,omitempty"`
 }
 
-// ResponseSnapshot 是传给 JavaScript 脚本的只读响应快照。
-//
-// 所有 map 在进入引擎前都会深拷贝并序列化，脚本无法直接修改调用方数据；
-// 除额外注入的 request 侧标量（method/raw_query/client_ip/request_headers）
-// 外，字段与 RequestSnapshot 的 key 风格一致。
+/**
+ * ResponseSnapshot 是传给 JavaScript 脚本的只读响应快照。
+ *
+ * 所有 map 在进入引擎前都会深拷贝并序列化，脚本无法直接修改调用方数据；
+ * 除额外注入的 request 侧标量（method/raw_query/client_ip/request_headers）
+ * 外，字段与 RequestSnapshot 的 key 风格一致。
+ */
 type ResponseSnapshot struct {
 	RequestID      string            `json:"request_id,omitempty"`
 	SiteID         uint              `json:"site_id"`
@@ -426,10 +443,15 @@ func validateResponseSnapshot(snapshot ResponseSnapshot) error {
 	return nil
 }
 
-// ValidateMutationPlan 在 host 应用前校验请求变更计划。
-//
-// 此处承载 request-stage 的完整安全边界，dry-run 与数据面必须使用同一校验，
-// 防止已通过 dry-run 的计划在真实请求中被拒绝。
+/**
+ * ValidateMutationPlan 在 host 应用前校验请求变更计划。
+ *
+ * 此处承载 request-stage 的完整安全边界，dry-run 与数据面必须使用同一校验，
+ * 防止已通过 dry-run 的计划在真实请求中被拒绝。
+ *
+ * @param plan 脚本产出的请求变更计划。
+ * @return 任一字段越界或形状非法时返回错误。
+ */
 func ValidateMutationPlan(plan MutationPlan) error {
 	if err := validateMutationPlan(plan); err != nil {
 		return err
@@ -459,10 +481,15 @@ func ValidateMutationPlan(plan MutationPlan) error {
 	return nil
 }
 
-// ValidateResponseMutationPlan 在 host 应用前校验响应变更计划。
-//
-// response 阶段不改变请求走向；此校验只履行状态码取值、体积上限、头名称
-// token、保留头与 set/delete 一致性检查，供 dry-run 与数据面复用。
+/**
+ * ValidateResponseMutationPlan 在 host 应用前校验响应变更计划。
+ *
+ * response 阶段不改变请求走向；此校验只履行状态码取值、体积上限、头名称
+ * token、保留头与 set/delete 一致性检查，供 dry-run 与数据面复用。
+ *
+ * @param plan 脚本产出的响应变更计划。
+ * @return 任一字段越界或形状非法时返回错误。
+ */
 func ValidateResponseMutationPlan(plan ResponseMutationPlan) error {
 	for field, value := range map[string]*string{
 		"body": plan.Body,

@@ -14,7 +14,7 @@ import (
 	"My-OpenWaf/internal/waf/cve"
 )
 
-// cveRuleStats summarizes effective CVE state for one resolved scope.
+// cveRuleStats 汇总单个已解析作用域内的有效 CVE 状态。
 type cveRuleStats struct {
 	Total         int64          `json:"total"`
 	EnabledCount  int            `json:"enabled_count"`
@@ -46,7 +46,7 @@ func summarizeCVERules(views []cveScopedRuleView, scope cveScopeContext) cveRule
 	return stats
 }
 
-// GetCVERuleStats returns statistics about CVE rules.
+// GetCVERuleStats 返回 CVE 规则的统计信息。
 func GetCVERuleStats(repo *repository.CVERuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		scope, err := resolveCVEScope(repo.DB(), c, "", 0, 0)
@@ -63,7 +63,7 @@ func GetCVERuleStats(repo *repository.CVERuleRepo) app.HandlerFunc {
 	}
 }
 
-// BatchUpdateCVERules updates multiple CVE rules at once.
+// BatchUpdateCVERules 一次更新多条 CVE 规则。
 func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, reload ...func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
@@ -126,7 +126,7 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 	}
 }
 
-// UpdateSingleCVERule updates a single CVE rule by ID (enable/disable/sensitivity).
+// UpdateSingleCVERule 按 ID 更新单条 CVE 规则（启用/停用/灵敏度）。
 func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, reload ...func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := utils.ParseUint(c.Param("id"))

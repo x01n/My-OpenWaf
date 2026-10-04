@@ -34,8 +34,10 @@ func IsH2WebSocketDirectUpstream(base string) bool {
 	return ok && transport == "h2c"
 }
 
-// upstreamRPCTransportAlias 对齐 upstream.RPCUpstreamAliasForURL 的别名语义，
-// 返回 scheme 对应的目标传输；ok 为 false 表示非 RPC 别名 scheme。
+/**
+ * upstreamRPCTransportAlias 对齐 upstream.RPCUpstreamAliasForURL 的别名语义，
+ * 返回 scheme 对应的目标传输；ok 为 false 表示非 RPC 别名 scheme。
+ */
 func upstreamRPCTransportAlias(base string) (string, bool) {
 	lower := strings.ToLower(strings.TrimSpace(base))
 	sep := strings.Index(lower, "://")
@@ -73,9 +75,11 @@ func (s *h2cInboundStream) Read(p []byte) (int, error) { return s.body.Read(p) }
 // Close 关闭入站请求体（幂等）。
 func (s *h2cInboundStream) Close() error { return s.closer() }
 
-// registerH2WSInboundStream 把入站扩展 CONNECT 流的端点挂到 hertz 上下文
-// 中，供桥接路径使用。由 Handler 在 WAF 分支前调用；非扩展 CONNECT
-// 请求上为空操作。
+/**
+ * registerH2WSInboundStream 把入站扩展 CONNECT 流的端点挂到 hertz 上下文
+ * 中，供桥接路径使用。由 Handler 在 WAF 分支前调用；非扩展 CONNECT
+ * 请求上为空操作。
+ */
 func registerH2WSInboundStream(c *app.RequestContext) {
 	if c == nil || !IsH2ExtendedWebSocketConnect(c) {
 		return
@@ -112,8 +116,10 @@ func acquireH2InboundStream(c *app.RequestContext) (*h2cInboundStream, error) {
 	return stream, nil
 }
 
-// newH2WSHijackWriter 以与 proxy.StreamResponseViaHijack 相同的通道
-// （http2.NewResponseWriter)构造 HijackWriter；失败时返回错误。
+/**
+ * newH2WSHijackWriter 以与 proxy.StreamResponseViaHijack 相同的通道
+ * （http2.NewResponseWriter)构造 HijackWriter；失败时返回错误。
+ */
 func newH2WSHijackWriter(c *app.RequestContext) (network.ExtWriter, error) {
 	if c == nil || c.GetConn() == nil {
 		return nil, errors.New("extended CONNECT bridge requires a connection")
@@ -125,9 +131,11 @@ func newH2WSHijackWriter(c *app.RequestContext) (network.ExtWriter, error) {
 	return &h2WSFinalizeOnceWriter{inner: writer}, nil
 }
 
-// h2WSFinalizeOnceWriter 把 responseWriter 包成 hertz HijackWriter。
-// Finalize 幂等：桥接结束与错误路径都会触发 Finalize，底层 writer
-// 重复释放流状态会崩，因此只在首次调用时透传。
+/**
+ * h2WSFinalizeOnceWriter 把 responseWriter 包成 hertz HijackWriter。
+ * Finalize 幂等：桥接结束与错误路径都会触发 Finalize，底层 writer
+ * 重复释放流状态会崩，因此只在首次调用时透传。
+ */
 type h2WSFinalizeOnceWriter struct {
 	inner network.ExtWriter
 	once  sync.Once
@@ -146,8 +154,10 @@ func (w *h2WSFinalizeOnceWriter) Finalize() error {
 	return w.err
 }
 
-// bridgeH2ExtendedConnectToWebSocket 把入站扩展 CONNECT 桥接到 ws/wss/http1
-// 上游：先在上游以 h1 语义完成 WebSocket 升级握手，再把帧字节双向中继。
+/**
+ * bridgeH2ExtendedConnectToWebSocket 把入站扩展 CONNECT 桥接到 ws/wss/http1
+ * 上游：先在上游以 h1 语义完成 WebSocket 升级握手，再把帧字节双向中继。
+ */
 func bridgeH2ExtendedConnectToWebSocket(ctx context.Context, reqID string, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, eng *engine.Engine) error {
 	stream, err := acquireH2InboundStream(c)
 	if err != nil {
@@ -257,10 +267,12 @@ func h2WSRejectUpstreamHandshake(c *app.RequestContext, err error) error {
 	return err
 }
 
-// forwardH2ExtendedConnectDirect 对 h2c 上游做 RFC 8441 帧层直通：
-// 用最小客户端帧流发出 CONNECT（h2_ws_frame.go，prior knowledge），
-// 握手成功后把入站流与上游流的净荷双向拷贝。请求头透传执行与
-// buildWebSocketHandshakeHeaders 相同的 hop-by-hop/连接管理头剔除。
+/**
+ * forwardH2ExtendedConnectDirect 对 h2c 上游做 RFC 8441 帧层直通：
+ * 用最小客户端帧流发出 CONNECT（h2_ws_frame.go，prior knowledge），
+ * 握手成功后把入站流与上游流的净荷双向拷贝。请求头透传执行与
+ * buildWebSocketHandshakeHeaders 相同的 hop-by-hop/连接管理头剔除。
+ */
 func forwardH2ExtendedConnectDirect(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string) error {
 	inStream, err := acquireH2InboundStream(c)
 	if err != nil {
@@ -334,10 +346,12 @@ func forwardH2ExtendedConnectDirect(ctx context.Context, c *app.RequestContext, 
 	return h2WSRelay(inStream.body, upStream, writer, 32*1024)
 }
 
-// h2WSRelay 在「入站流」与「上游双工连接」之间双向中继（先到先停）。
-// clientRead 是入站请求体；upConn 是上游（TCP 或 h2c 帧流）；clientWrite
-// 是入站响应通道。上游方向 EOF 后终结入站流，入站方向 EOF 后由上游
-// CloseWrite（若支持）半关。
+/**
+ * h2WSRelay 在「入站流」与「上游双工连接」之间双向中继（先到先停）。
+ * clientRead 是入站请求体；upConn 是上游（TCP 或 h2c 帧流）；clientWrite
+ * 是入站响应通道。上游方向 EOF 后终结入站流，入站方向 EOF 后由上游
+ * CloseWrite（若支持）半关。
+ */
 func h2WSRelay(clientRead io.Reader, upConn io.ReadWriteCloser, clientWrite io.Writer, bufSize int) error {
 	if bufSize <= 0 {
 		bufSize = 32 * 1024
@@ -395,15 +409,19 @@ func h2WSRelay(clientRead io.Reader, upConn io.ReadWriteCloser, clientWrite io.W
 	return first
 }
 
-// upstreamConnectionHeaderStripper 与 proxy.NewRequestConnectionHeaderStripper
-// 语义一致：把 Connection 头中列出的 token 全部视为逐跳头予以剔除。
+/**
+ * upstreamConnectionHeaderStripper 与 proxy.NewRequestConnectionHeaderStripper
+ * 语义一致：把 Connection 头中列出的 token 全部视为逐跳头予以剔除。
+ */
 type upstreamConnectionHeaderStripper struct {
 	tokens map[string]struct{}
 }
 
-// newUpstreamConnectionHeaderStripper 构造连接头剔除器：把 Connection 头
-// 中列出的 token 全部视为逐跳头，与 proxy.NewRequestConnectionHeaderStripper
-// 语义一致（本包不依赖 proxy 内部实现，独立复刻最小闭包）。
+/**
+ * newUpstreamConnectionHeaderStripper 构造连接头剔除器：把 Connection 头
+ * 中列出的 token 全部视为逐跳头，与 proxy.NewRequestConnectionHeaderStripper
+ * 语义一致（本包不依赖 proxy 内部实现，独立复刻最小闭包）。
+ */
 func newUpstreamConnectionHeaderStripper(c *app.RequestContext) *upstreamConnectionHeaderStripper {
 	s := &upstreamConnectionHeaderStripper{tokens: make(map[string]struct{}, 4)}
 	if v := string(c.GetHeader("Connection")); v != "" {
@@ -423,8 +441,10 @@ func (s *upstreamConnectionHeaderStripper) ShouldStrip(name []byte) bool {
 	return ok
 }
 
-// h2DirectUpstreamTarget 从 h2c base 与入站 path/query 算出上游拨号地址
-// 与 CONNECT 请求的绝对 URL（http://authority/path）。
+/**
+ * h2DirectUpstreamTarget 从 h2c base 与入站 path/query 算出上游拨号地址
+ * 与 CONNECT 请求的绝对 URL（http://authority/path）。
+ */
 func h2DirectUpstreamTarget(base string, path string, query string) (string, string, error) {
 	idx := strings.Index(base, "://")
 	if idx < 0 {
@@ -463,8 +483,10 @@ func httpHeaderFromRaw(raw string, name string) string {
 	return ""
 }
 
-// readHTTPResponseHeadLimited 从上游读 h1 响应状态行与头部（带显式大小
-// 上限）；状态非 101 时返回错误。与 readHTTPResponseHead 语义一致。
+/**
+ * readHTTPResponseHeadLimited 从上游读 h1 响应状态行与头部（带显式大小
+ * 上限）；状态非 101 时返回错误。与 readHTTPResponseHead 语义一致。
+ */
 func readHTTPResponseHeadLimited(r *bufio.Reader, limit int) (string, string, error) {
 	statusLine, err := readHTTPResponseLineLimited(r, limit)
 	if err != nil {
@@ -499,8 +521,10 @@ func h2WSDialUpstream(target string, rt snapshot.SiteRuntime) (net.Conn, error) 
 	return dialer.Dial("tcp", host)
 }
 
-// 与 h2_ws_frame.go 共享的协议头常量：":protocol" 的字面值在
-// h2ProtoHeaderValue（websocket.go）与 h2c 帧流（h2_ws_frame.go）中使用。
+/**
+ * 与 h2_ws_frame.go 共享的协议头常量：":protocol" 的字面值在
+ * h2ProtoHeaderValue（websocket.go）与 h2c 帧流（h2_ws_frame.go）中使用。
+ */
 const h2WSProtocolHeaderName = ":protocol"
 
 var _ bytes.Buffer

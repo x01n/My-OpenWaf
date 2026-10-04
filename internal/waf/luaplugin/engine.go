@@ -8,31 +8,37 @@ import (
 	"time"
 )
 
-// scriptSet 是按 stage 分桶后的脚本集合，一经发布即不可变。
-//
-// 整体替换而非原地改写，读侧才能无锁取用：Reload 构造全新集合再原子换指针，
-// 正在执行的调用继续持有旧集合跑完。
+/**
+ * scriptSet 是按 stage 分桶后的脚本集合，一经发布即不可变。
+ *
+ * 整体替换而非原地改写，读侧才能无锁取用：Reload 构造全新集合再原子换指针，
+ * 正在执行的调用继续持有旧集合跑完。
+ */
 type scriptSet struct {
 	revision uint64
 	pre      []*Script
 	post     []*Script
 }
 
-// kvHolder 包一层以便用 atomic.Pointer 持有 interface 值。
-//
-// KVBackend 是 interface，atomic.Pointer[KVBackend] 需要 **KVBackend 才能表达
-// 「可为 nil 的后端」，多一层间接反而更绕；包成结构体读写都只有一次解引用。
+/**
+ * kvHolder 包一层以便用 atomic.Pointer 持有 interface 值。
+ *
+ * KVBackend 是 interface，atomic.Pointer[KVBackend] 需要 **KVBackend 才能表达
+ * 「可为 nil 的后端」，多一层间接反而更绕；包成结构体读写都只有一次解引用。
+ */
 type kvHolder struct {
 	kv KVBackend
 }
 
-// Engine 持有已加载的脚本与共享状态机池，是外部唯一入口。
-//
-// 读路径（HasScripts/Evaluate）全程无锁：脚本集合与 KV 后端都用 atomic.Pointer
-// 持有，与项目 snapshot.Holder 的做法一致。这一点对数据面是必要的——管道里的
-// lua 阶段对每个请求都要问一次 HasScripts，未配置脚本时也要问，读侧若含互斥
-// 原语就会在多核高 QPS 下于同一 cache line 上产生跨核争抢（实测 RWMutex 读路径
-// 50.7 ns/op、并发重载时 95.2 ns/op，换成 atomic 后分别为 0.46 与 0.60 ns/op）。
+/**
+ * Engine 持有已加载的脚本与共享状态机池，是外部唯一入口。
+ *
+ * 读路径（HasScripts/Evaluate）全程无锁：脚本集合与 KV 后端都用 atomic.Pointer
+ * 持有，与项目 snapshot.Holder 的做法一致。这一点对数据面是必要的——管道里的
+ * lua 阶段对每个请求都要问一次 HasScripts，未配置脚本时也要问，读侧若含互斥
+ * 原语就会在多核高 QPS 下于同一 cache line 上产生跨核争抢（实测 RWMutex 读路径
+ * 50.7 ns/op、并发重载时 95.2 ns/op，换成 atomic 后分别为 0.46 与 0.60 ns/op）。
+ */
 type Engine struct {
 	scripts atomic.Pointer[scriptSet]
 	kv      atomic.Pointer[kvHolder]
@@ -64,9 +70,11 @@ func (e *Engine) SetKV(kv KVBackend) {
 	e.kv.Store(&kvHolder{kv: kv})
 }
 
-// Reload 用新的脚本集合整体替换现有集合。
-//
-// 按 stage 预先分桶，避免每请求都过滤一遍。
+/**
+ * Reload 用新的脚本集合整体替换现有集合。
+ *
+ * 按 stage 预先分桶，避免每请求都过滤一遍。
+ */
 func (e *Engine) Reload(scripts []*Script) {
 	if e == nil {
 		return
@@ -96,11 +104,13 @@ func (e *Engine) Reload(scripts []*Script) {
 	e.reloadMu.Unlock()
 }
 
-// Revision 返回当前脚本集合的代际编号。
-//
-// 每次 Reload 都会递增，即使脚本内容没有变化也会产生新的代际，调用方
-// 可据此让依赖脚本集合的缓存立即失效。返回值与 scripts 快照来自同一次
-// 原子读取，因此不会把旧脚本与新代际拼在一起。
+/**
+ * Revision 返回当前脚本集合的代际编号。
+ *
+ * 每次 Reload 都会递增，即使脚本内容没有变化也会产生新的代际，调用方
+ * 可据此让依赖脚本集合的缓存立即失效。返回值与 scripts 快照来自同一次
+ * 原子读取，因此不会把旧脚本与新代际拼在一起。
+ */
 func (e *Engine) Revision() uint64 {
 	if e == nil {
 		return 0
@@ -112,9 +122,11 @@ func (e *Engine) Revision() uint64 {
 	return set.revision
 }
 
-// scriptsFor 返回指定阶段的脚本快照。
-//
-// 返回的 slice 属于已发布的不可变集合，调用方可安全遍历而无需持锁。
+/**
+ * scriptsFor 返回指定阶段的脚本快照。
+ *
+ * 返回的 slice 属于已发布的不可变集合，调用方可安全遍历而无需持锁。
+ */
 func (e *Engine) scriptsFor(stage Stage) []*Script {
 	set := e.scripts.Load()
 	if set == nil {
@@ -126,11 +138,13 @@ func (e *Engine) scriptsFor(stage Stage) []*Script {
 	return set.post
 }
 
-// HasScripts 报告指定阶段是否有脚本。
-//
-// 数据面据此跳过整个阶段。这是每请求都会走的判断，故直接取长度而不经
-// scriptsFor 返回 slice。零值 Engine（未经 NewEngine）此时 Load 得到 nil，
-// 报告无脚本而非 panic。
+/**
+ * HasScripts 报告指定阶段是否有脚本。
+ *
+ * 数据面据此跳过整个阶段。这是每请求都会走的判断，故直接取长度而不经
+ * scriptsFor 返回 slice。零值 Engine（未经 NewEngine）此时 Load 得到 nil，
+ * 报告无脚本而非 panic。
+ */
 func (e *Engine) HasScripts(stage Stage) bool {
 	if e == nil {
 		return false

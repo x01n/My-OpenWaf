@@ -152,7 +152,7 @@ func TestProcessRoutesCorrectly(t *testing.T) {
 		t.Fatal("JS should be processed")
 	}
 
-	// Other (not processed)
+	// 其他类型（不处理）
 	css, _ := p.Process("/style.css", "text/css", []byte(`body{color:red}`))
 	if !bytes.Equal(css, []byte(`body{color:red}`)) {
 		t.Fatal("CSS should not be processed")

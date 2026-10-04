@@ -23,8 +23,8 @@ type compoundPattern struct {
 	DurationSeconds int64             `json:"duration_seconds"`
 }
 
-// ValidatePattern performs syntax and semantic validation for a persisted rule
-// pattern. It accepts both simple DSL and JSON compound conditions.
+// ValidatePattern 对持久化的规则 pattern 做语法与语义校验。
+// 简单 DSL 与 JSON 复合条件都接受。
 func ValidatePattern(pattern string) (kind, arg string, errs []string) {
 	kind, arg = ParsePattern(pattern)
 	if kind == "" {

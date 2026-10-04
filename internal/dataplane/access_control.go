@@ -369,8 +369,10 @@ func enforceAccessControl(c *app.RequestContext, rt *snapshot.SiteRuntime, host 
 	return true
 }
 
-// renderAccessLoginPage 按当前快照的全局 Block 页 PageConfig 渲染访问控制登录页。
-// 与 WAF 拦截页同源，保证页模板自定义品牌覆盖访问门；无快照时回退默认配置。
+/**
+ * renderAccessLoginPage 按当前快照的全局 Block 页 PageConfig 渲染访问控制登录页。
+ * 与 WAF 拦截页同源，保证页模板自定义品牌覆盖访问门；无快照时回退默认配置。
+ */
 func renderAccessLoginPage(pageHost string, cfg accessgate.Config, sn *snapshot.Snapshot, errorMsg string) []byte {
 	pageCfg := pageconfig.DefaultPageConfig()
 	if sn != nil {

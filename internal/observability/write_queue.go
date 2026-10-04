@@ -11,15 +11,18 @@ import (
 	"gorm.io/gorm"
 )
 
-// WriteQueue is a generic async write queue for all database write operations.
-// It accepts write functions, merges high-frequency operations when possible,
-// and executes them in batch through a single goroutine to minimize DB lock contention.
-//
-// Key features:
-//   - Non-blocking submission: callers never block on DB writes.
-//   - Coalescing: multiple pending writes execute in a single transaction.
-//   - Priority support: urgent writes (e.g., auth changes) bypass the batch timer.
-//   - Graceful shutdown: all pending writes are flushed before Close returns.
+/**
+ * WriteQueue 是面向所有数据库写操作的通用异步写队列。
+ *
+ * 它接收写函数，在可能时合并高频操作，并通过单个 goroutine 批量执行，
+ * 把数据库锁竞争降到最低。
+ *
+ * 关键特性：
+ *   - 非阻塞提交：调用方从不在数据库写入上阻塞。
+ *   - 合并执行：多个待写任务在同一个事务里执行。
+ *   - 优先级支持：紧急写入（例如鉴权变更）绕过批次定时器。
+ *   - 优雅关闭：Close 返回前所有待写任务都已 flush。
+ */
 type WriteQueue struct {
 	db     *gorm.DB
 	ch     chan writeQueueJob
@@ -34,13 +37,12 @@ type WriteQueue struct {
 	closed    atomic.Bool
 	closeOnce sync.Once
 
-	// Tuning.
+	// 调优参数。
 	batchInterval time.Duration
 	maxBatchSize  int
 
-	// Runtime counters. Submit intentionally remains non-blocking for the
-	// request hot path, so every loss and fallback must be observable without
-	// changing the repository interface.
+	// 运行期计数器。Submit 为请求热路径刻意保持非阻塞，因此每一次丢失
+	// 与降级都必须可观测，且不能为此改动仓储接口。
 	submittedTotal         atomic.Int64
 	enqueuedTotal          atomic.Int64
 	droppedFullTotal       atomic.Int64
@@ -64,10 +66,12 @@ var ErrWriteQueueClosed = errors.New("write queue is closed")
 
 const writeQueueDropWarnInterval = 10 * time.Second
 
-// WriteQueueStats is a point-in-time diagnostic snapshot of the generic
-// asynchronous write queue. Counters distinguish queue pressure from shutdown
-// drops and database failures so operators can tell whether data was rejected
-// before execution or failed during persistence.
+/**
+ * WriteQueueStats 是通用异步写队列的时点诊断快照。
+ *
+ * 各类计数器把「队列压力」「关闭期丢弃」「数据库故障」区分开，
+ * 让运维能判断数据是在执行前被拒，还是在持久化过程中失败。
+ */
 type WriteQueueStats struct {
 	QueueLen               int   `json:"queue_len"`
 	QueueCapacity          int   `json:"queue_capacity"`
@@ -92,13 +96,13 @@ type WriteQueueStats struct {
 type writeQueueJob struct {
 	fn       func(tx *gorm.DB) error
 	priority bool
-	doneCh   chan error // optional: set when caller needs to wait for completion
+	doneCh   chan error // 可选：调用方需要等待完成时设置
 }
 
 // 队列容量 / 批大小的硬上限，与 internal/core/config.go QueueConfig 注释保持一致。
 // 超出后会被钳制，避免误调把内存吃光或单事务拉满驱动上限。
 const (
-	writeQueueMaxChannelCapacity = 1 << 20 // 1M
+	writeQueueMaxChannelCapacity = 1 << 20 // 1M 条
 	writeQueueMaxBatchSize       = 10000
 )
 
@@ -157,11 +161,15 @@ func clampWriteQueueOptions(opts WriteQueueOptions) (WriteQueueOptions, []string
 	return opts, warns
 }
 
-// NewWriteQueue creates an async write queue that batches DB operations.
-// All submitted write functions are executed sequentially through a single goroutine,
-// eliminating lock contention on SQLite and reducing transaction overhead on all engines.
-// 向后兼容包装：内部使用 DefaultWriteQueueOptions；新增可配置参数请改用
-// NewWriteQueueWithOptions。
+/**
+ * NewWriteQueue 创建按批执行数据库操作的异步写队列。
+ *
+ * 所有提交的写函数都由单个 goroutine 串行执行，消除 SQLite 上的锁竞争，
+ * 并降低所有引擎的事务开销。
+ *
+ * 这是向后兼容的包装：内部使用 DefaultWriteQueueOptions；需要新增可配置
+ * 参数请改用 NewWriteQueueWithOptions。
+ */
 func NewWriteQueue(db *gorm.DB, log *slog.Logger) *WriteQueue {
 	return NewWriteQueueWithOptions(db, log, DefaultWriteQueueOptions())
 }
@@ -189,8 +197,11 @@ func NewWriteQueueWithOptions(db *gorm.DB, log *slog.Logger, opt WriteQueueOptio
 	return wq
 }
 
-// Stats returns queue depth and cumulative write outcomes. Reading a snapshot
-// never touches the database and is safe while the queue goroutine is active.
+/**
+ * Stats 返回队列深度与累计写入结果。
+ *
+ * 读取快照不触碰数据库，在队列 goroutine 运行期间也可安全调用。
+ */
 func (wq *WriteQueue) Stats() WriteQueueStats {
 	if wq == nil {
 		return WriteQueueStats{}
@@ -217,9 +228,11 @@ func (wq *WriteQueue) Stats() WriteQueueStats {
 	}
 }
 
-// warnDrop emits at most one queue-pressure warning per interval. The counter
-// is still incremented for every dropped submission; rate limiting only
-// protects the logger from becoming a second source of overload.
+/**
+ * warnDrop 每个间隔最多打出一条队列压力告警。
+ *
+ * 计数器仍会对每次被丢弃的提交递增；限频只为防止日志本身变成第二个过载源。
+ */
 func (wq *WriteQueue) warnDrop(reason string, total int64) {
 	if wq == nil || wq.log == nil {
 		return
@@ -242,9 +255,12 @@ func (wq *WriteQueue) warnDrop(reason string, total int64) {
 	)
 }
 
-// invokeWriteJob converts a callback panic into an ordinary job error. A
-// malformed observability callback must not bring down the queue goroutine or
-// prevent later records from being persisted.
+/**
+ * invokeWriteJob 把回调 panic 转换为普通的任务错误。
+ *
+ * 一个写坏的可观测性回调绝不能让队列 goroutine 崩溃，也不能阻断后续
+ * 记录的持久化。
+ */
 func invokeWriteJob(fn func(tx *gorm.DB) error, tx *gorm.DB) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -254,9 +270,12 @@ func invokeWriteJob(fn func(tx *gorm.DB) error, tx *gorm.DB) (err error) {
 	return fn(tx)
 }
 
-// runWriteTransaction converts a database-driver panic into an error. The
-// queue is an observability path and must not take down the process when a
-// broken connection or test double panics during Begin/Commit.
+/**
+ * runWriteTransaction 把数据库驱动的 panic 转换为 error。
+ *
+ * 队列属于可观测性路径，当连接异常或测试替身在 Begin/Commit 期间 panic 时，
+ * 绝不能让整个进程倒下。
+ */
 func runWriteTransaction(db *gorm.DB, callback func(tx *gorm.DB) error) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -273,8 +292,11 @@ func (wq *WriteQueue) batchLimit() int {
 	return wq.maxBatchSize
 }
 
-// Submit enqueues an async write operation. Non-blocking: drops if queue is full.
-// The write function will be called with a *gorm.DB (possibly in a transaction).
+/**
+ * Submit 把一个异步写操作入队。非阻塞：队列满时直接丢弃。
+ *
+ * 写函数会以 *gorm.DB（可能处于事务中）为参数被调用。
+ */
 func (wq *WriteQueue) Submit(fn func(tx *gorm.DB) error) {
 	if wq == nil || fn == nil {
 		return
@@ -302,8 +324,11 @@ func (wq *WriteQueue) Submit(fn func(tx *gorm.DB) error) {
 	}
 }
 
-// SubmitWait enqueues a write and blocks until it completes. Returns the error from fn.
-// Use for operations where the caller needs confirmation (e.g., admin API mutations).
+/**
+ * SubmitWait 入队一个写操作并阻塞等待其完成，返回 fn 的错误。
+ *
+ * 用于调用方必须拿到确认的操作（例如 Admin API 的配置变更）。
+ */
 func (wq *WriteQueue) SubmitWait(fn func(tx *gorm.DB) error) error {
 	if wq == nil || fn == nil {
 		return ErrWriteQueueClosed
@@ -323,7 +348,7 @@ func (wq *WriteQueue) SubmitWait(fn func(tx *gorm.DB) error) error {
 		wq.submitMu.RUnlock()
 		return <-doneCh
 	default:
-		// Queue full — execute synchronously as fallback.
+		// 队列已满 —— 降级为同步执行。
 		wq.syncFallbackTotal.Add(1)
 		if wq.db == nil {
 			wq.failedJobsTotal.Add(1)
@@ -336,7 +361,7 @@ func (wq *WriteQueue) SubmitWait(fn func(tx *gorm.DB) error) error {
 	}
 }
 
-// SubmitPriority enqueues a high-priority write that triggers immediate flush.
+// SubmitPriority 入队一个高优先级写操作，触发立即 flush。
 func (wq *WriteQueue) SubmitPriority(fn func(tx *gorm.DB) error) error {
 	if wq == nil || fn == nil {
 		return ErrWriteQueueClosed
@@ -368,9 +393,12 @@ func (wq *WriteQueue) SubmitPriority(fn func(tx *gorm.DB) error) error {
 	}
 }
 
-// runSynchronously is used only by the wait/priority fallback when the queue
-// channel is full. It keeps the same outcome counters as the asynchronous path
-// while preserving the caller's requirement that the write result is known.
+/**
+ * runSynchronously 仅供队列通道已满时 wait/priority 的降级路径使用。
+ *
+ * 它与异步路径保持相同的结局计数器，同时满足调用方「必须知道写入结果」
+ * 的要求。
+ */
 func (wq *WriteQueue) runSynchronously(fn func(tx *gorm.DB) error) error {
 	if wq == nil || wq.db == nil {
 		if wq != nil {
@@ -394,7 +422,7 @@ func (wq *WriteQueue) runSynchronously(fn func(tx *gorm.DB) error) error {
 	return nil
 }
 
-// Close stops the queue after flushing all pending writes.
+// Close 先 flush 所有待写任务，再停止队列。
 func (wq *WriteQueue) Close() {
 	if wq == nil {
 		return
@@ -425,14 +453,14 @@ func (wq *WriteQueue) loop() {
 		select {
 		case job := <-wq.ch:
 			pending = append(pending, job)
-			// If priority or batch full, flush immediately.
+			// 优先级任务或批次已满时，立即 flush。
 			if job.priority || len(pending) >= batchLimit {
 				wq.flushBatch(pending)
 				pending = pending[:0]
 			}
 
 		case <-ticker.C:
-			// Drain additional pending jobs.
+			// 继续排空额外待处理任务。
 			draining := true
 			for draining && len(pending) < batchLimit {
 				select {
@@ -448,9 +476,8 @@ func (wq *WriteQueue) loop() {
 			}
 
 		case <-wq.stopCh:
-			// Drain all remaining jobs in bounded batches. A configured channel can
-			// hold up to one million jobs; one giant transaction would create a
-			// long SQLite lock and an avoidable memory spike during shutdown.
+			// 以有界批次排空所有剩余任务。配置的通道最多可容纳一百万条任务，
+			// 单个巨型事务会在关闭期间造成 SQLite 长时间持锁与可避免的内存尖峰。
 			for {
 				for len(pending) < batchLimit {
 					select {
@@ -471,8 +498,11 @@ func (wq *WriteQueue) loop() {
 	}
 }
 
-// flushBatch executes all pending write jobs in a single DB transaction.
-// For high-frequency identical operations, this effectively merges them.
+/**
+ * flushBatch 在单个数据库事务里执行所有待写任务。
+ *
+ * 对高频的同构操作，这实际上起到了合并写入的效果。
+ */
 func (wq *WriteQueue) flushBatch(jobs []writeQueueJob) {
 	if len(jobs) == 0 {
 		return
@@ -503,11 +533,9 @@ func (wq *WriteQueue) flushBatch(jobs []writeQueueJob) {
 
 	jobErrs := make([]error, len(jobs))
 	executed := 0
-	// Execute all jobs in a single transaction. Each callback gets a SAVEPOINT
-	// so one malformed log cannot poison the transaction for later records. We
-	// deliberately do not retry callbacks: the generic function has no
-	// idempotency contract, and retrying could duplicate writes after an
-	// ambiguous commit.
+	// 在单个事务里执行全部任务。每个回调都拿到一个 SAVEPOINT，
+	// 这样一条写坏的日志不会污染整个事务、连累后续记录。这里刻意不重试
+	// 回调：通用函数没有幂等契约，提交结果不明时重试可能造成重复写入。
 	err := runWriteTransaction(wq.db, func(tx *gorm.DB) error {
 		for i := range jobs {
 			name := fmt.Sprintf("wq_job_%d", i)
@@ -541,8 +569,8 @@ func (wq *WriteQueue) flushBatch(jobs []writeQueueJob) {
 		if wq.log != nil {
 			wq.log.Error("write queue transaction failed", slog.Any("err", err), slog.Int("jobs", len(jobs)))
 		}
-		// A transaction-level error means none of the jobs can be considered
-		// durable, including callbacks that returned nil before commit.
+		// 事务级错误意味着所有任务都不能算作已持久化，包括
+		// 在提交前返回 nil 的回调。
 		for i := range jobs {
 			if jobs[i].doneCh != nil {
 				jobs[i].doneCh <- fmt.Errorf("write queue transaction failed: %w", err)

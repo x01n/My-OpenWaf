@@ -9,7 +9,7 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// Compiled is a runtime-ready rule with a pre-built matcher.
+// Compiled 是运行时可直接使用的规则，已预构建匹配器。
 type Compiled struct {
 	ID          uint
 	Phase       string
@@ -17,9 +17,9 @@ type Compiled struct {
 	Priority    int
 	Kind        string
 	Arg         string
-	StatusCode  int    // custom HTTP status code (0 = default)
-	RedirectTo  string // URL for redirect action
-	CaptchaType string // Rule-level CAPTCHA type; empty inherits global protection config.
+	StatusCode  int    // 自定义 HTTP 状态码（0 表示用默认值）
+	RedirectTo  string // redirect 动作的目标 URL
+	CaptchaType string // 规则级验证码类型；为空则继承全局防护配置
 	// CaptchaMinutes 是规则级验证码通过有效期（分钟）；0 继承全局 captcha_pass_ttl。
 	CaptchaMinutes int
 	matcher        Matcher
@@ -28,7 +28,7 @@ type Compiled struct {
 	matchDesc      string
 }
 
-// Match delegates to the pre-built matcher.
+// Match 委托给预构建的匹配器。
 func (c *Compiled) Match(ctx MatchCtx) bool {
 	if c.matcher != nil {
 		return c.matcher.Match(ctx)
@@ -36,7 +36,7 @@ func (c *Compiled) Match(ctx MatchCtx) bool {
 	return false
 }
 
-// Compile converts persisted Rule models into sorted, matcher-ready Compiled slices.
+// Compile 把持久化的 Rule 模型转换为排序后、匹配器就绪的 Compiled 切片。
 func Compile(rs []store.Rule) []Compiled {
 	var out []Compiled
 	for _, r := range rs {
@@ -114,8 +114,8 @@ func ensureCompiledMetadata(rules []Compiled) []Compiled {
 	return out
 }
 
-// knownPrefixes maps known rule-kind prefixes (without trailing colon) to
-// themselves. Built once at init from the canonical list.
+// knownPrefixes 把已知的规则 kind 前缀（不含尾部冒号）映射到自身。
+// 在 init 时依据这份规范列表构建一次。
 var knownPrefixes = func() map[string]struct{} {
 	kinds := []string{
 		"allow_ip", "block_ip", "geo_block",
@@ -141,20 +141,19 @@ var knownPrefixes = func() map[string]struct{} {
 	return m
 }()
 
-// ParsePattern extracts kind and arg from a DSL string like "block_ip:1.2.3.0/24".
-// Supports both simple patterns and JSON compound conditions.
+// ParsePattern 从 "block_ip:1.2.3.0/24" 这类 DSL 串中提取 kind 与 arg。
+// 简单模式与 JSON 复合条件都支持。
 func ParsePattern(p string) (kind, arg string) {
-	// Leading whitespace is formatting around the expression. For wildcard
-	// matchers, whitespace after the first colon is part of the pattern and
-	// must not be discarded.
+	// 前导空白属于表达式外围的排版。对通配符匹配器而言，首个冒号之后的
+	// 空白是模式的一部分，不得丢弃。
 	trimmed := strings.TrimLeftFunc(p, unicode.IsSpace)
 
-	// JSON compound condition: {"op":"and","children":[...]}
+	// JSON 复合条件：{"op":"and","children":[...]}
 	if len(trimmed) > 0 && trimmed[0] == '{' {
 		return "compound", strings.TrimSpace(trimmed)
 	}
 
-	// Find the first colon and check if the prefix is a known kind.
+	// 找到第一个冒号，判断前缀是否为已知 kind。
 	idx := strings.IndexByte(trimmed, ':')
 	if idx <= 0 {
 		return "", ""

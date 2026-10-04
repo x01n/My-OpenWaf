@@ -373,7 +373,7 @@ func (cm *CaptchaManager) VerifyAdvanced(sessionID, answer string) bool {
 	return cm.VerifyAdvancedWithBinding(sessionID, answer, ChallengeSessionBinding{})
 }
 
-// VerifyAdvancedWithBinding verifies a CAPTCHA response for the matched site.
+// VerifyAdvancedWithBinding 校验匹配站点的高级验证码应答。
 func (cm *CaptchaManager) VerifyAdvancedWithBinding(sessionID, answer string, binding ChallengeSessionBinding) bool {
 	ok, _ := cm.VerifyAdvancedSessionWithBinding(sessionID, answer, binding)
 	return ok

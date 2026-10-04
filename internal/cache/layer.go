@@ -1,10 +1,10 @@
-// Package cache provides process-local caching for immutable config snapshots.
+// Package cache 提供进程内的配置快照缓存。
 //
-// Design:
-//   - Snapshot cache: purely in-process (ristretto). The Snapshot struct is an in-memory
-//     object held via atomic.Pointer — serializing it to Redis would be wasteful.
-//   - Distributed KV cache: see RedisKV for cross-node shared state (rate limit counters,
-//     API response caching, etc.).
+// 设计：
+//   - 快照缓存：纯进程内实现（ristretto）。Snapshot 结构体是通过
+//     atomic.Pointer 持有的内存对象，把它序列化到 Redis 纯属浪费。
+//   - 分布式 KV 缓存：跨节点共享状态（限流计数器、API 响应缓存等）
+//     见 RedisKV。
 package cache
 
 import (
@@ -15,14 +15,17 @@ import (
 	"My-OpenWaf/internal/snapshot"
 )
 
-// Layer is the process-local snapshot cache backed by ristretto.
-// Each WAF node holds its own copy; cross-node sync is handled by Redis pub/sub
-// (config_sync) which triggers a DB reload, not by sharing cached snapshots.
+/**
+ * Layer 是以 ristretto 为底层的进程内快照缓存。
+ *
+ * 每个 WAF 节点各持一份副本；跨节点同步走 Redis pub/sub（config_sync）
+ * 触发数据库重载，而不是共享缓存中的快照。
+ */
 type Layer struct {
 	inner *ristretto.Cache
 }
 
-// NewLayer creates a local snapshot cache.
+// NewLayer 创建本地快照缓存。
 func NewLayer() (*Layer, error) {
 	c, err := ristretto.NewCache(&ristretto.Config{
 		NumCounters: 1e4,
@@ -37,7 +40,7 @@ func NewLayer() (*Layer, error) {
 
 const snapKey = "snapshot"
 
-// SetSnapshot caches the immutable snapshot under the given revision.
+// SetSnapshot 按给定版本号缓存不可变快照。
 func (l *Layer) SetSnapshot(rev uint64, sn *snapshot.Snapshot) {
 	if sn == nil || sn.Revision != rev {
 		return
@@ -47,7 +50,7 @@ func (l *Layer) SetSnapshot(rev uint64, sn *snapshot.Snapshot) {
 	l.inner.Wait()
 }
 
-// GetSnapshot retrieves a cached snapshot by revision. Returns nil on miss.
+// GetSnapshot 按版本号取出缓存的快照；未命中返回 nil。
 func (l *Layer) GetSnapshot(rev uint64) (*snapshot.Snapshot, bool) {
 	k := fmt.Sprintf("%s:%d", snapKey, rev)
 	v, ok := l.inner.Get(k)
@@ -58,7 +61,7 @@ func (l *Layer) GetSnapshot(rev uint64) (*snapshot.Snapshot, bool) {
 	return sn, sn != nil
 }
 
-// InvalidateAll clears the entire local cache.
+// InvalidateAll 清空整个本地缓存。
 func (l *Layer) InvalidateAll() {
 	if l == nil || l.inner == nil {
 		return

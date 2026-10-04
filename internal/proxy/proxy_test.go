@@ -1374,9 +1374,8 @@ func TestFetchHTTPDecodesCompressedBufferedResponse(t *testing.T) {
 }
 
 func TestFetchHTTPForAppRouteCaptureLimitsDecodedBodyAndKeepsRemainder(t *testing.T) {
-	// Highly compressible body so the compressed payload stays small while the
-	// decoded body exceeds the dynamic transform buffer. The capture path must
-	// stop at the limit instead of ReadAll'ing the full decoded stream.
+	// 响应体高度可压缩，压缩后 payload 很小，解码后的响应体却超过动态变换
+	// 缓冲上限。捕获路径必须在上限处停下，而不是把整条解码流 ReadAll 到底。
 	decoded := append(bytes.Repeat([]byte("z"), maxStreamTransformBufferBytes+4096), []byte("capture-tail-sentinel")...)
 	encoded := mustGzipBytes(t, decoded)
 	if len(encoded) >= maxStreamTransformBufferBytes {

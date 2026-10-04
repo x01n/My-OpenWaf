@@ -9,7 +9,7 @@ import (
 // subDetectorNeedleEntry 定义一条子检测器 gate 的 needle 组。
 type subDetectorNeedleEntry struct {
 	cveID   string
-	target  string // "url","body","url_body","header","cookie","all"
+	target  string // 取值："url"、"body"、"url_body"、"header"、"cookie"、"all"
 	needles []string
 }
 

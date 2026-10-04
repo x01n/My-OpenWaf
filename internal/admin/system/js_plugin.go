@@ -32,7 +32,7 @@ var errJSRuntimeUnavailable = errors.New(jsRuntimeUnavailableMessage)
 // 该分支不满足时 Compile/Evaluate 一律返回 jsplugin.ErrCGODisabled。
 const jsQuickJSDisabledMessage = "javascript runtime is not enabled in this build (requires build tag quickjs with cgo)"
 
-// jsPluginRequest describes create and partial-update fields for an edge script.
+// jsPluginRequest 描述边缘脚本的创建与部分更新字段。
 type jsPluginRequest struct {
 	Name        string          `json:"name"`
 	Source      string          `json:"source"`
@@ -72,7 +72,7 @@ type jsPluginRuntimeStatus struct {
 	ResponseSupported bool   `json:"response_supported"`
 }
 
-// ListJSPlugins returns all configured JavaScript edge scripts.
+// ListJSPlugins 返回全部已配置的 JavaScript 边缘脚本。
 // jsPluginItemResponse 是管理端 JS 插件的最终响应结构，附带当前 snapshot 的构建诊断。
 type jsPluginItemResponse struct {
 	ID           uint      `json:"id"`
@@ -118,7 +118,7 @@ func currentJSPluginSnapshot(holder *snapshotpkg.Holder) *snapshotpkg.Snapshot {
 	return holder.Load()
 }
 
-// validateEnabledJSPlugin performs the same compile and fetch execution used by the data plane.
+// validateEnabledJSPlugin 执行与数据面相同的编译与抓取执行流程。
 func validateEnabledJSPlugin(ctx context.Context, item *store.JSPlugin, loadEngine func() *jsplugin.Engine) error {
 	if item == nil || !item.Enabled {
 		return nil
@@ -190,7 +190,7 @@ func ListJSPlugins(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder) ap
 	}
 }
 
-// GetJSPlugin returns one configured JavaScript edge script.
+// GetJSPlugin 返回单个已配置的 JavaScript 边缘脚本。
 func GetJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
@@ -211,7 +211,7 @@ func GetJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder) app.
 	}
 }
 
-// CreateJSPlugin creates an edge script and reloads the immutable configuration.
+// CreateJSPlugin 创建边缘脚本并重载不可变配置。
 func CreateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, reload func() error, loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var loadEngine func() *jsplugin.Engine
@@ -248,7 +248,7 @@ func CreateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, r
 	}
 }
 
-// UpdateJSPlugin updates only fields present in the request body.
+// UpdateJSPlugin 只更新请求体中出现的字段。
 func UpdateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, reload func() error, loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var loadEngine func() *jsplugin.Engine
@@ -293,7 +293,7 @@ func UpdateJSPlugin(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, r
 	}
 }
 
-// DeleteJSPlugin deletes an edge script and reloads the configuration.
+// DeleteJSPlugin 删除边缘脚本并重载配置。
 func DeleteJSPlugin(repo *repository.JSPluginRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
@@ -317,7 +317,7 @@ func DeleteJSPlugin(repo *repository.JSPluginRepo, reload func() error) app.Hand
 	}
 }
 
-// ToggleJSPlugin explicitly sets enabled or flips the current state.
+// ToggleJSPlugin 显式设置启用状态，或翻转当前状态。
 func ToggleJSPlugin(repo *repository.JSPluginRepo, reload func() error, loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var loadEngine func() *jsplugin.Engine
@@ -366,7 +366,7 @@ func ToggleJSPlugin(repo *repository.JSPluginRepo, reload func() error, loadEngi
 	}
 }
 
-// ValidateJSPlugin compiles and executes the source against the canonical request snapshot.
+// ValidateJSPlugin 针对规范化请求快照编译并执行脚本源码。
 func ValidateJSPlugin(loadEngines ...func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var loadEngine func() *jsplugin.Engine
@@ -603,7 +603,7 @@ func buildJSDryRunResponseSnapshot(sample map[string]any) jsplugin.ResponseSnaps
 	return snapshot
 }
 
-// GetJSPluginRuntime returns the exact executable backend and current snapshot state.
+// GetJSPluginRuntime 返回实际生效的执行后端与当前快照状态。
 func GetJSPluginRuntime(repo *repository.JSPluginRepo, holder *snapshotpkg.Holder, loadEngine func() *jsplugin.Engine) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		enabled, err := repo.ListEnabled()

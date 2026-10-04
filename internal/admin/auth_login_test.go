@@ -235,7 +235,7 @@ func TestLoginSuccessUnlocksAccountButKeepsIPCounter(t *testing.T) {
 	}
 }
 
-// ---- RefreshHandler ----
+// RefreshHandler
 
 func TestRefreshRejectsMissingCookie(t *testing.T) {
 	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
@@ -440,7 +440,7 @@ func TestRefreshRejectsDeletedAccount(t *testing.T) {
 	}
 }
 
-// TestRefreshKeepsSessionWhenRefreshStoreUnavailable verifies transient storage errors do not become credential expiry.
+// TestRefreshKeepsSessionWhenRefreshStoreUnavailable 验证短暂的存储错误不会被当成凭据过期。
 func TestRefreshKeepsSessionWhenRefreshStoreUnavailable(t *testing.T) {
 	d := newAuthDepsForTest(t, "alice", "password123", auth.RoleAdmin)
 	sqlDB, err := d.DB.DB()
@@ -524,7 +524,7 @@ func TestRefreshRoundTripAfterRotation(t *testing.T) {
 	}
 }
 
-// refreshCookieValue extracts the raw wire value of my_openwaf_rt from a Set-Cookie header.
+// refreshCookieValue 从 Set-Cookie 头中取出 my_openwaf_rt 的原始线上取值。
 func refreshCookieValue(t *testing.T, setCookie string) string {
 	t.Helper()
 	const prefix = "my_openwaf_rt="

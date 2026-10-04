@@ -20,7 +20,7 @@ import (
 type publicGeoIPEntry struct {
 	Filename string // 落地文件名，唯一标识
 	URL      string // 固定下载地址
-	Kind     string // city / asn / country
+	Kind     string // 取值：city / asn / country
 	Sha256   string // 实抓样本 sha256 hex，逐字节校验
 	Size     int64  // 实抓样本字节数
 }
@@ -102,7 +102,7 @@ type geoIPEntrySpec struct {
 	Filename string // 候选 Filename
 	URL      string
 	Kind     string
-	Status   string // Kept / Tainted / Fetched / Failed / Skipped
+	Status   string // 取值：Kept / Tainted / Fetched / Failed / Skipped
 	Reason   string // Status 的具体原因
 }
 

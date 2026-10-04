@@ -15,10 +15,12 @@ type InboundProtocolGuard struct {
 	conn     any    // 请求处理开始时捕获的连接(h1 为 *fixURIHertzConn/TlsConn)
 }
 
-// NewInboundProtocolGuard 在 handler 入口捕获协议与连接。构造零反射:
-// 6 层包裹解包(rawTCPConnForRST)由 CloseForDrop 在执行 RST 的瞬间按需做
-// 一次——绝大多数请求不会触发 drop,热路径不再为每个安全判定付反射成本
-// (r7.45 性能修正,此前的 hasRaw 构造期缓存已被移除)。
+/**
+ * NewInboundProtocolGuard 在 handler 入口捕获协议与连接。构造零反射:
+ * 6 层包裹解包(rawTCPConnForRST)由 CloseForDrop 在执行 RST 的瞬间按需做
+ * 一次——绝大多数请求不会触发 drop,热路径不再为每个安全判定付反射成本
+ * (r7.45 性能修正,此前的 hasRaw 构造期缓存已被移除)。
+ */
 func NewInboundProtocolGuard(c *app.RequestContext) *InboundProtocolGuard {
 	if c == nil {
 		return &InboundProtocolGuard{}
@@ -33,8 +35,10 @@ func NewInboundProtocolGuard(c *app.RequestContext) *InboundProtocolGuard {
 	}
 }
 
-// ProtocolName returns the normalized inbound protocol captured at handler
-// entry; empty means unknown or a nil context.
+/**
+ * ProtocolName 返回 handler 入口处捕获并归一化后的入站协议；
+ * 返回空串表示协议未知或上下文为 nil。
+ */
 func (g *InboundProtocolGuard) ProtocolName() string {
 	if g == nil {
 		return ""
@@ -71,12 +75,14 @@ func (g *InboundProtocolGuard) CloseForDrop() bool {
 	return true
 }
 
-// Execute 执行带统计的 TCP drop：
-//   - guard 为惰性构建：通用 drop 判定（bot/IP 声誉等非检测相位）不构建 guard
-//     （nil），此时直接走 executor 的 nil-conn 路径，等价于旧版无条件
-//     conn.Close 分支的空操作——语义无损且省去 6 层反射；
-//   - guard 非 nil（OWASP/CVE 检测相位）时执行真实 CloseForDrop 并判定
-//     是否成功（含多路复用/未知协议回落）。
+/**
+ * Execute 执行带统计的 TCP drop：
+ *   - guard 为惰性构建：通用 drop 判定（bot/IP 声誉等非检测相位）不构建 guard
+ *     （nil），此时直接走 executor 的 nil-conn 路径，等价于旧版无条件
+ *     conn.Close 分支的空操作——语义无损且省去 6 层反射；
+ *   - guard 非 nil（OWASP/CVE 检测相位）时执行真实 CloseForDrop 并判定
+ *     是否成功（含多路复用/未知协议回落）。
+ */
 func (g *InboundProtocolGuard) Execute(executor *drop.DropExecutor, reason drop.DropReason) bool {
 	if g == nil {
 		if executor != nil {
@@ -98,8 +104,10 @@ func RawTCPConnForRST(conn any) net.Conn {
 	return rawTCPConnForRST(conn)
 }
 
-// RawTCPConn returns the resolved TCP base connection, or nil. Tests use it
-// to assert identity against the loopback listener's conn.
+/**
+ * RawTCPConn 返回解包后的 TCP 基础连接，没有则返回 nil。
+ * 测试用它来对回环监听器的连接做同一性断言。
+ */
 func (g *InboundProtocolGuard) RawTCPConn() net.Conn {
 	if g == nil {
 		return nil

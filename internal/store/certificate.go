@@ -15,7 +15,7 @@ const CertSourceACME = "acme"
 // CertSourceSelfSigned 自签证书。
 const CertSourceSelfSigned = "self_signed"
 
-// Certificate stores a TLS certificate + private key pair used by site listeners.
+// Certificate 存储站点监听器使用的一对 TLS 证书与私钥。
 type Certificate struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -25,7 +25,7 @@ type Certificate struct {
 	Name    string `gorm:"size:128;not null" json:"name"`
 	CertPEM string `gorm:"type:text;not null" json:"cert_pem"`
 	KeyPEM  string `gorm:"type:text;not null" json:"key_pem"`
-	// OCSPStaplePEM stores an optional OCSP response in PEM or raw DER form.
+	// OCSPStaplePEM 以 PEM 或原始 DER 形式存放可选的 OCSP 响应。
 	OCSPStaplePEM string `gorm:"type:text" json:"ocsp_staple_pem,omitempty"`
 
 	// ACME 相关字段

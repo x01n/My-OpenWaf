@@ -2,7 +2,7 @@ package action
 
 import "testing"
 
-// ---- Normalize ----
+// Normalize 用例
 
 func TestNormalizeLegacyBlock(t *testing.T) {
 	if got := Normalize(Block); got != Intercept {
@@ -38,7 +38,7 @@ func TestNormalizeEmptyString(t *testing.T) {
 	}
 }
 
-// ---- IsValid ----
+// IsValid 用例
 
 func TestIsValidCanonicalActionsTrue(t *testing.T) {
 	valid := []Type{Allow, Intercept, Observe, Drop, Challenge, Redirect, RateLimit, Tag,
@@ -62,7 +62,7 @@ func TestIsValidUnknownActionFalse(t *testing.T) {
 	}
 }
 
-// ---- TerminalPriority ----
+// TerminalPriority 用例
 
 func TestTerminalPriorityOrdering(t *testing.T) {
 	cases := []struct {
@@ -99,7 +99,7 @@ func TestTerminalPriorityUnknownIsZero(t *testing.T) {
 	}
 }
 
-// ---- MoreSevere ----
+// MoreSevere 用例
 
 func TestMoreSevereDropBeatsIntercept(t *testing.T) {
 	if !MoreSevere(Drop, Intercept) {
@@ -116,7 +116,7 @@ func TestMoreSevereSameActionFalse(t *testing.T) {
 	}
 }
 
-// ---- Result.IsTerminal ----
+// Result.IsTerminal 用例
 
 func TestIsTerminalFalseWhenNotMatched(t *testing.T) {
 	r := Result{Type: Intercept, Matched: false}
@@ -142,7 +142,7 @@ func TestIsTerminalFalseForObserve(t *testing.T) {
 	}
 }
 
-// ---- Result.IsDrop ----
+// Result.IsDrop 用例
 
 func TestIsDropTrueForDrop(t *testing.T) {
 	r := Result{Type: Drop, Matched: true}
@@ -158,7 +158,7 @@ func TestIsDropFalseForIntercept(t *testing.T) {
 	}
 }
 
-// ---- Result.IsChallenge ----
+// Result.IsChallenge 用例
 
 func TestIsChallengeCoversAllChallengeTypes(t *testing.T) {
 	challenges := []Type{Challenge, CaptchaChallenge, ShieldChallenge, ChainChallenge}
@@ -195,7 +195,7 @@ func TestIsChallengeSpecificTypes(t *testing.T) {
 	}
 }
 
-// ---- Result.IsRedirect / IsRateLimit ----
+// Result.IsRedirect / IsRateLimit 用例
 
 func TestIsRedirectAndIsRateLimit(t *testing.T) {
 	if r := (Result{Type: Redirect, Matched: true}); !r.IsRedirect() {
@@ -206,7 +206,7 @@ func TestIsRedirectAndIsRateLimit(t *testing.T) {
 	}
 }
 
-// ---- Result.ShouldLog ----
+// Result.ShouldLog 用例
 
 func TestShouldLogFalseWhenNotMatched(t *testing.T) {
 	r := Result{Type: Intercept, Matched: false}
@@ -232,7 +232,7 @@ func TestShouldLogFalseForAllow(t *testing.T) {
 	}
 }
 
-// ---- EffectiveStatusCode / DefaultStatusCode / ResponseStatusCode ----
+// EffectiveStatusCode / DefaultStatusCode / ResponseStatusCode 用例
 
 func TestEffectiveStatusCodeFallsBackToDefault(t *testing.T) {
 	r := Result{Type: Intercept, Matched: true}
@@ -277,7 +277,7 @@ func TestResponseStatusCodeUsesCustomWhenSet(t *testing.T) {
 	}
 }
 
-// ---- Pass ----
+// Pass 用例
 
 func TestPassReturnsAllowUnmatched(t *testing.T) {
 	p := Pass()
@@ -292,7 +292,7 @@ func TestPassReturnsAllowUnmatched(t *testing.T) {
 	}
 }
 
-// ---- InternalCode / InternalCodeDesc ----
+// InternalCode / InternalCodeDesc 用例
 
 func TestInternalCodeTable(t *testing.T) {
 	cases := []struct {

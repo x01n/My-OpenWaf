@@ -8,13 +8,15 @@ import (
 	"strings"
 )
 
-// Assemble 把带标签的指令序列汇编成完整程序容器（头部 + 字节码）。
-//
-// 标签以 `Label` 指令在指令流中声明，跳转指令的 Target 引用标签名。
-// 标签可以前向引用（跳转目标在声明之前）。
-//
-// 任何编码错误（未知 opcode、寄存器越界、标签未定义/重复、指令被截断）
-// 都返回 error，不会产出部分结果。
+/**
+ * Assemble 把带标签的指令序列汇编成完整程序容器（头部 + 字节码）。
+ *
+ * 标签以 `Label` 指令在指令流中声明，跳转指令的 Target 引用标签名。
+ * 标签可以前向引用（跳转目标在声明之前）。
+ *
+ * 任何编码错误（未知 opcode、寄存器越界、标签未定义/重复、指令被截断）
+ * 都返回 error，不会产出部分结果。
+ */
 func Assemble(layout Layout, prog []Instr) ([]byte, error) {
 	if err := validateLayout(layout); err != nil {
 		return nil, err
@@ -171,9 +173,11 @@ func encodeInstr(in Instr, pc int, labels map[string]int) ([]byte, error) {
 	return nil, fmt.Errorf("unhandled format")
 }
 
-// resolveRel 把一个跳转指令解析成相对下一条指令的 32 位有符号偏移。
-//
-// 目标是标签时用标签偏移；否则用 Imm 里已经算好的相对值（允许内联偏移）。
+/**
+ * resolveRel 把一个跳转指令解析成相对下一条指令的 32 位有符号偏移。
+ *
+ * 目标是标签时用标签偏移；否则用 Imm 里已经算好的相对值（允许内联偏移）。
+ */
 func resolveRel(in Instr, pc int, labels map[string]int) (int32, error) {
 	next := pc + 5
 	var target int64
@@ -216,20 +220,24 @@ func Hex(program []byte) string {
 	return hex.EncodeToString(program)
 }
 
-// BuildRaw 用**未经汇编器编码**的字节码构造容器。
-//
-// 这是给校验器/反汇编器测试用的入口：反向用例必须能构造出「汇编器自己
-// 会拒绝」的字节码（保留 opcode、越界偏移、非法跳转），否则永远测不到
-// 校验器的拒绝路径。生产调用链（pow.go）不使用本函数。
+/**
+ * BuildRaw 用**未经汇编器编码**的字节码构造容器。
+ *
+ * 这是给校验器/反汇编器测试用的入口：反向用例必须能构造出「汇编器自己
+ * 会拒绝」的字节码（保留 opcode、越界偏移、非法跳转），否则永远测不到
+ * 校验器的拒绝路径。生产调用链（pow.go）不使用本函数。
+ */
 func BuildRaw(layout Layout, code []byte) []byte {
 	return buildContainer(layout, code)
 }
 
-// CodeOffsets 返回字节码段里每条指令的**起始字节偏移**（相对字节码段）。
-//
-// 用途：变异测试需要知道哪些字节是 opcode、哪些是操作数 —— 把操作数当成
-// opcode 去断言「必须被拒绝」会写出假的反向锁。返回的偏移由真实解码过程
-// 得到，与解释器的取指边界一致。
+/**
+ * CodeOffsets 返回字节码段里每条指令的**起始字节偏移**（相对字节码段）。
+ *
+ * 用途：变异测试需要知道哪些字节是 opcode、哪些是操作数 —— 把操作数当成
+ * opcode 去断言「必须被拒绝」会写出假的反向锁。返回的偏移由真实解码过程
+ * 得到，与解释器的取指边界一致。
+ */
 func CodeOffsets(program []byte) ([]int, error) {
 	dec, _, err := decodeContainer(program)
 	if err != nil {

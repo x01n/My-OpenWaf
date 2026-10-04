@@ -9,9 +9,8 @@ import (
 
 const siteAntiReplayInheritanceMigrationKey = "migration_v11_site_antireplay_inheritance"
 
-// V11MigrateSiteAntiReplayInheritance converts the historical false value into
-// the nullable inheritance marker. The marker preserves explicit false overrides
-// created after this migration.
+// V11MigrateSiteAntiReplayInheritance 把历史上的 false 取值转换为可空的继承标记。
+// 该标记能让本次迁移之后创建的显式 false 覆盖得以保留。
 func V11MigrateSiteAntiReplayInheritance(db *gorm.DB) error {
 	if !db.Migrator().HasTable(&siteAntiReplayInheritanceTable{}) ||
 		!db.Migrator().HasTable(&migrationSystemSetting{}) ||

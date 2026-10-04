@@ -37,7 +37,7 @@ const (
 
 const BuiltinVersion = "builtin_owasp_v2"
 
-// maxTargetLen bounds the length of each scan target to limit regex execution time.
+// maxTargetLen 限制单个扫描目标的长度，以约束正则执行时间。
 const maxTargetLen = 16384
 
 var asciiLowerTable = func() [256]byte {
@@ -128,9 +128,9 @@ func CompileThresholds(sensitivity string, categorySensitivity ...map[string]str
 	}
 }
 
-// CheckOWASP scans request fields for OWASP-oriented attacks.
-// bodyTargets are pre-extracted values from the request body (form values, JSON leaves).
-// The path parameter is also used for context: internal API paths get reduced scanning.
+// CheckOWASP 扫描请求各字段，检测 OWASP 相关攻击。
+// bodyTargets 是从请求体预提取的值（表单值、JSON 叶子节点）。
+// path 参数同时用于上下文判断：内部 API 路径会降低扫描强度。
 func CheckOWASP(sensitivity string, path, query string, headers map[string]string, bodyTargets []string, categorySensitivity ...map[string]string) []OWASPHit {
 	return CheckOWASPWithThresholds(CompileThresholds(sensitivity, categorySensitivity...), path, query, headers, bodyTargets)
 }
@@ -221,9 +221,9 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		return h
 	}
 
-	// Path-aware body-scan suppression: known telemetry/API endpoints that produce
-	// false positives from binary/base64-decoded body content should skip certain
-	// body-level detection categories. The path+query are still scanned normally.
+	// 路径感知的请求体扫描抑制：已知的遥测/API 端点上，二进制或 base64 解码后的
+	// 请求体内容容易产生误报，这些路径应跳过特定的请求体级检测类别。
+	// path 与 query 仍照常扫描。
 	skipBodyCmd := false
 	skipBodyWebshell := false
 	skipBodySSRF := false
@@ -267,9 +267,8 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		}
 	}
 
-	// proto check on body targets is merged into the main loop below
-	// (after normalizeWithDecode is computed once per target) to avoid
-	// running it twice per request.
+	// 请求体目标的 proto 检测并入下方主循环（normalizeWithDecode 每目标只算一次），
+	// 避免每请求重复执行两次。
 
 	var stopHit OWASPHit
 	hasStop := false
@@ -310,8 +309,8 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		}
 		snippetRaw, snippetNorm, snippetDecoded = raw, normalized, raw
 
-		// Opaque-encoded attack body detection only applies to body targets.
-		// Folded into the main loop so we don't recompute normalizeWithDecode.
+		// 不透明编码攻击体的检测只作用于请求体目标。
+		// 并入主循环，避免重复计算 normalizeWithDecode。
 		if protoEnabled && isBodyTarget {
 			if isOpaqueEncodedAttackBody(raw, normalized, headers, protoThreshold) {
 				hit := OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:010", Score: 5, Desc: "无 content-type 的不透明编码请求体"}
@@ -532,8 +531,8 @@ func firstOWASPHitWithThresholds(thresholds CompiledThresholds, path, query stri
 		return stopHit, true, nil
 	}
 
-	// Second pass: deep base64-in-unicode-escape scan only materializes the
-	// subset that can reach this path, keeping the clean request path allocation-free.
+	// 第二遍：unicode 转义内嵌 base64 的深度扫描只为能走到该路径的目标分配内存，
+	// 使干净请求路径保持零分配。
 	var deepHit OWASPHit
 	hasDeep := false
 	for _, target := range unicodeBase64Targets {
@@ -654,15 +653,15 @@ func shouldScanUnicodeBase64Target(raw string) bool {
 	return false
 }
 
-// CheckFileUpload inspects filename/content-type for dangerous uploads.
-// Called separately because it needs the raw filename, not normalized.
+// CheckFileUpload 检查文件名与 Content-Type 是否构成危险上传。
+// 单独调用：它需要原始文件名而非归一化后的值。
 func CheckFileUpload(filename, contentType string) (OWASPHit, bool) {
 	return checkFileUpload(filename, contentType)
 }
 
-// CheckRawMultipartFilenames scans raw multipart body for dangerous filenames
-// that Go's mime/multipart parser may miss (path traversal, space-extension bypass).
-// This is a fallback for cases where multipart.Reader strips paths or fails to parse.
+// CheckRawMultipartFilenames 扫描原始 multipart 请求体中的危险文件名，
+// 这些文件名可能被 Go 的 mime/multipart 解析器漏掉（路径遍历、空格扩展名绕过）。
+// 当 multipart.Reader 剥离路径或解析失败时，本函数作为兜底。
 func CheckRawMultipartFilenames(body []byte) (OWASPHit, bool) {
 	return checkRawMultipartFilenames(body)
 }
@@ -674,17 +673,17 @@ func checkRawMultipartFilenames(body []byte) (OWASPHit, bool) {
 	for _, m := range matches {
 		filename := string(m[1])
 		lower := strings.ToLower(filename)
-		// Null byte injection in filename (e.g. shell.php\x00.jpg)
+		// 文件名中的空字节注入（如 shell.php\x00.jpg）
 		if strings.Contains(filename, "\x00") || strings.Contains(lower, "%00") {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:001", Score: 6,
 				Desc: "文件名中包含空字节"}, true
 		}
-		// Path traversal in filename
+		// 文件名中的路径遍历
 		if strings.Contains(lower, "../") || strings.Contains(lower, "..\\") {
 			return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:006", Score: 6,
 				Desc: "文件名中包含路径遍历"}, true
 		}
-		// Normalize spaces and suffix separators used to disguise executable extensions.
+		// 归一化用于伪装可执行扩展名的空格与后缀分隔符。
 		normalized := normalizeUploadFilename(lower)
 		ext := filepath.Ext(normalized)
 		if ext != "" {
@@ -703,9 +702,8 @@ func checkRawMultipartFilenames(body []byte) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
-// CheckMethodViolation inspects the HTTP method for unusual/dangerous methods.
-// Called separately from CheckOWASP because the method is not part of the
-// standard target scanning pipeline.
+// CheckMethodViolation 检查 HTTP 方法是否为异常或危险方法。
+// 与 CheckOWASP 分开调用：method 不属于常规的目标扫描流水线。
 func CheckMethodViolation(method string, headers map[string]string) (OWASPHit, bool) {
 	return checkMethodViolation(method, headers)
 }
@@ -719,9 +717,9 @@ var webExecutableExtensions = map[string]bool{
 	".pl": true, ".py": true, ".rb": true, ".htaccess": true,
 }
 
-// checkPathFileUpload detects double-extension bypass patterns in URL paths,
-// e.g. /uploadfiles/shell.php.jpg. Single extensions like /page.php are normal
-// web requests and should not trigger.
+// checkPathFileUpload 检测 URL 路径中的双扩展名绕过，
+// 例如 /uploadfiles/shell.php.jpg。像 /page.php 这样的单扩展名
+// 属正常 Web 请求，不应触发。
 func checkPathFileUpload(path string) (OWASPHit, bool) {
 	if path == "" || !strings.Contains(path, ".") {
 		return OWASPHit{}, false
@@ -749,31 +747,31 @@ func checkPathFileUpload(path string) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
-// checkDangerousPath detects CVE-specific dangerous API endpoints and paths
-// that are commonly exploited for RCE, deserialization, or other attacks.
+// checkDangerousPath 检测针对特定 CVE 的危险 API 端点与路径，
+// 这些路径常被用于 RCE、反序列化或其他攻击。
 func checkDangerousPath(path string) (OWASPHit, bool) {
-	// F5 BIG-IP RCE (CVE-2020-5902, CVE-2022-1388)
+	// F5 BIG-IP RCE（CVE-2020-5902、CVE-2022-1388）
 	if containsASCIIFold(path, "/mgmt/tm/util/bash") {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:001", Score: 6,
 			Desc: "F5 BIG-IP 远程代码执行端点"}, true
 	}
-	// Liferay JSONWS deserialization (CVE-2020-7961)
+	// Liferay JSONWS 反序列化（CVE-2020-7961）
 	if containsASCIIFold(path, "/api/jsonws/invoke") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:path:002", Score: 6,
 			Desc: "Liferay JSONWS 反序列化端点"}, true
 	}
-	// Apache OFBiz webtools RCE (CVE-2023-49070, CVE-2023-51467)
+	// Apache OFBiz webtools RCE（CVE-2023-49070、CVE-2023-51467）
 	if containsASCIIFold(path, "/webtools/control/xmlrpc") ||
 		containsASCIIFold(path, "/webtools/control/soapservice") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:path:004", Score: 6,
 			Desc: "Apache OFBiz webtools 远程代码执行端点"}, true
 	}
-	// Atlassian Confluence OGNL injection (CVE-2021-26084, CVE-2022-26134)
+	// Atlassian Confluence OGNL 注入（CVE-2021-26084、CVE-2022-26134）
 	if containsASCIIFold(path, "/rest/tinymce/1/macro/preview") {
 		return OWASPHit{Category: CatExprLang, RuleID: "owasp:path:005", Score: 6,
 			Desc: "Confluence OGNL 注入端点"}, true
 	}
-	// Cisco ASA path traversal (CVE-2020-3452)
+	// Cisco ASA 路径遍历（CVE-2020-3452）
 	if containsASCIIFold(path, "+cscot+/") ||
 		containsASCIIFold(path, "+cscoe+/") ||
 		containsASCIIFold(path, "%2bcscot%2b/") ||
@@ -781,12 +779,12 @@ func checkDangerousPath(path string) (OWASPHit, bool) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:006", Score: 5,
 			Desc: "Cisco ASA 路径遍历"}, true
 	}
-	// ThinkPHP RCE (invokefunction)
+	// ThinkPHP RCE（invokefunction）
 	if containsASCIIFold(path, "/think") && containsASCIIFold(path, "invokefunction") {
 		return OWASPHit{Category: CatWebshell, RuleID: "owasp:path:007", Score: 6,
 			Desc: "ThinkPHP invokefunction 远程代码执行"}, true
 	}
-	// Atlassian gadgets makeRequest SSRF (CVE-2019-3396 and similar)
+	// Atlassian gadgets makeRequest SSRF（CVE-2019-3396 等）
 	if containsASCIIFold(path, "/gadgets/makerequest") {
 		return OWASPHit{Category: CatSSRF, RuleID: "owasp:path:008", Score: 5,
 			Desc: "Atlassian gadgets SSRF 端点"}, true
@@ -796,7 +794,7 @@ func checkDangerousPath(path string) (OWASPHit, bool) {
 		return OWASPHit{Category: CatCmdInject, RuleID: "owasp:path:009", Score: 5,
 			Desc: "Nexus Repository Manager 远程代码执行"}, true
 	}
-	// Coremail config leak
+	// Coremail 配置泄露
 	if containsASCIIFold(path, "/mailsms/") {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:010", Score: 5,
 			Desc: "Coremail 配置泄露"}, true
@@ -813,14 +811,14 @@ func checkDangerousPath(path string) (OWASPHit, bool) {
 		return OWASPHit{Category: CatXXE, RuleID: "owasp:path:013", Score: 5,
 			Desc: "OFS XML 外部实体端点"}, true
 	}
-	// Semicolon path parameter bypass (Tomcat/Spring)
+	// 分号路径参数绕过（Tomcat/Spring）
 	if strings.Contains(path, ";") && (containsASCIIFold(path, "swagger") ||
 		containsASCIIFold(path, "actuator") || containsASCIIFold(path, "admin") ||
 		containsASCIIFold(path, "console") || containsASCIIFold(path, "manager")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:014", Score: 5,
 			Desc: "分号路径参数绕过"}, true
 	}
-	// Joomla API config leak (CVE-2023-23752)
+	// Joomla API 配置泄露（CVE-2023-23752）
 	if containsASCIIFold(path, "/api/index.php/v1/config/") ||
 		(containsASCIIFold(path, "/api/") && containsASCIIFold(path, "/v1/config/application")) {
 		return OWASPHit{Category: CatPathTrav, RuleID: "owasp:path:015", Score: 5,
@@ -883,7 +881,7 @@ func sensitivityThresholdForNormalizedLevel(level string) int {
 	case "low":
 		return 7
 	case "high":
-		return 3 // Raised from 2 to 3 to reduce false positives
+		return 3 // 从 2 提高到 3 以减少误报
 	case "very_high":
 		return 2
 	case "strict":
@@ -914,8 +912,8 @@ func collectTargets(path, query string, headers map[string]string, extraCapacity
 			continue
 		}
 		if lk == "referer" {
-			// Only scan the query string portion of the Referer URL to avoid
-			// SSRF false positives from the scheme+host (e.g. http://10.0.0.1).
+			// 只扫描 Referer URL 的查询串部分，避免 scheme+host 带来的 SSRF 误报
+			// （例如 http://10.0.0.1）。
 			out = append(out, extractRefererTargets(v)...)
 			continue
 		}
@@ -1544,9 +1542,9 @@ func shouldScanDecodedQueryValue(raw, decoded string) bool {
 	return false
 }
 
-// extractRefererTargets extracts scannable parts from a Referer URL.
-// Returns the raw query string and the path (for path traversal detection),
-// but NOT the scheme+host to avoid SSRF false positives.
+// extractRefererTargets 从 Referer URL 中提取可扫描的部分。
+// 返回原始查询串与路径（用于路径遍历检测），
+// 但不含 scheme+host，以避免 SSRF 误报。
 func extractRefererTargets(referer string) []string {
 	var targets []string
 	forEachRefererTarget(referer, func(value string, _ bool) bool {
@@ -1574,8 +1572,8 @@ func forEachRefererTarget(referer string, fn func(value string, queryPlusAsSpace
 	return true
 }
 
-// extractCookieValues splits a Cookie header and returns individual values,
-// filtering out likely session identifiers to avoid false positives.
+// extractCookieValues 拆分 Cookie 请求头并返回各个值，
+// 过滤掉疑似会话标识的值以避免误报。
 func extractCookieValues(raw string) []string {
 	var values []string
 	forEachCookieValue(raw, func(value string) bool {
@@ -1603,7 +1601,7 @@ func forEachCookieValue(raw string, fn func(value string) bool) bool {
 	return true
 }
 
-// isLikelySessionID returns true for hex-only strings ≥16 chars (session tokens).
+// isLikelySessionID 对「仅十六进制且长度 ≥16」的字符串（会话令牌）返回 true。
 func isLikelySessionID(val string) bool {
 	if len(val) < 16 {
 		return false
@@ -1658,7 +1656,7 @@ func decodePercentU(s string) string {
 	return b.String()
 }
 
-// normalize does URL-decode (multi-pass), HTML entity decode, JS escape decode, lowercase, whitespace collapse.
+// normalize 依次执行多轮 URL 解码、HTML 实体解码、JS 转义解码、小写化与空白折叠。
 func normalize(s string) string {
 	return normalizeTarget(s, true)
 }
@@ -1681,7 +1679,7 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 	if strings.ContainsRune(s, '∕') {
 		s = strings.ReplaceAll(s, "∕", "/")
 	}
-	// Overlong UTF-8 percent-encoded sequences → real characters (evasion technique).
+	// overlong UTF-8 百分号编码序列 → 真实字符（一种绕过手法）。
 	if strings.Contains(s, "%") && containsOverlongUTF8Escape(s) {
 		s = reOverlongDot.ReplaceAllString(s, ".")
 		s = reOverlongSlash.ReplaceAllString(s, "/")
@@ -1691,7 +1689,7 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 		// 只在刻意拼接的攻击载荷中出现，替换无误报面。
 		s = reOverlongDotCompact.ReplaceAllString(s, ".")
 		s = reOverlongSlashCompact.ReplaceAllString(s, "/")
-		// Overlong encodings for < and > (common in XSS bypasses).
+		// < 与 > 的 overlong 编码（XSS 绕过中常见）。
 		// %C0%BC / %E0%80%BC / %F0%80%80%BC / %F8%80%80%80%80%BC / %FC%80%80%80%80%80%BC → <
 		// %C0%BE / %E0%80%BE / ... → >
 		s = reOverlongLT.ReplaceAllString(s, "<")
@@ -1741,7 +1739,7 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 		}
 	}
 	if shouldDecodeHTMLEntities(s) {
-		// Multi-pass HTML entity decode.
+		// 多轮 HTML 实体解码。
 		for range 2 {
 			decoded := html.UnescapeString(s)
 			if decoded == s {
@@ -1750,13 +1748,13 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 			s = decoded
 		}
 	}
-	// JavaScript escape sequence decode: \xNN, \uXXXX, \u{XXXX}, \NNN (octal).
-	// This defeats obfuscation like window['\x61\x6c\x65\x72\x74'] → window['alert'].
+	// JavaScript 转义序列解码：\xNN、\uXXXX、\u{XXXX}、\NNN（八进制）。
+	// 可破解 window['\x61\x6c\x65\x72\x74'] → window['alert'] 这类混淆。
 	if strings.Contains(s, "\\") {
 		s = decodeJSEscapesPooled(s)
 	}
-	// Post-JS-escape URL decode: JS escapes may produce percent-encoded chars
-	// (e.g. %28 → %28 → '('). Multi-pass to handle double/triple encoding.
+	// JS 转义之后的 URL 解码：JS 转义可能产出百分号编码字符
+	// （如 %28 → %28 → '('）。多轮处理以覆盖双重/三重编码。
 	for range 3 {
 		if !strings.Contains(s, "%") {
 			break
@@ -1767,7 +1765,7 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 		}
 		s = d
 	}
-	// UTF-7 decode: +ADw- → <, +AD4- → >, etc. (used in XSS attacks with charset=UTF-7).
+	// UTF-7 解码：+ADw- → <、+AD4- → > 等（用于 charset=UTF-7 的 XSS 攻击）。
 	if strings.Contains(s, "+A") {
 		s = decodeUTF7Sequences(s)
 	}
@@ -1788,8 +1786,8 @@ func normalizeTarget(s string, queryPlusAsSpace bool) string {
 	// 函数名绕过检测）。必须成对剥离（<x> 与 </x> 或 </x> 单闭），
 	// 自然文本中的 <x> 极少且此处只剥两字符短标签。
 	s = stripInlineConfusionTags(s)
-	// Strip inline SQL/C-style comments to defeat comment-splitting evasion.
-	// Empty replacement joins adjacent tokens: sel/**/ect → select, un/**/ion → union.
+	// 剥离行内 SQL/C 风格注释，破解注释拆分绕过。
+	// 空串替换会拼接相邻 token：sel/**/ect → select、un/**/ion → union。
 	s = stripSQLCommentsPooled(s)
 	s = collapseWhitespacePooled(s)
 	return s
@@ -1807,10 +1805,9 @@ func containsAnyRuneASCII(s, chars string) bool {
 	return false
 }
 
-// stripInlineConfusionTags removes short inline tags (<x>, <a>, </x> etc.)
-// that HTML parsers drop as unknown elements. Attackers insert them inside
-// event handler names (autof<x>ocus) or call sites (alert<x>(1)) to evade
-// regex-based detection; removing them restores the original token.
+// stripInlineConfusionTags 移除 HTML 解析器会当作未知元素丢弃的短行内标签
+// （<x>、<a>、</x> 等）。攻击者把它们插进事件名（autof<x>ocus）或
+// 调用点（alert<x>(1)）以绕过正则检测；移除后即可还原原始 token。
 func stripInlineConfusionTags(s string) string {
 	if !strings.Contains(s, "<") {
 		return s
@@ -1966,8 +1963,8 @@ func hasSemicolonlessHTMLEntityPrefix(name string) bool {
 	return false
 }
 
-// collapseWhitespace replaces runs of whitespace with a single space.
-// Faster than regexp for this simple case.
+// collapseWhitespace 把连续空白折叠为单个空格。
+// 对这种简单场景比 regexp 更快。
 func normalizeURLSchemeControls(s string) string {
 	if !strings.ContainsAny(s, "\t\r\n") {
 		return s
@@ -2120,16 +2117,16 @@ func collapseWhitespace(s string) string {
 	return b.String()
 }
 
-// decodeUTF7Sequences replaces UTF-7 encoded characters (+ADw- → <, +AD4- → >, etc.).
-// This is used in XSS attacks with charset=UTF-7: +ADw-script+AD4-alert(1)+ADw-/script+AD4-
+// decodeUTF7Sequences 还原 UTF-7 编码字符（+ADw- → <、+AD4- → > 等）。
+// 用于 charset=UTF-7 的 XSS 攻击：+ADw-script+AD4-alert(1)+ADw-/script+AD4-
 var reUTF7 = regexp.MustCompile(`\+([A-Za-z0-9+/]{2,8})-?`)
 
 func decodeUTF7Sequences(s string) string {
 	return reUTF7.ReplaceAllStringFunc(s, func(m string) string {
-		// Strip leading + and trailing -
+		// 剥去前导 + 与尾部 -
 		encoded := strings.TrimPrefix(m, "+")
 		encoded = strings.TrimSuffix(encoded, "-")
-		// Pad to multiple of 4
+		// 补齐到 4 的倍数
 		for len(encoded)%4 != 0 {
 			encoded += "="
 		}
@@ -2137,7 +2134,7 @@ func decodeUTF7Sequences(s string) string {
 		if err != nil || len(decoded) == 0 {
 			return m
 		}
-		// UTF-7 uses UTF-16BE. Convert pairs to characters.
+		// UTF-7 基于 UTF-16BE，按对转换为字符。
 		var out strings.Builder
 		for i := 0; i+1 < len(decoded); i += 2 {
 			r := rune(decoded[i])<<8 | rune(decoded[i+1])
@@ -2152,9 +2149,9 @@ func decodeUTF7Sequences(s string) string {
 	})
 }
 
-// decodeHexEscapes replaces \xNN hex escape sequences with their byte values.
-// This handles evasion patterns like \x41\x42 → AB that may appear in raw payloads
-// outside of JavaScript string contexts (e.g. shell arguments, HTTP headers).
+// decodeHexEscapes 把 \xNN 十六进制转义序列替换为其字节值。
+// 处理 \x41\x42 → AB 这类可能出现在 JavaScript 字符串上下文之外的
+// 原始载荷（如 shell 参数、HTTP 请求头）中的绕过形态。
 var reHexEscape = regexp.MustCompile(`\\x([0-9a-fA-F]{2})`)
 
 func decodeHexEscapes(s string) string {
@@ -2170,9 +2167,8 @@ func decodeHexEscapes(s string) string {
 	})
 }
 
-// normalizeWithDecode normalizes and attempts base64 decoding of suspicious tokens.
-// Recursion is capped at 3 levels with max 5 tokens per level and a 32KB total
-// decoded byte budget to bound CPU cost.
+// normalizeWithDecode 在归一化的同时尝试对可疑 token 做 base64 解码。
+// 递归限制为 3 层、每层最多 5 个 token、解码后总预算 32KB，以约束 CPU 开销。
 func normalizeWithDecode(raw string) string {
 	return normalizeWithDecodeTarget(raw, true)
 }
@@ -2455,8 +2451,8 @@ func containsOverlongUTF8Escape(s string) bool {
 	return false
 }
 
-// hasBase64Candidate quickly checks if a string might contain a base64 token.
-// Looks for 8+ consecutive base64 chars. Much cheaper than regex.
+// hasBase64Candidate 快速判断字符串是否可能含 base64 token。
+// 判据为 8 个以上连续 base64 字符，比正则便宜得多。
 func hasBase64Candidate(s string) bool {
 	run := 0
 	for i := 0; i < len(s); i++ {
@@ -2479,9 +2475,8 @@ func hasBase64Candidate(s string) bool {
 	return false
 }
 
-// hasLikelyBase64Candidate tightens the fast-path candidate filter so ordinary
-// lowercase words and percent-encoded separators do not enter the expensive
-// base64 expansion path.
+// hasLikelyBase64Candidate 收紧快路径候选过滤，使普通小写单词与
+// 百分号编码分隔符不进入开销较大的 base64 展开路径。
 func hasLikelyBase64Candidate(s string) bool {
 	lowerRun := 0
 	maxLowerRun := 0
@@ -2626,10 +2621,9 @@ func isBase64TokenByte(b byte) bool {
 	return base64TokenByteTable[b] != 0
 }
 
-// stripSQLComments removes /* ... */ style inline comments from s to defeat
-// comment-splitting evasion (e.g. sel/**/ect → select). MySQL version-specific
-// comments /*!50000...*/  are intentionally preserved because they contain
-// executable SQL and are matched by rule owasp:sqli:020.
+// stripSQLComments 移除字符串中的 /* ... */ 行内注释，破解注释拆分绕过
+// （如 sel/**/ect → select）。MySQL 版本相关注释 /*!50000...*/ 刻意保留：
+// 其中含可执行 SQL，且由规则 owasp:sqli:020 匹配。
 func stripSQLComments(s string) string {
 	hasBlock := strings.Contains(s, "/*")
 	hasLine := strings.Contains(s, "#") || strings.Contains(s, "--")
@@ -2707,10 +2701,10 @@ var (
 	// 紧凑形态（百分号后四 hex 无分隔）：%C0AE→.、%C0AF→/。
 	reOverlongDotCompact   = regexp.MustCompile(`(?i)%c0ae`)
 	reOverlongSlashCompact = regexp.MustCompile(`(?i)%c0af`)
-	// Overlong UTF-8 encodings for < (U+003C) — used to bypass XSS filters.
-	// 2-byte: C0 BC, 3-byte: E0 80 BC, 4-byte: F0 80 80 BC, 5-byte: F8 80 80 80 BC, 6-byte: FC 80 80 80 80 BC
+	// <（U+003C）的 overlong UTF-8 编码，用于绕过 XSS 过滤。
+	// 2 字节：C0 BC，3 字节：E0 80 BC，4 字节：F0 80 80 BC，5 字节：F8 80 80 80 BC，6 字节：FC 80 80 80 80 BC
 	reOverlongLT = regexp.MustCompile(`(?i)(%c0%bc|%e0%80%bc|%f0%80%80%bc|%f8%80%80%80%bc|%fc%80%80%80%80%bc)`)
-	// Overlong UTF-8 encodings for > (U+003E).
+	// >（U+003E）的 overlong UTF-8 编码。
 	reOverlongGT = regexp.MustCompile(`(?i)(%c0%be|%e0%80%be|%f0%80%80%be)`)
 )
 
@@ -3010,17 +3004,17 @@ func init() {
 	}
 }
 
-// hasSuspiciousContent is a fast O(n) scan to check if a string could possibly
-// match any OWASP regex. Returns false for clean strings, skipping the regex gauntlet.
+// hasSuspiciousContent 是 O(n) 的快速预判：判断字符串是否可能命中任何 OWASP 正则。
+// 干净字符串直接返回 false，跳过整轮正则检测。
 func hasSuspiciousContent(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if suspiciousCharSet[s[i]] {
 			return true
 		}
 	}
-	// Fallback: check for SQL/attack keywords in pure-alphanumeric strings.
-	// This catches body-injected payloads like "1 UNION SELECT NULL FROM users"
-	// where the extracted value has no special characters after splitting on '='.
+	// 兜底：在纯字母数字串中查找 SQL/攻击关键词。
+	// 用于捕获 "1 UNION SELECT NULL FROM users" 这类请求体注入载荷——
+	// 按 '=' 切分后提取出的值不含任何特殊字符。
 	return hasSuspiciousKeywords(s)
 }
 
@@ -3876,8 +3870,7 @@ func hasRevShellIndicator(s string) bool {
 	return false
 }
 
-// hasPathTravIndicator returns true when the string contains indicators
-// of path traversal sequences or target sensitive OS files.
+// hasPathTravIndicator 在字符串含路径遍历序列或指向敏感系统文件时返回 true。
 func hasPathTravIndicator(s string) bool {
 	return strings.Contains(s, "..") ||
 		strings.Contains(s, "%2e%2e") ||
@@ -3893,8 +3886,8 @@ func hasPathTravIndicator(s string) bool {
 		strings.Contains(s, "c$")
 }
 
-// isSQLiFalsePositive checks if a SQLi hit is actually a benign pattern.
-// This reduces noise from common URL parameters, natural language, and framework artifacts.
+// isSQLiFalsePositive 判断某次 SQLi 命中是否实为良性模式。
+// 用于降低常见 URL 参数、自然语言与框架产物带来的噪声。
 func isSQLiFalsePositive(raw, ruleID string) bool {
 	lower := strings.ToLower(raw)
 
@@ -3909,31 +3902,31 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			return true
 		}
 	case "owasp:sqli:003": // (sleep|benchmark|waitfor\s+delay)\s*\(
-		// sleep() and benchmark() are common JavaScript/programming functions.
-		// waitfor delay is MSSQL-specific and always suspicious.
-		// Also keep if SQL structural context or a SQL terminator is present
-		// (e.g., "1); sleep(5)--" is a real injection).
+		// sleep() 与 benchmark() 是常见的 JavaScript/编程函数。
+		// waitfor delay 是 MSSQL 特有形态，始终可疑。
+		// 若存在 SQL 结构上下文或 SQL 终止符也保留
+		// （例如 "1); sleep(5)--" 是真实注入）。
 		if strings.Contains(lower, "waitfor") {
 			return false
 		}
 		if reBoolSQLContext.MatchString(lower) || reSQLTerminatorCtx.MatchString(lower) {
 			return false
 		}
-		// "1 AND sleep(5)" / "1 OR pg_sleep(5)" — classic blind timing injection
+		// "1 AND sleep(5)" / "1 OR pg_sleep(5)"——典型的布尔盲注时间型注入
 		if reANDORSleep.MatchString(lower) {
 			return false
 		}
-		// ); sleep(...) — injection closing a prior call then invoking sleep
+		// ); sleep(...)——注入闭合前一次调用后再触发 sleep
 		if strings.Contains(lower, "); sleep(") || strings.Contains(lower, ");\tsleep(") {
 			return false
 		}
-		// x'||pg_sleep(10) — PostgreSQL string concat operator as injection vector
+		// x'||pg_sleep(10)——PostgreSQL 字符串拼接运算符被用作注入载体
 		if strings.Contains(lower, "||") && strings.Contains(lower, "pg_sleep") {
 			return false
 		}
-		return true // sleep()/benchmark() without SQL context → JavaScript FP
+		return true // 无 SQL 上下文的 sleep()/benchmark() → JavaScript 误报
 
-	case "owasp:sqli:006": // '\s*;\s*\w — apostrophe + semicolon + word char
+	case "owasp:sqli:006": // \s*;\s*\w——撇号 + 分号 + 单词字符
 		// 二进制 body（PDF/压缩流）中该三字符模式极易随机碰撞，
 		// 且其上下文校验会被二进制里偶然出现的 from/order 等英文词满足。
 		if isBinaryScanTarget(raw) {
@@ -3943,9 +3936,9 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if hasCodeBlockBraceAfterStackedSemicolon(raw) {
 			return true
 		}
-		// This pattern fires on JavaScript/TypeScript imports and string literals:
-		// e.g. `from 'antd'; import { ... }` or `target='_blank'; rel='noopener'`.
-		// Keep only when SQL structure confirms stacked-query context.
+		// 该模式会命中 JavaScript/TypeScript 的 import 与字符串字面量：
+		// 例如 `from 'antd'; import { ... }` 或 `target='_blank'; rel='noopener'`。
+		// 仅在 SQL 结构确认堆叠查询上下文时才保留。
 		if strings.Contains(lower, "import ") || strings.Contains(lower, "export ") ||
 			strings.Contains(lower, "from '") || strings.Contains(lower, "from \"") ||
 			strings.Contains(lower, "react") || strings.Contains(lower, "antd") {
@@ -3957,14 +3950,14 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			return true
 		}
 	case "owasp:sqli:004": // ;\s*(select|drop|alter|create|truncate|delete|update|insert)\s
-		// Semicolon + DDL/DML keyword can appear in JavaScript (";delete obj.prop"),
-		// natural language ("run cleanup; delete temp files"), and CSS.
-		// Suppress if no SQL structural context (FROM, TABLE, INTO, VALUES, etc.).
+		// 分号 + DDL/DML 关键词会出现在 JavaScript（";delete obj.prop"）、
+		// 自然语言（"run cleanup; delete temp files"）与 CSS 中。
+		// 缺少 SQL 结构上下文（FROM、TABLE、INTO、VALUES 等）时抑制。
 		if !reBoolSQLContext.MatchString(lower) && !reSQLDMLContext.MatchString(lower) {
 			return true
 		}
-		// Also suppress pure ";insert" / ";update" without column/table context
-		// that appears in CMS content or programming blogs.
+		// 同时抑制缺少列/表上下文的纯 ";insert" / ";update"，
+		// 这类写法常见于 CMS 内容或编程博客。
 		if strings.Contains(lower, ";insert") && !strings.Contains(lower, "into") {
 			return true
 		}
@@ -3976,34 +3969,33 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		// 语法词），散文里前后都是空格与普通单词。
 		return !hasSQLTautologyInjectionContext(lower)
 	case "owasp:sqli:011": // \b(or|and)\s+'...'\s*=\s*'...'
-		// "or 'x'='x'" is always malicious — no false positive suppression.
+		// "or 'x'='x'" 始终恶意，不做误报抑制。
 		return false
 	case "owasp:sqli:005": // ['"\d]\s*(--[\s/]|/\*)
-		// URL slugs like "article1--title" are handled by the regex requiring --<space/slash>.
-		// Additional suppression: very short inputs with no SQL context.
+		// URL slug（如 "article1--title"）由正则要求 -- 后接空白或斜杠来处理。
+		// 额外抑制：极短且无 SQL 上下文的输入。
 		if len(lower) < 10 && !reBoolSQLContext.MatchString(lower) {
 			return true
 		}
-		// S3 ARN wildcards: "arn:aws:s3:::bucket01/*" — digit at end of bucket name + /*
-		// triggers sqli:005, but this is a path wildcard, not a SQL inline comment.
+		// S3 ARN 通配符："arn:aws:s3:::bucket01/*"——桶名末尾的数字加 /*
+		// 会触发 sqli:005，但这是路径通配符而非 SQL 行内注释。
 		if strings.Contains(lower, "arn:aws:s3") || strings.Contains(lower, "arn%3aaws%3as3") {
 			return true
 		}
-		// sqli:005 is a low-confidence rule (score=3). For long inputs (analytics beacons,
-		// telemetry payloads, documentation text > 200 chars), it fires on Aurora MySQL docs
-		// (contain both -- and /* syntax examples), URL path wildcards, etc.
-		// Require explicit SQL injection operators to suppress these false positives.
-		// Threshold lowered from 500 to 200 to reduce FP on medium-length payloads.
+		// sqli:005 是低置信度规则（score=3）。对长输入（分析埋点、遥测载荷、
+		// 长度 > 200 的文档文本），它会命中 Aurora MySQL 文档（同时含 -- 与 /* 语法示例）、
+		// URL 路径通配符等。要求出现显式 SQL 注入运算符才报告，以抑制这些误报。
+		// 阈值从 500 下调到 200，以减少中等长度载荷上的误报。
 		if len(lower) > 200 && !reSQLiInjectionOps.MatchString(lower) {
 			return true
 		}
-		// Analytics beacons and referrer-tracking pixels embed full URLs in query parameters,
-		// e.g. ref=https://cdn.example.com/api/v1/* or ep=https://site.com/page/1/*.
-		// After URL-decoding, these contain "/\d/*" which triggers sqli:005, but the /*
-		// is a filesystem/path glob appended to a URL path, not a SQL inline comment.
-		// Check both decoded (https://) and URL-encoded (https%3a) forms since isSQLiFalsePositive
-		// receives the raw (un-normalized) input.
-		// Guard: only suppress when no explicit SQL injection operators are present.
+		// 分析埋点与引荐跟踪像素会把完整 URL 嵌进查询参数，
+		// 例如 ref=https://cdn.example.com/api/v1/* 或 ep=https://site.com/page/1/*。
+		// URL 解码后它们含 "/\d/*"，会触发 sqli:005，但此处的 /*
+		// 是追加在 URL 路径后的文件系统/路径通配符，而非 SQL 行内注释。
+		// 由于 isSQLiFalsePositive 接收的是未归一化的原始输入，需同时检查
+		// 解码形（https://）与 URL 编码形（https%3a）。
+		// 防护条件：仅在不存在显式 SQL 注入运算符时才抑制。
 		hasURL := strings.Contains(lower, "https://") || strings.Contains(lower, "http://") ||
 			strings.Contains(lower, "https%3a") || strings.Contains(lower, "http%3a")
 		hasGlob := strings.Contains(lower, "/*") || strings.Contains(lower, "%2f*") ||
@@ -4011,9 +4003,9 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 		if hasURL && hasGlob && !reSQLiInjectionOps.MatchString(lower) {
 			return true
 		}
-		// Path-like strings with /* at the end (e.g., /api/v1/*, /static/*)
-		// are common in routing configs, not SQL comments.
-		// Only suppress if the string looks like a URL path (starts with /) and has no other SQLi indicators.
+		// 末尾带 /* 的类路径字符串（如 /api/v1/*、/static/*）
+		// 常见于路由配置，不是 SQL 注释。
+		// 仅当字符串形似 URL 路径（以 / 开头）且无其他 SQLi 指示时才抑制。
 		if strings.HasSuffix(lower, "/*") && strings.HasPrefix(lower, "/") && !reSQLiInjectionOps.MatchString(lower) {
 			return true
 		}
@@ -4027,11 +4019,11 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			return true
 		}
 	case "owasp:sqli:012": // ;\s*--
-		// Semicolons followed by double-dash can appear in legitimate CSS or JS snippets.
+		// 分号后接双减号会出现在合法的 CSS 或 JS 片段中。
 		if len(lower) < 10 {
 			return true
 		}
-		// Telemetry and analytics endpoints commonly have semicolons in tracking parameters.
+		// 遥测与分析端点常在跟踪参数中使用分号。
 		if strings.Contains(lower, "/g/collect") ||
 			strings.Contains(lower, "telemetry") ||
 			strings.Contains(lower, "analytics") ||
@@ -4039,13 +4031,13 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			strings.Contains(lower, "cdn-cgi") {
 			return true
 		}
-	case "owasp:sqli:021": // substr/substring/mid with numeric args
-		// JavaScript also uses substring(start, end) heavily.
-		// Suppress unless SQL context is present (SQL keywords or SQL-specific functions).
+	case "owasp:sqli:021": // substr/substring/mid 带数值参数
+		// JavaScript 也大量使用 substring(start, end)。
+		// 缺少 SQL 上下文（SQL 关键词或 SQL 特有函数）时抑制。
 		if reBoolSQLContext.MatchString(lower) || reSQLTerminatorCtx.MatchString(lower) {
 			return false
 		}
-		// SQL-specific function calls inside the substr confirm injection context.
+		// substr 内部出现 SQL 特有函数调用可确认注入上下文。
 		if reSQLi022ClauseCtx.MatchString(lower) {
 			return false
 		}
@@ -4055,27 +4047,27 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			return false
 		}
 		return true
-	case "owasp:sqli:030": // LIMIT n,n with SQL terminator
-		// LIMIT 10,20 is standard MySQL pagination. Suppress unless SQL context confirms injection.
+	case "owasp:sqli:030": // 带 SQL 终止符的 LIMIT n,n
+		// LIMIT 10,20 是标准 MySQL 分页写法。缺少 SQL 上下文确认注入时抑制。
 		if !reSQLTerminatorCtx.MatchString(lower) && !reBoolSQLContext.MatchString(lower) {
 			return true
 		}
 	case "owasp:sqli:022": // \bif\s*\(\s*(select|ord|ascii|substr|length|count|version)\b
-		// if(length), if(count), if(version), if(select.value) are extremely common in
-		// JavaScript (DOM property checks, version comparisons, length guards).
-		// ascii() and ord() are SQL-specific functions — never suppress.
+		// if(length)、if(count)、if(version)、if(select.value) 在 JavaScript 中极常见
+		// （DOM 属性检查、版本比较、长度守卫）。
+		// ascii() 与 ord() 是 SQL 特有函数——绝不抑制。
 		if strings.Contains(lower, "ascii(") || strings.Contains(lower, "ord(") {
 			return false
 		}
-		// Keyword used as a SQL function call (keyword + "(") — real SQL injection.
+		// 关键词被用作 SQL 函数调用（关键词 + "("）——真实 SQL 注入。
 		if reSQLi022FuncCall.MatchString(lower) {
 			return false
 		}
-		// SQL clause keywords FROM/WHERE/UNION/HAVING confirm SQL injection context.
+		// SQL 子句关键词 FROM/WHERE/UNION/HAVING 可确认 SQL 注入上下文。
 		if reSQLi022ClauseCtx.MatchString(lower) {
 			return false
 		}
-		// No SQL function call or clause found: likely a JavaScript variable/property.
+		// 既无 SQL 函数调用也无子句关键词：更像 JavaScript 变量/属性。
 		return true
 	case "owasp:sqli:001": // union (all) select
 		if !hasUnionSelectAttackContext(lower) {
@@ -4089,16 +4081,16 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 			}
 		}
 	case "owasp:sqli:017": // INTO OUTFILE/DUMPFILE
-		// MySQL requires a quoted file path: INTO OUTFILE '/tmp/x.php'.
-		// Documentation text like "SELECT INTO OUTFILE S3" (AWS Aurora docs) lacks quotes.
-		// Suppress unless a quoted file path immediately follows the keyword.
+		// MySQL 要求带引号的文件路径：INTO OUTFILE '/tmp/x.php'。
+		// 文档文本如 "SELECT INTO OUTFILE S3"（AWS Aurora 文档）没有引号路径。
+		// 仅在关键词后紧跟带引号的文件路径时才保留。
 		if !reIntoOutfileWithPath.MatchString(lower) {
 			return true
 		}
-	case "owasp:sqli:008": // [,=(]\s*0x[0-9a-f]{4,} — hex literal with preceding operator
-		// Hex literals (0xFFFF, 0xABCDEF) appear in CSS colors, memory addresses, binary
-		// protocols, and log data — not exclusively in SQL injection contexts.
-		// Suppress the hit unless strong SQL injection context is also present.
+	case "owasp:sqli:008": // [,=(]\s*0x[0-9a-f]{4,}——带前置运算符的十六进制字面量
+		// 十六进制字面量（0xFFFF、0xABCDEF）会出现在 CSS 颜色、内存地址、二进制
+		// 协议与日志数据中，并非 SQL 注入独有。
+		// 仅在同时存在强 SQL 注入上下文时才报告该命中。
 		if !reSQLi008AttackCtx.MatchString(lower) {
 			return true
 		}
@@ -4132,10 +4124,10 @@ func isSQLiFalsePositive(raw, ruleID string) bool {
 	return false
 }
 
-// hasActiveXSSContext checks for active JavaScript execution indicators that
-// confirm a real XSS attack rather than passive structural HTML or DOM reads.
-// NOTE: document.location alone is excluded — it's a common DOM read property
-// used in navigation code and does not itself enable script injection.
+// hasActiveXSSContext 检查是否存在可确认真实 XSS 攻击的主动 JavaScript 执行指示，
+// 以区别于被动结构型 HTML 或 DOM 读取。
+// 注意：单独的 document.location 被排除——它是导航代码中常见的 DOM 读取属性，
+// 本身并不启用脚本注入。
 func hasActiveXSSContext(normalized string) bool {
 	return strings.Contains(normalized, "javascript:") ||
 		strings.Contains(normalized, "vbscript:") ||
@@ -4154,12 +4146,11 @@ func hasActiveXSSContext(normalized string) bool {
 		(hasJavascriptLettersScan(normalized) && reJSProtocolObfuscated.MatchString(normalized))
 }
 
-// isXSSFalsePositive returns true when the XSS hit came only from passive
-// structural HTML elements (svg, iframe, math, embed, base, link) or common DOM
-// navigation properties (document.location, window.location) without any active
-// JavaScript execution context. Rich HTML content (CMS posts, reports) and
-// single-page application navigation code commonly includes these patterns.
-// At high sensitivity (threshold ≤ 2), this check is bypassed by the caller.
+// isXSSFalsePositive 在 XSS 命中仅来自被动结构型 HTML 元素
+// （svg、iframe、math、embed、base、link）或常见 DOM 导航属性
+// （document.location、window.location）且不存在任何主动 JavaScript 执行上下文时
+// 返回 true。富 HTML 内容（CMS 文章、报表）与单页应用导航代码常包含这些模式。
+// 在高敏感度下（阈值 ≤ 2），调用方会绕过本检查。
 func isKnownTelemetryXSSFalsePositive(path, normalized, ruleID string, isBodyTarget bool) bool {
 	lowerPath := toLowerASCII(path)
 	if !isBodyTarget {
@@ -4437,9 +4428,9 @@ func isKnownTelemetryPathTravFalsePositive(path, normalized, ruleID string, isBo
 
 func isXSSFalsePositive(normalized, firstRuleID string) bool {
 	switch firstRuleID {
-	case "owasp:xss:032": // /regex/.source concatenation
+	case "owasp:xss:032": // /regex/.source 字符串拼接
 		return false
-	case "owasp:xss:052": // global[( JSFuck
+	case "owasp:xss:052": // global[( 形式的 JSFuck
 		return !hasActiveXSSContext(normalized)
 	case "owasp:xss:001": // <script[\s>]
 		lower := strings.ToLower(normalized)
@@ -4496,7 +4487,7 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 				}
 			}
 		}
-	case "owasp:xss:002": // \bon(event)\s*= — HTML event handler attribute
+	case "owasp:xss:002": // \bon(event)\s*=——HTML 事件处理器属性
 		if isXSSHandlerFunctionRef(normalized) {
 			return true
 		}
@@ -4545,9 +4536,9 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 			}
 		}
 	case "owasp:xss:006", "owasp:xss:010":
-		// document.(location|write|cookie|domain) and window.(location|name|open)
-		// are standard DOM properties used heavily in legitimate SPA navigation code.
-		// Suppress when there is no active script-execution context.
+		// document.(location|write|cookie|domain) 与 window.(location|name|open)
+		// 是合法 SPA 导航代码中大量使用的标准 DOM 属性。
+		// 缺少主动脚本执行上下文时抑制。
 		return !hasActiveXSSContext(normalized)
 	case "owasp:xss:033":
 		// JSFuck 锚（+[]/+{}）在二进制/加密数据（ctrip SaveTraceInfo
@@ -4561,19 +4552,19 @@ func isXSSFalsePositive(normalized, firstRuleID string) bool {
 	return false
 }
 
-// isXSSHandlerFunctionRef returns true when an event-handler match (xss:002) appears to be
-// a CDN/API callback registration (e.g. ?onload=myCallback) rather than real XSS.
-// CDN callbacks are pure identifiers; real XSS payloads invoke a function: onload=alert(1).
+// isXSSHandlerFunctionRef 判断事件处理器命中（xss:002）是否更像 CDN/API 回调注册
+// （例如 ?onload=myCallback），而非真实 XSS。
+// CDN 回调是纯标识符；真实 XSS 载荷会调用函数：onload=alert(1)。
 func isXSSHandlerFunctionRef(normalized string) bool {
-	// Presence of a function call ( after the handler value → real XSS attempt.
+	// 处理器值后出现函数调用左括号 → 真实 XSS 尝试。
 	if reXSSHandlerCallParens.MatchString(normalized) {
 		return false
 	}
-	// HTML tag context (<...>) → could be injected markup.
+	// HTML 标签上下文（<...>）→ 可能是注入的标记。
 	if strings.ContainsRune(normalized, '<') || strings.ContainsRune(normalized, '>') {
 		return false
 	}
-	// Active JS execution keywords confirm real attack intent.
+	// 主动 JS 执行关键词可确认真实攻击意图。
 	if strings.Contains(normalized, "javascript:") ||
 		strings.Contains(normalized, "eval(") ||
 		strings.Contains(normalized, "document.cookie") ||
@@ -4584,17 +4575,17 @@ func isXSSHandlerFunctionRef(normalized string) bool {
 	return true
 }
 
-// reXSSEventHandler matches inline event handler attributes (on<event>=).
+// reXSSEventHandler 匹配行内事件处理器属性（on<event>=）。
 var reXSSEventHandler = regexp.MustCompile(`\bon\w+\s*=`)
 var reJSProtocolObfuscated = regexp.MustCompile(`j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:`)
 
-// reBacktickInjectionCtx: backtick command substitution is in shell injection position when
-// the opening backtick is at start-of-string or immediately preceded by a shell operator
-// (=, ;, |, &, $) or a flag-style argument (e.g. --exec=`id`).
-// When this pattern does NOT match, the backtick appears in a natural-language or
-// documentation context (e.g. "Use `echo` to print") and should be suppressed.
-// NOTE: this deliberately excludes comma and closing-backtick from the operator set
-// so that Markdown "try `cat`, `grep`" does not falsely match via the second backtick.
+// reBacktickInjectionCtx 判定反引号命令替换是否处于 shell 注入位置：
+// 起始反引号位于串首，或紧跟 shell 运算符（=、;、|、&、$）或旗标式参数
+// （如 --exec=`id`）时成立。
+// 该模式不匹配时，反引号出现在自然语言或文档上下文中
+// （如 "Use `echo` to print"），应予抑制。
+// 注意：运算符集合刻意排除逗号与闭合反引号，
+// 使 Markdown 里的 "try `cat`, `grep`" 不会因第二个反引号而误命中。
 // backtickCmdWords 是 reBacktickInjectionCtx 与 reCmd002Backtick 共享的命令词表。
 // 两条正则均以 "(" + backtickCmdWords + ")" 拼接编译，禁止单边再改动：
 // 词表由 TestBacktickCmdWordLiterals 锁定，正则最终文本由 TestBacktickRegexesByteStable 按 .String() 锁定。
@@ -4608,42 +4599,42 @@ var backtickCmdWords = strings.Join([]string{
 var reBacktickInjectionCtx = regexp.MustCompile("(^|[=;|&$])\\s*`[^`]*(" + backtickCmdWords + ")[^`]*`")
 var reCmd002Backtick = regexp.MustCompile("`[^`]*(" + backtickCmdWords + ")[^`]*`")
 
-// reCmdHighConfidence matches patterns that confirm genuine command injection intent.
-// When cmd:006 (null byte / newline injection) is the first-matching rule, we require
-// at least one of these high-confidence indicators to be present before reporting the hit.
-// This suppresses false positives caused by null bytes in binary / analytics data that
-// happen to co-trigger a weak secondary pattern (e.g. cmd:010 env-var + language name).
+// reCmdHighConfidence 匹配可确认真实命令注入意图的模式。
+// 当 cmd:006（空字节/换行注入）是首个命中的规则时，要求至少出现一个此类
+// 高置信度指示才报告命中。
+// 这可抑制二进制/分析数据中的空字节与弱二级模式
+// （如 cmd:010 环境变量 + 语言名）共同触发的误报。
 var reCmdHighConfidence = regexp.MustCompile(
 	`(` +
-		`[;|&]\s*(cat|ls|whoami|uname|pwd|wget|curl|nc|bash|sh)(?:\s|;|` + "`" + `|&|\||$)` + // pipe/semicolon + cmd (NOT followed by = to avoid param-name FPs)
-		// discovery cmd + semicolon: require preceding whitespace/operator/start (not arbitrary non-word byte like \x00)
-		// to prevent binary analytics payloads with byte sequences like \x00id; from matching.
-		`|(?:^|[\s;|&])(id|uname|whoami|hostname|ifconfig|ipconfig)\s*;` + // discovery cmd + semicolon (cmd:007)
-		`|\$\{?\s*IFS\s*\}?` + // ${IFS} space bypass (cmd:009)
-		`|(&&|\|\|)\s*(cat|ls|whoami|uname|bash|sh|rm)(?:\s|;|` + "`" + `|$)` + // && / || chaining (cmd:011)
-		`|(bash|sh|python|perl|ruby)\s*<<<` + // here-string injection (cmd:013)
-		`|\$'\s*\\[xX0][0-9a-fA-F]` + // ANSI-C hex/octal quoting (cmd:014)
-		`|>\s*/(etc|tmp|var|root|home)/` + // redirect to sensitive path (cmd:004)
-		`|\{\s*(cat|ls|id|whoami|echo|bash|sh|python|perl|ruby|wget|curl)\s*,` + // brace expansion (cmd:012)
+		`[;|&]\s*(cat|ls|whoami|uname|pwd|wget|curl|nc|bash|sh)(?:\s|;|` + "`" + `|&|\||$)` + // 管道/分号 + 命令（其后不能跟 =，以避免参数名误报）
+		// 探测命令 + 分号：要求前导为空白/运算符/串首（而非 \x00 这类任意非单词字节），
+		// 以防二进制分析载荷中 \x00id; 之类的字节序列命中。
+		`|(?:^|[\s;|&])(id|uname|whoami|hostname|ifconfig|ipconfig)\s*;` + // 探测命令 + 分号（cmd:007）
+		`|\$\{?\s*IFS\s*\}?` + // ${IFS} 空格绕过（cmd:009）
+		`|(&&|\|\|)\s*(cat|ls|whoami|uname|bash|sh|rm)(?:\s|;|` + "`" + `|$)` + // && / || 链式执行（cmd:011）
+		`|(bash|sh|python|perl|ruby)\s*<<<` + // here-string 注入（cmd:013）
+		`|\$'\s*\\[xX0][0-9a-fA-F]` + // ANSI-C 十六进制/八进制引用（cmd:014）
+		`|>\s*/(etc|tmp|var|root|home)/` + // 重定向到敏感路径（cmd:004）
+		`|\{\s*(cat|ls|id|whoami|echo|bash|sh|python|perl|ruby|wget|curl)\s*,` + // 花括号展开（cmd:012）
 		`)`)
 
-// isCmdInjectionFalsePositive suppresses cmd injection hits that are likely false positives.
+// isCmdInjectionFalsePositive 抑制疑似误报的命令注入命中。
 func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 	switch ruleID {
 	case "owasp:cmd:001": // [;|&]\s*(cmd)\s
 		lower := strings.ToLower(normalized)
-		// User-Agent headers like "Mozilla/5.0 (... ; Touch; rv:11.0) like Gecko"
-		// contain "; Touch;" which matches "; touch" after normalization.
-		// Browser UA strings are never command injection.
+		// User-Agent 形如 "Mozilla/5.0 (... ; Touch; rv:11.0) like Gecko"，
+		// 归一化后含 "; Touch;"，会命中 "; touch"。
+		// 浏览器 UA 串绝不构成命令注入。
 		if strings.Contains(lower, "mozilla") || strings.Contains(lower, "gecko") ||
 			strings.Contains(lower, "webkit") || strings.Contains(lower, "trident") ||
 			strings.Contains(lower, "chrome/") || strings.Contains(lower, "safari/") {
 			return true
 		}
-		// Form parameter names like "echo=value" are split on '=' by extractFormValues,
-		// producing two scan targets: "echo" (key) and "value". The key "echo" then matches
-		// "echo" as a command when preceded by '&' from query string or form body separators.
-		// Suppress unless the match occurs in a clear shell execution context.
+		// 表单参数名如 "echo=value" 会被 extractFormValues 按 '=' 切开，
+		// 产生两个扫描目标："echo"（键）与 "value"。键 "echo" 在查询串或表单体
+		// 分隔符带来的 '&' 之后会被当作命令 "echo" 命中。
+		// 除非匹配出现在明确的 shell 执行上下文中，否则抑制。
 		if len(normalized) > 200 && !reCmdHighConfidence.MatchString(normalized) {
 			if strings.Contains(lower, "\\u00") || strings.Contains(lower, "base64") ||
 				strings.Contains(lower, "sessionid") || strings.Contains(lower, "\"type\"") ||
@@ -4651,13 +4642,13 @@ func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 				return true
 			}
 		}
-		// Short values that are just a command name (form param keys like "echo", "kill", "sort")
-		// without shell operators are false positives.
+		// 仅为命令名且不含 shell 运算符的短值（如表单参数键 "echo"、"kill"、"sort"）
+		// 属误报。
 		trimmed := strings.TrimSpace(normalized)
 		if len(trimmed) < 30 && !strings.ContainsAny(trimmed, ";|&`$>") {
 			return true
 		}
-	case "owasp:cmd:002": // backtick command substitution (score=4)
+	case "owasp:cmd:002": // 反引号命令替换（score=4）
 		lower := strings.ToLower(normalized)
 		if strings.Contains(lower, "protobuf") || strings.Contains(lower, "application/x-protobuf") {
 			return true
@@ -4677,18 +4668,18 @@ func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 			return false
 		}
 		return true
-	case "owasp:cmd:006": // null byte / newline byte injection (score=3)
-		// Null bytes (\x00) can legitimately appear in binary POST bodies, URL-encoded
-		// data, and telemetry payloads sent to logging/analytics endpoints. They can
-		// co-trigger cmd:010 (env-variable + language name like "python") on benign
-		// requests. Suppress unless a higher-confidence shell execution indicator exists.
+	case "owasp:cmd:006": // 空字节 / 换行字节注入（score=3）
+		// 空字节（\x00）可以合法地出现在二进制 POST 体、URL 编码数据与发往
+		// 日志/分析端点的遥测载荷中。在良性请求上，它们可能连带触发 cmd:010
+		// （环境变量 + "python" 这类语言名）。
+		// 除非存在更高置信度的 shell 执行指示，否则抑制。
 		if !reCmdHighConfidence.MatchString(normalized) {
 			return true
 		}
-	case "owasp:cmd:024": // backtick + command name (ping, curl, cat, etc.)
+	case "owasp:cmd:024": // 反引号 + 命令名（ping、curl、cat 等）
 		lower := strings.ToLower(normalized)
-		// gRPC/API method names like "v1:GetHints" contain backtick-like patterns
-		// that match command names (e.g. `cat`, `sh`) — suppress for known safe paths.
+		// gRPC/API 方法名如 "v1:GetHints" 含类反引号模式，会命中命令名
+		// （如 `cat`、`sh`）——对已知安全路径抑制。
 		if strings.Contains(lower, "gethints") {
 			return true
 		}
@@ -4703,23 +4694,23 @@ func isCmdInjectionFalsePositive(normalized, ruleID string) bool {
 	return false
 }
 
-// reSQLi022FuncCall detects sqli:022 keywords used as SQL function calls (with parentheses),
-// as opposed to JavaScript variable names like `if (length > 0)`.
+// reSQLi022FuncCall 检测 sqli:022 关键词被用作 SQL 函数调用的形态（带括号），
+// 以区别于 `if (length > 0)` 这类 JavaScript 变量名。
 var reSQLi022FuncCall = regexp.MustCompile(`\bif\s*\(\s*(length|count|version|substr|select)\s*\(`)
 
-// reSQLi022ClauseCtx detects SQL clause keywords that confirm a SQL injection context.
-// Includes `select` followed by space or `(` to catch `if(select database(),...)` patterns
-// while excluding `select.value` (JavaScript DOM element).
+// reSQLi022ClauseCtx 检测可确认 SQL 注入上下文的 SQL 子句关键词。
+// 包含后接空格或 `(` 的 `select`，以捕获 `if(select database(),...)` 形态，
+// 同时排除 `select.value`（JavaScript DOM 元素）。
 var reSQLi022ClauseCtx = regexp.MustCompile(`\b(from|where|union|having)\b|\bselect[\s(]`)
 
-// reANDORSleep detects the "AND sleep()" / "OR sleep()" pattern used in boolean-based
-// time injection: `1 AND sleep(5)`, `1 OR pg_sleep(5)`, `1 AND benchmark(...)`.
+// reANDORSleep 检测布尔型时间注入使用的 "AND sleep()" / "OR sleep()" 模式：
+// `1 AND sleep(5)`、`1 OR pg_sleep(5)`、`1 AND benchmark(...)`。
 var reANDORSleep = regexp.MustCompile(`\b(and|or)\s*(sleep|pg_sleep|benchmark)\s*\(`)
 var reOrdinalAfterOr = regexp.MustCompile(`'or\s+\d+(?:st|nd|rd|th)\b`)
 var reJSProtocolNaturalPhrase = regexp.MustCompile(`(?i)\bjavascript\s*:\s*[a-z]+(?:\s+[a-z]+){0,4}$`)
 
-// reSQLTerminatorCtx detects a SQL comment/terminator preceded by closing parenthesis or
-// quote/digit, indicating injection context like "1); sleep(5)--".
+// reSQLTerminatorCtx 检测 SQL 注释/终止符前是否存在右括号或引号/数字，
+// 用于指示 "1); sleep(5)--" 这类注入上下文。
 var reSQLTerminatorCtx = regexp.MustCompile(`['")\d]\s*(--|/\*)`)
 
 func hasUnionSelectAttackContext(s string) bool {
@@ -4987,52 +4978,52 @@ func hasOrderByNumber(s string) bool {
 	}
 }
 
-// reIntoOutfileWithPath confirms that an INTO OUTFILE/DUMPFILE hit (sqli:017) carries a
-// quoted file path (required by MySQL syntax). Documentation text such as "SELECT INTO OUTFILE S3"
-// (AWS Aurora) does not have a quoted path and should be suppressed.
+// reIntoOutfileWithPath 确认 INTO OUTFILE/DUMPFILE 命中（sqli:017）带有
+// 带引号的文件路径（MySQL 语法要求）。诸如 "SELECT INTO OUTFILE S3"
+// （AWS Aurora 文档）没有引号路径，应被抑制。
 var reIntoOutfileWithPath = regexp.MustCompile(`\binto\s+(out|dump)file\s*['"]`)
 
-// reSQLiInjectionOps matches SQL injection attack operators that are unlikely to appear
-// in legitimate analytics beacons or documentation text. Used by sqli:005 suppressor
-// to distinguish URL/path wildcards (/* in S3 ARNs) from genuine SQL inline comments.
+// reSQLiInjectionOps 匹配不太可能出现在合法分析埋点或文档文本中的
+// SQL 注入攻击运算符，供 sqli:005 抑制器区分 URL/路径通配符
+// （S3 ARN 中的 /*）与真实 SQL 行内注释。
 var reSQLiInjectionOps = regexp.MustCompile(
-	`(union\s+(all\s+)?select\b` + // UNION injection
-		`|\bor\s+\d+\s*=\s*\d+` + // OR 1=1 boolean
-		`|\band\s+\d+\s*=\s*\d+` + // AND 1=2 boolean
+	`(union\s+(all\s+)?select\b` + // UNION 注入
+		`|\bor\s+\d+\s*=\s*\d+` + // OR 1=1 布尔注入
+		`|\band\s+\d+\s*=\s*\d+` + // AND 1=2 布尔注入
 		`|'\s*(or|and)\s+['"\d]` + // ' or 'x'='x'
-		`|\bsleep\s*\(` + // time-based blind
-		`|\bbenchmark\s*\(` + // time-based MySQL
-		`|;\s*(drop|truncate)\s+\w)`) // destructive DDL stacked query
+		`|\bsleep\s*\(` + // 时间型盲注
+		`|\bbenchmark\s*\(` + // MySQL 时间型盲注
+		`|;\s*(drop|truncate)\s+\w)`) // 破坏性 DDL 堆叠查询
 
-// reXSSHandlerCallParens detects a function call (opening parenthesis) in the value portion
-// of an HTML event handler attribute: onload=alert(1) → the ( is present.
-// CDN script loaders use ?onload=callbackName (a plain identifier, no parens), which is safe.
+// reXSSHandlerCallParens 检测 HTML 事件处理器属性值部分出现函数调用（左括号）：
+// onload=alert(1) → 存在 (。
+// CDN 脚本加载器使用 ?onload=callbackName（纯标识符、无括号），属安全形态。
 var reXSSHandlerCallParens = regexp.MustCompile(`\bon\w+\s*=\s*[^;& \n\r]*\(`)
 
-// reSQLi008AttackCtx confirms that a hex-literal hit (sqli:008) is a genuine SQL injection
-// attempt and not a benign hex value (CSS color, memory address, binary protocol).
-// When sqli:008 is the first-matching rule, we suppress the hit unless this regex matches.
+// reSQLi008AttackCtx 确认十六进制字面量命中（sqli:008）是真实 SQL 注入尝试，
+// 而非良性十六进制值（CSS 颜色、内存地址、二进制协议）。
+// 当 sqli:008 是首个命中规则时，只有该正则匹配才报告命中。
 var reSQLi008AttackCtx = regexp.MustCompile(`(` +
-	`\b(or|and)\s+\d+\s*=\s*\d+` + // OR 1=1 / AND 1=2 blind conditions
+	`\b(or|and)\s+\d+\s*=\s*\d+` + // OR 1=1 / AND 1=2 盲注条件
 	`|union(\s+all)?\s+select\b` + // UNION SELECT
-	`|\binformation_schema\b` + // schema/system table enumeration
-	`|\bhaving\s+\d+\s*=\s*\d+` + // HAVING 1=1 blind
+	`|\binformation_schema\b` + // schema/系统表枚举
+	`|\bhaving\s+\d+\s*=\s*\d+` + // HAVING 1=1 盲注
 	`|\bwhere\s+\d+\s*=\s*\d+` + // WHERE 1=1
-	`|\binto\s+(out|dump)file\b` + // file write exfiltration
-	`|\b(order|group)\s+by\s+\d+\s*(--|/\*)` + // ORDER/GROUP BY n + SQL comment
-	`|(or|and)\s+['"]\w+['"]\s*=\s*['"]\w+['"]` + // OR 'x'='x' string comparison
-	`|(substr|substring|mid)\s*\([^)]*\)\s*=\s*['"]` + // substr(...)='x' comparison
-	`|\d+\s*=\s*\(\s*select\b` + // subquery comparison: 1=(SELECT ...)
-	`|\bin\s*\(\s*select\b` + // IN (SELECT ...) subquery
+	`|\binto\s+(out|dump)file\b` + // 文件写入外带
+	`|\b(order|group)\s+by\s+\d+\s*(--|/\*)` + // ORDER/GROUP BY n 后接 SQL 注释
+	`|(or|and)\s+['"]\w+['"]\s*=\s*['"]\w+['"]` + // OR 'x'='x' 字符串比较
+	`|(substr|substring|mid)\s*\([^)]*\)\s*=\s*['"]` + // substr(...)='x' 比较
+	`|\d+\s*=\s*\(\s*select\b` + // 子查询比较：1=(SELECT ...)
+	`|\bin\s*\(\s*select\b` + // IN (SELECT ...) 子查询
 	`)`)
 
-// rePathTravSensitive detects path traversal payloads targeting known sensitive OS files
-// or directories. Used to suppress the `../../` FP for relative paths in build/config files.
+// rePathTravSensitive 检测指向已知敏感系统文件或目录的路径遍历载荷，
+// 用于抑制构建/配置文件中相对路径 `../../` 的误报。
 var rePathTravSensitive = regexp.MustCompile(
 	`(etc/passwd|etc/shadow|etc/hosts|/etc/|proc/self|/proc/|windows/system32|win\.ini|boot\.ini|cmd\.exe|/root/|/home/\w|\.env$|web\.xml|nginx\.conf|apache\.conf|web-inf|meta-inf|\.git/|\.svn/|\.htpasswd|\.aws/|\.ssh/|/bin/sh|/bin/bash|/bin/cat|/usr/bin|/var/log|/tmp/|/dev/)`)
 
-// reTautology detects boolean tautologies like "or 1=1", "and 2=2" (same number both sides).
-// Go regexp doesn't support backreferences, so we extract and compare manually.
+// reTautologyCapture 检测 "or 1=1"、"and 2=2" 这类布尔恒等式（两侧数字相同）。
+// Go regexp 不支持反向引用，故在此提取后手工比较。
 var reTautologyCapture = regexp.MustCompile(`\b(?:or|and)\s+(\d+)\s*=\s*(\d+)\b`)
 
 func isTautology(s string) bool {
@@ -5230,8 +5221,8 @@ func isSSRFFalsePositive(normalized, ruleID string) bool {
 	switch ruleID {
 	case "owasp:ssrf:010":
 		lower := strings.ToLower(normalized)
-		// Cloudflare RUM and CDN-CGI paths use "file://" or similar protocol patterns
-		// in telemetry payloads that are not actual SSRF attempts.
+		// Cloudflare RUM 与 CDN-CGI 路径会在遥测载荷中使用 "file://" 或类似协议模式，
+		// 它们并非真实的 SSRF 尝试。
 		if strings.Contains(lower, "cdn-cgi") ||
 			strings.Contains(lower, "/rum") ||
 			strings.Contains(lower, "cloudflare") {
@@ -5362,7 +5353,7 @@ var reWebshellPHPContext = regexp.MustCompile(`(base64_decode\s*\(|shell_exec\s*
 func isWebshellFalsePositive(normalized, ruleID string) bool {
 	switch ruleID {
 	case "owasp:webshell:001":
-		// If PHP/shell-specific markers are present, it's a real webshell attempt.
+		// 存在 PHP/shell 特有标记时才视作真实 webshell 尝试。
 		if reWebshellPHPContext.MatchString(normalized) {
 			return false
 		}
@@ -5372,7 +5363,7 @@ func isWebshellFalsePositive(normalized, ruleID string) bool {
 			strings.Contains(normalized, "proc_open(") {
 			return false
 		}
-		// Only eval() or assert() without PHP/shell context: likely JavaScript FP.
+		// 仅有 eval() 或 assert() 而无 PHP/shell 上下文：很可能是 JavaScript 误报。
 		return true
 	case "owasp:webshell:016":
 		lower := strings.ToLower(normalized)
@@ -5387,9 +5378,9 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 	lower := strings.ToLower(normalized)
 	switch ruleID {
 	case "owasp:crlf:004":
-		// Bare \r\n\r\n is common in multi-line textarea values (Windows newlines),
-		// multipart form data boundaries, and binary data.
-		// Require HTTP header/status-line context after the separator to confirm injection.
+		// 裸 \r\n\r\n 在多行 textarea 值（Windows 换行）、multipart 表单数据边界
+		// 与二进制数据中很常见。
+		// 要求分隔符后出现 HTTP 请求头/状态行上下文才确认注入。
 		if strings.Contains(lower, "telemetry") ||
 			strings.Contains(lower, "analytics") ||
 			strings.Contains(lower, "cdn-cgi") {
@@ -5397,9 +5388,9 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 		}
 		return !reCRLFHeaderInject.MatchString(normalized)
 	case "owasp:crlf:001":
-		// Multipart form uploads and binary file data naturally contain \r\n sequences.
-		// Suppress unless the CRLF is followed by an actual HTTP header injection attempt
-		// where the header value is suspicious (not just multipart boundary metadata).
+		// multipart 表单上传与二进制文件数据天然含 \r\n 序列。
+		// 除非 CRLF 后跟真实的 HTTP 请求头注入尝试
+		// （且头值可疑，而非仅 multipart 边界元数据），否则抑制。
 		if strings.Contains(normalized, "content-disposition:") ||
 			strings.Contains(normalized, "content-type: image/") ||
 			strings.Contains(normalized, "content-type: application/octet") ||
@@ -5407,11 +5398,11 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 			strings.Contains(normalized, "xmpmeta") {
 			return true
 		}
-		// Recorded HTTP response headers in telemetry/analytics JSON payloads.
-		// These are strings like "access-control-...: value\r\ncontent-type: ...\r\ndate: ..."
-		// which contain multiple standard HTTP headers — not injection attempts.
-		// A real CRLF injection targets a single header (set-cookie, location) to hijack
-		// the response. Recorded headers always have 2+ benign headers together.
+		// 遥测/分析 JSON 载荷中记录的 HTTP 响应头。
+		// 形如 "access-control-...: value\r\ncontent-type: ...\r\ndate: ..."，
+		// 同时含多个标准 HTTP 请求头——并非注入尝试。
+		// 真实 CRLF 注入只针对单个头（set-cookie、location）以劫持响应，
+		// 而被记录的响应头总是一起出现 2 个以上良性头。
 		benignHeaderCount := 0
 		for _, hdr := range []string{"content-type:", "content-length:", "date:", "server:",
 			"access-control-", "x-cache", "vary:", "x-nws-", "x-server-",
@@ -5428,8 +5419,8 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 		if benignHeaderCount >= 2 && !strings.Contains(lower, "set-cookie:") {
 			return true
 		}
-		// Telemetry, analytics, and logging POST bodies often contain \r\n + header-like
-		// patterns (e.g. "content-type:" in JSON payloads) which are not injection attempts.
+		// 遥测、分析与日志 POST 体常含 \r\n 加类请求头模式
+		// （例如 JSON 载荷里的 "content-type:"），并非注入尝试。
 		if strings.Contains(lower, "telemetry") ||
 			strings.Contains(lower, "analytics") ||
 			strings.Contains(lower, "cdn-cgi") ||
@@ -5438,8 +5429,8 @@ func isCRLFFalsePositive(normalized, ruleID string) bool {
 			strings.Contains(lower, "googletagmanager") {
 			return true
 		}
-		// Large POST bodies (>500 bytes) with \r\n followed by common HTTP headers
-		// are typically telemetry/form data, not header injection.
+		// 大于 500 字节且 \r\n 后接常见 HTTP 请求头的大 POST 体，
+		// 通常是遥测/表单数据，而非请求头注入。
 		if len(normalized) > 500 && !strings.Contains(lower, "set-cookie") &&
 			!strings.Contains(lower, "location:") {
 			return true
@@ -5509,17 +5500,17 @@ var sqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`\bselect\b[^;]{0,20}\(\s*select\b`), 5, "owasp:sqli:046", "select"},
 	{regexp.MustCompile(`\bselect\s+\*\s+from\s+\w`), 4, "owasp:sqli:047", "select"},
 	{regexp.MustCompile(`\bexec\s+master\s*\.\.\s*\w`), 5, "owasp:sqli:048", "master"},
-	// Unicode bypass: fullwidth/halfwidth character alternation in SQL keywords
+	// Unicode 绕过：SQL 关键词中全角/半角字符交替
 	{regexp.MustCompile(`[\x{FF10}-\x{FF5A}]{3,}.{0,20}(select|union|insert|update|delete)`), 5, "owasp:sqli:049", ""},
-	// Nested comment obfuscation: /*/**/union/**/select/**/
+	// 嵌套注释混淆：/*/**/union/**/select/**/
 	{regexp.MustCompile(`/\*[^*]*/\*.*?\*/.*?\*/`), 5, "owasp:sqli:050", "/*"},
-	// MySQL conditional comment: /*!50000 UNION*/
+	// MySQL 条件注释：/*!50000 UNION*/
 	{regexp.MustCompile(`/\*!\d{5}\s*(union|select|insert|update|delete|drop)\b`), 6, "owasp:sqli:051", "/*!"},
-	// MySQL versioned conditional comment variant
+	// MySQL 带版本号条件注释的变体
 	{regexp.MustCompile(`/\*!\s*(union|select|concat|group_concat)\b`), 5, "owasp:sqli:052", "/*!"},
-	// Fullwidth Unicode SQL keywords (e.g. ＳＥＬＥＣＴ)
+	// 全角 Unicode SQL 关键词（如 ＳＥＬＥＣＴ）
 	{regexp.MustCompile(`[\x{FF33}\x{FF53}][\x{FF25}\x{FF45}][\x{FF2C}\x{FF4C}][\x{FF25}\x{FF45}][\x{FF23}\x{FF43}][\x{FF34}\x{FF54}]`), 5, "owasp:sqli:053", ""},
-	// Double URL encoding detection: %2527 (%25 = %, so %2527 = %27 = ')
+	// 双重 URL 编码检测：%2527（%25 = %，故 %2527 = %27 = '）
 	{regexp.MustCompile(`%25(27|22|3[bB]|2[dD]2[dD])`), 5, "owasp:sqli:054", "%25"},
 	// JSON 文档函数：json_extract( 在 URL/表单上下文几乎不出现于良性输入，
 	// 是 MySQL/MariaDB 查询载荷的高置信度字面，单一命中即达 mid 阈。
@@ -5533,44 +5524,44 @@ var webshellPatterns = []owaspPattern{
 	{regexp.MustCompile(`runtime\.getruntime\(\)\.exec`), 5, "owasp:webshell:004", "getruntime"},
 	{regexp.MustCompile(`(cmd\.exe|powershell\.exe|/bin/(ba)?sh)`), 4, "owasp:webshell:005", ""},
 	{regexp.MustCompile(`\$_(get|post|request|cookie)\s*\[`), 4, "owasp:webshell:006", "$_"},
-	// PHP preg_replace with /e modifier (code execution)
+	// PHP preg_replace 带 /e 修饰符（代码执行）
 	{regexp.MustCompile(`preg_replace\s*\(\s*['"]/.*?/e`), 5, "owasp:webshell:007", "preg_replace"},
-	// Python subprocess / os.system for RCE
+	// Python subprocess / os.system 的 RCE 用法
 	{regexp.MustCompile(`(subprocess\s*\.\s*(call|run|popen)|os\s*\.\s*(system|exec[lv]p?))\s*\(`), 4, "owasp:webshell:008", ""},
-	// JSP/Groovy runtime execution
+	// JSP/Groovy 运行时执行
 	{regexp.MustCompile(`(\.exec\s*\(|\.getruntime\(\)\s*\.\s*exec)`), 5, "owasp:webshell:009", ""},
-	// Perl/Ruby system/exec
+	// Perl/Ruby 的 system/exec
 	{regexp.MustCompile("\\b(system|exec|open)\\s*\\(\\s*['\"]\\s*(cmd|bash|sh|powershell|nc|wget|curl)"), 4, "owasp:webshell:010", ""},
-	// ASP/ASPX shell: Response.Write/Server.Execute
+	// ASP/ASPX webshell：Response.Write / Server.Execute
 	{regexp.MustCompile(`(response\s*\.\s*(write|binarywrite)|server\s*\.\s*(execute|mappath))\s*\(`), 4, "owasp:webshell:011", ""},
-	// PHP create_function() — dynamic code generation equivalent to eval()
+	// PHP create_function()——等价于 eval() 的动态代码生成
 	{regexp.MustCompile(`create_function\s*\(\s*['"][^'"]{0,100}['"]\s*,`), 4, "owasp:webshell:012", "create_function"},
-	// PHP obfuscation wrappers commonly chained with eval to hide payloads
+	// PHP 混淆包装函数，常与 eval 串联以隐藏载荷
 	{regexp.MustCompile(`(gzinflate|gzuncompress|str_rot13|hex2bin|base64_decode)\s*\(\s*['"]`), 4, "owasp:webshell:013", ""},
-	// PHP call_user_func for dynamic invocation: call_user_func('system', $_GET['cmd'])
+	// PHP call_user_func 动态调用：call_user_func('system', $_GET['cmd'])
 	{regexp.MustCompile(`call_user_func\s*\(\s*['"]?\s*(system|exec|passthru|shell_exec|popen|proc_open|assert)\b`), 5, "owasp:webshell:014", "call_user_func"},
-	// Drupal Drupalgeddon2/3: mail[#post_render][]=exec, mail[#type]=markup
+	// Drupal Drupalgeddon2/3：mail[#post_render][]=exec、mail[#type]=markup
 	{regexp.MustCompile(`\[\s*#\s*(post_render|pre_render|lazy_builder|markup|type)\s*\]`), 4, "owasp:webshell:015", ""},
-	// Java XML deserialization / XStream RCE: <java.util.PriorityQueue serialization=...>
+	// Java XML 反序列化 / XStream RCE：<java.util.PriorityQueue serialization=...>
 	{regexp.MustCompile(`<java\.\w+\.`), 5, "owasp:webshell:016", "<java."},
-	// ThinkPHP invokefunction RCE: /index.php?s=index/\think\app/invokefunction&function=call_user_func
+	// ThinkPHP invokefunction RCE：/index.php?s=index/\think\app/invokefunction&function=call_user_func
 	{regexp.MustCompile(`invokefunction.*call_user_func|call_user_func.*invokefunction`), 5, "owasp:webshell:017", ""},
-	// Generic call_user_func without dangerous function name — ThinkPHP/CodeIgniter
+	// 不带危险函数名的通用 call_user_func——ThinkPHP/CodeIgniter 形态
 	{regexp.MustCompile(`\\think\\(app|request|template|view)\b`), 5, "owasp:webshell:018", ""},
-	// ASP/JSP eval patterns: <%eval, <%execute, request("cmd")
+	// ASP/JSP eval 形态：<%eval、<%execute、request("cmd")
 	{regexp.MustCompile(`<%\s*(eval|execute|response\.write)`), 5, "owasp:webshell:019", "<%"},
-	// PHP file operations: file_put_contents + file_get_contents combined
+	// PHP 文件操作：file_put_contents 与 file_get_contents 组合出现
 	{regexp.MustCompile(`file_put_contents\s*\(.*file_get_contents|file_get_contents\s*\(.*file_put_contents`), 5, "owasp:webshell:020", ""},
-	// elFinder connector RCE: cmd=...&name=...>*.php
+	// elFinder connector RCE：cmd=...&name=...>*.php
 	{regexp.MustCompile(`\bname\s*=\s*[^&]*>\s*\w+\.(php|jsp|asp|aspx|sh)\b`), 5, "owasp:webshell:021", ""},
-	// file_put_contents or file_get_contents with .php file path
+	// file_put_contents 或 file_get_contents 搭配 .php 文件路径
 	{regexp.MustCompile(`file_put_contents\b.*\.\s*php\b`), 5, "owasp:webshell:022", "file_put_contents"},
-	// PHP short open tag in body/headers: <?php or <? followed by space/newline
+	// body/header 中的 PHP 短标签：<?php，或 <? 后接空格/换行
 	{regexp.MustCompile(`<\?\s+(echo|print|include|require|eval|assert|system|exec|passthru)\b`), 5, "owasp:webshell:023", "<?"},
-	// PHP wrapper exploitation: php://input, php://filter, data://text/plain
+	// PHP 包装器利用：php://input、php://filter、data://text/plain
 	{regexp.MustCompile(`php://(input|filter|output|stdin|memory|temp)\b`), 5, "owasp:webshell:024", "php://"},
 	{regexp.MustCompile(`data://text/plain\b`), 4, "owasp:webshell:025", "data://text/plain"},
-	// PHP remote file inclusion: include/require with remote URL
+	// PHP 远程文件包含：include/require 搭配远程 URL
 	{regexp.MustCompile(`\b(include|require|include_once|require_once)\s*\(\s*['"]?\s*https?://`), 5, "owasp:webshell:026", ""},
 	// Python 反射导入 + 危险模块：__import__('os') / __import__("subprocess")。
 	// 与 webshell:008（os.system/subprocess 直接调用）互补，覆盖 Jinja2/SSTI 载荷，
@@ -5616,14 +5607,14 @@ var revshellPatterns = []owaspPattern{
 	{regexp.MustCompile(`(invoke-expression|iex)\s*\(\s*(new-object|downloadstring)`), 5, "owasp:revshell:005", ""},
 	{regexp.MustCompile(`(curl|wget)\s+.*\|\s*(ba)?sh`), 5, "owasp:revshell:006", ""},
 	{regexp.MustCompile(`mkfifo\s+/tmp/`), 4, "owasp:revshell:007", "mkfifo"},
-	// Perl reverse shell
+	// Perl 反弹 shell
 	{regexp.MustCompile(`perl\s+-e\s+['"].{0,300}socket`), 4, "owasp:revshell:008", "socket"},
-	// Socat reverse shell
+	// Socat 反弹 shell
 	{regexp.MustCompile(`socat\s+\S+\s+exec:`), 5, "owasp:revshell:009", "socat"},
 	{regexp.MustCompile(`socat\s+[a-z0-9.+,:-]{0,40}tcp[a-z0-9.+,:-]{0,40}\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`), 4, "owasp:revshell:010", "socat"},
-	// Telnet reverse shell: telnet 1.2.3.4 4444
+	// Telnet 反弹 shell：telnet 1.2.3.4 4444
 	{regexp.MustCompile(`telnet\s+\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\s+\d{2,5}`), 4, "owasp:revshell:011", "telnet"},
-	// Ruby or Node.js socket-based reverse shell
+	// Ruby 或 Node.js 基于 socket 的反弹 shell
 	{regexp.MustCompile(`(ruby|node)\s+-[re]\s+['"].{0,300}socket`), 4, "owasp:revshell:012", "socket"},
 }
 
@@ -5720,23 +5711,23 @@ var xssPatterns = []owaspPattern{
 	{regexp.MustCompile(`<a\b[^>]*\bdownload\s*=\s*['"]?\s*\w+\.\w{2,5}\b`), 4, "owasp:xss:055", "download"},
 	{regexp.MustCompile(`j\s*a\s*v\s*a\s+s\s*c\s*r\s*i\s*p\s*t\s*:`), 5, "owasp:xss:056", ""},
 	{regexp.MustCompile(`<(body|table|thead|td|th|tr)\b[^>]*\bbackground\s*=\s*['"]?\s*(//|https?:)`), 4, "owasp:xss:057", "background"},
-	// DOM Clobbering: overwriting DOM properties via name/id attributes
+	// DOM Clobbering：通过 name/id 属性覆写 DOM 属性
 	{regexp.MustCompile(`<(form|input|img|a|embed|object)\b[^>]*\b(name|id)\s*=\s*['"]?(document|window|location|navigator|top|self|frames)\b`), 5, "owasp:xss:058", "<"},
-	// DOM Clobbering via named access on document
+	// 通过 document 具名访问实施 DOM Clobbering
 	{regexp.MustCompile(`<(a|area)\b[^>]*\bname\s*=\s*['"]?__proto__`), 5, "owasp:xss:059", "__proto__"},
-	// mXSS mutation: noscript/noembed/noframes content reinterpretation
+	// mXSS 变异：noscript/noembed/noframes 内容被重新解释
 	{regexp.MustCompile(`<(noscript|noembed|noframes)\b[^>]*>.*?<(script|img|svg|iframe)\b`), 5, "owasp:xss:060", "<no"},
-	// mXSS via namespace confusion in math/svg
+	// math/svg 命名空间混淆导致的 mXSS
 	{regexp.MustCompile(`<(math|svg)\b[^>]*>.*?<(style|mglyph|malignmark)\b`), 5, "owasp:xss:061", "<"},
-	// SVG foreignObject: embedding HTML in SVG context
+	// SVG foreignObject：在 SVG 上下文内嵌 HTML
 	{regexp.MustCompile(`<svg\b[^>]*>.*?<foreignobject\b`), 5, "owasp:xss:062", "foreignobject"},
-	// SVG animation event handlers
+	// SVG 动画事件处理器
 	{regexp.MustCompile(`<(animate|animatetransform|set)\b[^>]*\bon(begin|end|repeat)\s*=`), 5, "owasp:xss:063", "on"},
-	// Namespace confusion: using xlink:href in SVG to execute JS
+	// 命名空间混淆：在 SVG 中用 xlink:href 执行 JS
 	{regexp.MustCompile(`xlink:href\s*=\s*['"]?\s*javascript:`), 5, "owasp:xss:064", "xlink:href"},
-	// DOMPurify bypass via clobbered properties
+	// 通过被 clobber 的属性绕过 DOMPurify
 	{regexp.MustCompile(`<[^>]+(sanitize|purify|dompurify)[^>]*>`), 3, "owasp:xss:065", "<"},
-	// Template literal XSS: ${...} inside backtick strings
+	// 模板字面量 XSS：反引号字符串内的 ${...}
 	{regexp.MustCompile("`[^`]*\\$\\{[^}]*(document|window|location|cookie|alert|fetch|eval)[^}]*\\}[^`]*`"), 5, "owasp:xss:066", "${"},
 }
 

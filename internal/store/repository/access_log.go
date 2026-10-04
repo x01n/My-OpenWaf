@@ -21,16 +21,15 @@ type AccessLogRepo struct {
 	fingerprintNamespace string
 }
 
-// CountCache is an optional cache for expensive COUNT queries.
+// CountCache 是昂贵的 COUNT 查询所用的可选缓存。
 type CountCache interface {
 	Get(key string) (any, bool)
 	Set(key string, value any)
 }
 
-// CountCacheInvalidator is implemented by caches that can discard all count
-// entries after an append/delete. The optional interface keeps lightweight test
-// doubles compatible while allowing the production QueryCache to preserve
-// write-after-read count consistency.
+// CountCacheInvalidator 由那些能在追加/删除后丢弃全部计数条目的缓存实现。
+// 把它设计成可选接口，既让轻量测试替身保持兼容，又让生产环境的 QueryCache
+// 得以维持「写后读」的计数一致性。
 type CountCacheInvalidator interface {
 	InvalidateAll()
 }
@@ -43,7 +42,7 @@ func NewAccessLogRepo(db *gorm.DB) *AccessLogRepo {
 	}
 }
 
-// SetCountCache configures an optional count cache for list queries.
+// SetCountCache 为列表查询配置可选的计数缓存。
 func (r *AccessLogRepo) SetCountCache(c CountCache) {
 	r.countCache = c
 }
@@ -55,12 +54,12 @@ func (r *AccessLogRepo) invalidateCountCache() {
 	invalidateCountCachePrefixes(r.countCache, accessLogCountCachePrefix, accessLogListCachePrefix)
 }
 
-// SetHotCache configures Redis-backed hot cache for large query results.
+// SetHotCache 为大体量查询结果配置 Redis 热缓存。
 func (r *AccessLogRepo) SetHotCache(hc HotCacheBackend) {
 	r.hotCache = hc
 }
 
-// SetWriteQueue configures async write queue for batch writes.
+// SetWriteQueue 为批量写入配置异步写队列。
 func (r *AccessLogRepo) SetWriteQueue(wq WriteQueueBackend) {
 	r.writeQueue = wq
 }
@@ -238,8 +237,8 @@ type fingerprintLatestRow struct {
 	TLSPointFormats string    `gorm:"column:tls_point_formats"`
 }
 
-// accessLogListCacheValue contains only the already-projected list columns.
-// Detail payloads are never loaded into this cache.
+// accessLogListCacheValue 只承载已投影好的列表列。
+// 详情载荷永远不会被载入这份缓存。
 type accessLogListCacheValue struct {
 	Items []store.AccessLog
 	Total int64
@@ -275,9 +274,8 @@ func fingerprintColumns(alias string) string {
 	return b.String()
 }
 
-// fingerprintRowsPredicate selects the page of already-grouped fingerprints in
-// a fixed number of follow-up queries. Alias is an internal SQL literal such as
-// "al."; all data values remain bound parameters.
+// fingerprintRowsPredicate 用固定数量的后续查询选出这一页已分组好的指纹。
+// alias 是内部的 SQL 字面量（例如 "al."）；所有数据值仍走绑定参数。
 func fingerprintRowsPredicate(rows []fingerprintRow, alias string) (string, []any) {
 	var b strings.Builder
 	args := make([]any, 0, len(rows))
@@ -310,9 +308,9 @@ func fingerprintKeyFromBotAggregate(row fingerprintBotAggregate) fingerprintKey 
 	}
 }
 
-// accessLogListColumns excludes the large request/response audit payloads from
-// list and realtime polling queries. Get and FindByRequestID intentionally keep
-// selecting the complete row for detail and request-trace views.
+// accessLogListColumns 把体积庞大的请求/响应审计载荷排除在列表查询与
+// 实时轮询查询之外。Get 与 FindByRequestID 则有意继续查询整行，
+// 以满足详情页与请求追踪视图的需要。
 var accessLogListColumns = []string{
 	"id", "created_at", "site_id", "request_id", "client_ip", "host", "path", "query_string", "method",
 	"status_code", "waf_action", "cache_state", "upstream", "user_agent", "request_body_truncated", "request_size",
@@ -328,7 +326,7 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 	cacheKey := accessLogCountCacheKey(f)
 	listCacheKey := accessLogListCacheKey(f, offset, limit)
 
-	// Try Redis hot cache for large query results.
+	// 先试 Redis 热缓存，命中即可直接返回大体量查询结果。
 	if r.hotCache != nil && r.hotCache.Available() {
 		hcKey := "al_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(hcKey); ok {
@@ -340,9 +338,9 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 		}
 	}
 
-	// Reuse the bounded in-process query cache when Redis is unavailable or cold.
-	// Only the lightweight list projection is stored, and small pages are capped
-	// to keep user-controlled filter cardinality from consuming excessive memory.
+	// Redis 不可用或未命中时，退回复用进程内的有界查询缓存。
+	// 这里只存轻量列表投影，且小页面上限做了封顶，
+	// 避免用户可控的过滤条件基数消耗过多内存。
 	if r.countCache != nil && limit > 0 && limit <= accessLogListCacheMaxLimit {
 		if value, ok := r.countCache.Get(listCacheKey); ok {
 			if cached, ok := value.(accessLogListCacheValue); ok {
@@ -401,7 +399,7 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 		})
 	}
 
-	// Cache large results in Redis for subsequent requests.
+	// 把大体量结果缓存进 Redis，供后续请求复用。
 	if r.hotCache != nil && r.hotCache.Available() {
 		hcKey := "al_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		r.hotCache.SetList(hcKey, items, total, 5*time.Second)
@@ -558,9 +556,9 @@ func (r *AccessLogRepo) loadFingerprints(offset, limit int, f FingerprintFilter)
 		q := r.db.Model(&store.AccessLog{}).Where("fingerprint_key <> ?", "")
 		return applyFingerprintFilters(q, f)
 	}
-	// The digest index is the grouping identity. The original nine fields are
-	// projected with MAX so the response shape remains unchanged without putting
-	// the wide TEXT columns in GROUP BY or the temporary B-tree.
+	// digest 索引就是分组标识。原有九个字段通过 MAX 投影出来，
+	// 这样既不用把宽 TEXT 列放进 GROUP BY 或临时 B 树，
+	// 又能保持响应结构不变。
 	groupColumns := "fingerprint_key"
 	groupSelect := groupColumns +
 		", MAX(tls_ja3_hash) AS tls_ja3_hash" +

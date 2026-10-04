@@ -17,9 +17,11 @@ func EnvelopeLabel(category string, version uint) string {
 	return fmt.Sprintf("owaf-%s:v%d", category, version)
 }
 
-// EnvelopePrefix 生成单版本 ASCII 前缀（label-spec 定稿形态）：
-//
-//	EnvelopePrefix(version, label) = "v" + version + "." + label
+/**
+ * EnvelopePrefix 生成单版本 ASCII 前缀（label-spec 定稿形态）。
+ *
+ *	EnvelopePrefix(version, label) = "v" + version + "." + label
+ */
 func EnvelopePrefix(version uint, label string) string {
 	return "v" + strconv.FormatUint(uint64(version), 10) + "." + label
 }

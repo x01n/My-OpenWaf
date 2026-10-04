@@ -15,7 +15,7 @@ func init() {
 	SetChallengeSecret([]byte("test-secret-key-for-unit-tests!!"))
 }
 
-// --- SetChallengeSecret ---
+// SetChallengeSecret
 
 func TestSetChallengeSecretTooShort(t *testing.T) {
 	before := append([]byte(nil), loadChallengeSecret()...)
@@ -32,7 +32,7 @@ func TestSetChallengeSecretTooShort(t *testing.T) {
 	}
 }
 
-// --- VerifyChallengeTokenWithClaims（b0 A5：已删除未绑定身份的无 claims 版本） ---
+// VerifyChallengeTokenWithClaims（b0 A5：已删除未绑定身份的无 claims 版本）
 
 func TestGenerateChallengeTokenPairWithClaimsAndVerify(t *testing.T) {
 	claims := ChallengeTokenClaims{ClientIP: "192.0.2.9", Host: "example.test", SiteID: 3}
@@ -81,7 +81,7 @@ func TestVerifyChallengeTokenTamperedToken(t *testing.T) {
 	}
 }
 
-// --- normalizeChallengePassTTL ---
+// normalizeChallengePassTTL
 
 func TestNormalizeChallengePassTTL(t *testing.T) {
 	if normalizeChallengePassTTL(0) != time.Hour {
@@ -95,7 +95,7 @@ func TestNormalizeChallengePassTTL(t *testing.T) {
 	}
 }
 
-// --- challengeIPString ---
+// challengeIPString
 
 func TestChallengeIPString(t *testing.T) {
 	if challengeIPString(nil) != "" {
@@ -108,7 +108,7 @@ func TestChallengeIPString(t *testing.T) {
 	}
 }
 
-// --- challengeUserAgentHash ---
+// challengeUserAgentHash
 
 func TestChallengeUserAgentHash(t *testing.T) {
 	h1 := challengeUserAgentHash("Mozilla/5.0 Chrome/125")
@@ -125,7 +125,7 @@ func TestChallengeUserAgentHash(t *testing.T) {
 	}
 }
 
-// --- SignChallengePassValue / VerifyChallengePassValue round-trip ---
+// SignChallengePassValue / VerifyChallengePassValue 往返
 
 func TestSignAndVerifyChallengePassValue(t *testing.T) {
 	ip := net.ParseIP("10.0.0.1")
@@ -187,7 +187,7 @@ func TestVerifyChallengePassValueHostCaseInsensitive(t *testing.T) {
 	}
 }
 
-// --- VerifyChallengePassCookie ---
+// VerifyChallengePassCookie
 
 func TestVerifyChallengePassCookie(t *testing.T) {
 	ip := net.ParseIP("10.0.0.1")
@@ -226,7 +226,7 @@ func TestVerifyChallengePassCookieMultiple(t *testing.T) {
 	}
 }
 
-// --- SignChallengePassValueWithClaims round-trip ---
+// SignChallengePassValueWithClaims 往返
 
 func TestSignAndVerifyChallengePassValueWithClaims(t *testing.T) {
 	claims := ChallengePassClaims{
@@ -268,7 +268,7 @@ func TestVerifyChallengePassValueWithClaimsWrongBind(t *testing.T) {
 	}
 }
 
-// --- challengeEncrypt / challengeDecrypt round-trip ---
+// challengeEncrypt / challengeDecrypt 往返
 
 func TestChallengeEncryptDecrypt(t *testing.T) {
 	plaintext := []byte("hello challenge world")
@@ -321,7 +321,7 @@ func TestChallengeDecryptTooShort(t *testing.T) {
 	}
 }
 
-// --- BuildChallengePassCookie smoke test ---
+// BuildChallengePassCookie 冒烟测试
 
 func TestBuildChallengePassCookie(t *testing.T) {
 	ip := net.ParseIP("10.0.0.1")

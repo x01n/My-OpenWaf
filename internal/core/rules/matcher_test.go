@@ -32,7 +32,7 @@ func TestParsePatternNewKinds(t *testing.T) {
 }
 
 func TestCompoundJSONPattern(t *testing.T) {
-	// JSON compound condition: AND(block_path:/admin, block_method:POST)
+	// JSON 复合条件：AND(block_path:/admin, block_method:POST)
 	pattern := `{"op":"and","children":[{"kind":"block_path","arg":"/admin"},{"kind":"block_method","arg":"POST"}]}`
 	kind, _ := ParsePattern(pattern)
 	if kind != "compound" {
@@ -166,13 +166,13 @@ func TestCompoundNOT(t *testing.T) {
 		t.Fatal("expected 1 compiled rule")
 	}
 
-	// IP outside 10.0.0.0/8 should match (NOT whitelist = block)
+	// IP 在 10.0.0.0/8 之外应命中（非白名单 = 拦截）
 	mc := MatchCtx{ClientIP: net.ParseIP("8.8.8.8"), Path: "/"}
 	if !rules[0].Match(mc) {
 		t.Error("expected match for IP outside 10.0.0.0/8")
 	}
 
-	// IP inside 10.0.0.0/8 should NOT match
+	// IP 在 10.0.0.0/8 之内不应命中
 	mc.ClientIP = net.ParseIP("10.1.2.3")
 	if rules[0].Match(mc) {
 		t.Error("expected no match for IP inside 10.0.0.0/8")
@@ -471,8 +471,8 @@ func TestUserAgentRegexMatcher(t *testing.T) {
 }
 
 func TestUserAgentRegexCached(t *testing.T) {
-	// Compile the same regex-based rule twice; both should match identically,
-	// verifying the regex cache returns the correct compiled pattern.
+	// 编译同一条基于正则的规则两次；两者应产生相同匹配结果，
+	// 以验证正则缓存返回的是正确的已编译模式。
 	pattern := `block_user_agent_regex:(?i)dirbuster`
 	r1 := Compile([]store.Rule{{Phase: "acl", Pattern: pattern, Action: "intercept", Priority: 1, Enabled: true}})
 	r2 := Compile([]store.Rule{{Phase: "acl", Pattern: pattern, Action: "intercept", Priority: 1, Enabled: true}})

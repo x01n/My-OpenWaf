@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ---- Get/Set 基础读写 ----
+// Get/Set 基础读写
 
 func TestQueryCacheGetSetRoundTrip(t *testing.T) {
 	qc := NewQueryCache(5 * time.Second)
@@ -28,7 +28,7 @@ func TestQueryCacheGetMissReturnsFalse(t *testing.T) {
 	}
 }
 
-// ---- TTL 过期 ----
+// TTL 过期
 
 func TestQueryCacheGetExpiredEntryReturnsMiss(t *testing.T) {
 	qc := NewQueryCache(5 * time.Second)
@@ -83,16 +83,16 @@ func TestQueryCacheSetWithTTLCustomDuration(t *testing.T) {
 	}
 }
 
-// ---- HitStats ----
+// HitStats
 
 func TestQueryCacheHitStats(t *testing.T) {
 	qc := NewQueryCache(5 * time.Second)
 	defer qc.Close()
 
 	qc.Set("s", "v")
-	qc.Get("s")       // hit
-	qc.Get("s")       // hit
-	qc.Get("missing") // miss
+	qc.Get("s")       // 命中
+	qc.Get("s")       // 命中
+	qc.Get("missing") // 未命中
 
 	hits, misses := qc.HitStats()
 	if hits != 2 {
@@ -111,7 +111,7 @@ func TestQueryCacheHitStatsNilReceiverNoPanic(t *testing.T) {
 	}
 }
 
-// ---- Invalidate / InvalidateAll ----
+// Invalidate / InvalidateAll
 
 func TestQueryCacheInvalidateRemovesKey(t *testing.T) {
 	qc := NewQueryCache(5 * time.Second)
@@ -168,7 +168,7 @@ func TestQueryCacheInvalidateAllClearsEverything(t *testing.T) {
 	}
 }
 
-// ---- 容量上限（storeLocked） ----
+// 容量上限（storeLocked）
 
 func TestQueryCacheCapLimitDropsNewEntryWhenFull(t *testing.T) {
 	// 设置 maxEntries=2，写满后新 key 不应能插入（除非有过期项可清理）
@@ -214,7 +214,7 @@ func TestQueryCacheCapLimitEvictsExpiredBeforeDropping(t *testing.T) {
 	}
 }
 
-// ---- 覆写已存在 key ----
+// 覆写已存在 key
 
 func TestQueryCacheSetOverwritesExistingKey(t *testing.T) {
 	qc := NewQueryCache(5 * time.Second)

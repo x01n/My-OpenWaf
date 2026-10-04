@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// BuiltinRuleDefinitions returns the complete metadata inventory for every stable RuleID emitted by the detector.
+// BuiltinRuleDefinitions 返回检测器实际发出的每个稳定 RuleID 的完整元信息清单。
 func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 	definitions := make(map[string]store.OWASPRuleCatalog)
 	patterns := CollectRulePatterns()
@@ -87,7 +87,7 @@ func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 	return items
 }
 
-// ReconcileBuiltinCatalog upserts current metadata and retires definitions no longer emitted by this build.
+// ReconcileBuiltinCatalog 更新现有元信息，并停用本版本不再发出的规则定义。
 func ReconcileBuiltinCatalog(db *gorm.DB) error {
 	definitions := BuiltinRuleDefinitions()
 	return db.Transaction(func(tx *gorm.DB) error {
@@ -133,8 +133,7 @@ func allPatternRuleGroups() []patternRuleGroup {
 	}
 }
 
-// rulePatternInfo bundles the display snapshot of one rule: its aggregated
-// pattern text and its risk score.
+// rulePatternInfo 聚合单条规则的展示快照：合并后的正则文本与风险分值。
 type rulePatternInfo struct {
 	Pattern string
 	Score   int

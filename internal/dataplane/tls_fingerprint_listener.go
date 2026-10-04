@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-// maxClientHelloRecord is the TLS record payload limit; the 5-byte header is read separately.
+// maxClientHelloRecord 是 TLS record 载荷上限；5 字节头部另行读取。
 const maxClientHelloRecord = 16 * 1024
 
 const defaultTLSFingerprintPrefixBufferSize = 2048

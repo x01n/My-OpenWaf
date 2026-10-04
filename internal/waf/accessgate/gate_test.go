@@ -153,7 +153,7 @@ func TestGateCheckAccessCrossSiteSessionRejected(t *testing.T) {
 
 func TestGateVerifySharedPassword(t *testing.T) {
 	store := NewMemorySessionStore()
-	// bcrypt hash of "test123"
+	// "test123" 的 bcrypt 哈希
 	hash := "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 	cfg := Config{
 		Enabled:            true,
@@ -317,7 +317,7 @@ func TestGenerateToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(token1) != 64 { // 32 bytes hex encoded
+	if len(token1) != 64 { // 32 字节的 hex 编码
 		t.Fatalf("token 长度应为 64: got %d", len(token1))
 	}
 	if token1 == token2 {

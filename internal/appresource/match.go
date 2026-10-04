@@ -8,7 +8,7 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// Match evaluates a compiled rule against a subject string.
+// Match 用编译好的规则对目标串求值。
 func Match(cr CompiledRule, subject string) bool {
 	return applyOp(cr.Op, cr.Pattern, subject, cr.Regex)
 }
@@ -39,7 +39,7 @@ func applyOp(op, pattern, value string, re interface{ MatchString(string) bool }
 	}
 }
 
-// Subject resolves the string to match for a rule from pre-built material.
+// Subject 从预先构建的 material 中解析出该规则要匹配的字符串。
 func Subject(cr CompiledRule, m *Material, reqHeader func(string) string) string {
 	if m == nil {
 		return ""
@@ -87,7 +87,16 @@ func Subject(cr CompiledRule, m *Material, reqHeader func(string) string) string
 	}
 }
 
-// MatchedRuleIDs returns all rule IDs that match the material (single phase: caller must supply response fields when needed).
+/**
+ * MatchedRuleIDs 返回 material 命中的全部规则 ID。
+ *
+ * 单阶段：需要响应字段时由调用方负责提供。
+ *
+ * @param rules 编译后的规则列表。
+ * @param m 请求/响应提取出的 material。
+ * @param reqHeader 请求头取值函数（大小写不敏感）。
+ * @return 命中的规则 ID 列表；无命中时返回 nil。
+ */
 func MatchedRuleIDs(rules []CompiledRule, m *Material, reqHeader func(string) string) []uint {
 	var ids []uint
 	for _, cr := range rules {

@@ -8,8 +8,8 @@ import (
 
 var legacyExecutableRulePhases = []string{"rate_limit", "owasp_default"}
 
-// V3MigrateLegacyRulePhases rewrites historical custom-rule rows that were
-// persisted with non-executable phases into the executable custom phase.
+// V3MigrateLegacyRulePhases 把历史上以不可执行 phase 持久化的自定义规则行
+// 改写为可执行的 custom phase。
 func V3MigrateLegacyRulePhases(db *gorm.DB) error {
 	if !db.Migrator().HasTable("rules") {
 		return nil

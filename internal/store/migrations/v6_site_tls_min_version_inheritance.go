@@ -9,9 +9,9 @@ import (
 
 const siteTLSMinVersionInheritanceMigrationKey = "migration_v6_site_tls_min_version_inheritance"
 
-// V6MigrateSiteTLSMinVersionInheritance converts the historical TLS 1.2 site
-// minimum default into the current empty-string inheritance marker. The marker
-// prevents future explicit TLS12 overrides from being cleared on later starts.
+// V6MigrateSiteTLSMinVersionInheritance 把历史上的站点 TLS 1.2 最低版本默认值
+// 转换为当前的空字符串继承标记。该标记可避免后续显式的 TLS12 覆盖
+// 在之后的重启中被清除。
 func V6MigrateSiteTLSMinVersionInheritance(db *gorm.DB) error {
 	if !db.Migrator().HasTable(&siteTLSMinVersionInheritanceTable{}) {
 		return nil

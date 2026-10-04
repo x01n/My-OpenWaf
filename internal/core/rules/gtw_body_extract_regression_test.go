@@ -5,18 +5,20 @@ import (
 	"testing"
 )
 
-// 本文件是 gotestwaf 剩余缺口修复线的请求体抽取专项回归，只断言
-// extractBodyTargets 的输出形态，不引用任何检测层包：
-//  1. community-rce-rawrequests：form-urlencoded 体 `cmd=127.0.0.1 && ls /etc`
-//     —— 按 & 拆分会把 `&&` 命令链切断，需保留整串目标。
-//  2. community-lfi-multipart：UNC 路径出现在 multipart 的 form name 位
-//     —— mime 解析对 quoted-string 做反转义（\\ → \），双反斜杠前缀被吞，
-//     需以 Content-Disposition 头部原文作为补充扫描目标。
-//  3. owasp-api rest：JSON 值内的 SQLi 短语需被完整抽出（含 \uXXXX 解码）。
-//
-// 检测层（哪条规则命中、命中分数）的断言在 internal/waf/owasp 包内，
-// 见 gtw_gap_regression_test.go。本包只负责「抽得全、抽得准、不过度抽取」，
-// 刻意不跨包调用检测引擎：两个包各自独立演进，避免测试互相拖红。
+/**
+ * 本文件是 gotestwaf 剩余缺口修复线的请求体抽取专项回归，只断言
+ * extractBodyTargets 的输出形态，不引用任何检测层包：
+ *  1. community-rce-rawrequests：form-urlencoded 体 `cmd=127.0.0.1 && ls /etc`
+ *     —— 按 & 拆分会把 `&&` 命令链切断，需保留整串目标。
+ *  2. community-lfi-multipart：UNC 路径出现在 multipart 的 form name 位
+ *     —— mime 解析对 quoted-string 做反转义（\\ → \），双反斜杠前缀被吞，
+ *     需以 Content-Disposition 头部原文作为补充扫描目标。
+ *  3. owasp-api rest：JSON 值内的 SQLi 短语需被完整抽出（含 \uXXXX 解码）。
+ *
+ * 检测层（哪条规则命中、命中分数）的断言在 internal/waf/owasp 包内，
+ * 见 gtw_gap_regression_test.go。本包只负责「抽得全、抽得准、不过度抽取」，
+ * 刻意不跨包调用检测引擎：两个包各自独立演进，避免测试互相拖红。
+ */
 
 // targetsContain 判断抽取结果中是否存在满足谓词的目标。
 func targetsContain(targets []string, pred func(string) bool) bool {

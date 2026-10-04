@@ -7,7 +7,7 @@ import (
 	rueidis "github.com/redis/rueidis"
 )
 
-// ---- resolveAction（纯函数） ----
+// resolveAction（纯函数）
 
 func TestResolveActionEmptySteps(t *testing.T) {
 	if got := resolveAction(5, nil); got != "" {
@@ -43,7 +43,7 @@ func TestResolveActionMultiStepReturnsHighest(t *testing.T) {
 	}
 }
 
-// ---- effectiveCfg ----
+// effectiveCfg
 
 func TestEffectiveCfgNilUsesDefault(t *testing.T) {
 	m := NewEscalationManager(nil)
@@ -83,7 +83,7 @@ func TestEffectiveCfgEnabledOverrideWins(t *testing.T) {
 	}
 }
 
-// ---- RecordHit + getCountLocal ----
+// RecordHit + getCountLocal
 
 func TestRecordHitDisabledDoesNotCount(t *testing.T) {
 	m := NewEscalationManager(nil)
@@ -131,7 +131,7 @@ func TestGetCountLocalExpiredEntryReturnsZero(t *testing.T) {
 	}
 }
 
-// ---- Evaluate ----
+// Evaluate
 
 func TestEvaluateDisabledReturnsEmpty(t *testing.T) {
 	m := NewEscalationManager(nil)
@@ -190,7 +190,7 @@ func TestEvaluateReturnsCorrectAction(t *testing.T) {
 	}
 }
 
-// ---- GetCurrentLevel ----
+// GetCurrentLevel
 
 func TestGetCurrentLevelDisabledReturnsNegative(t *testing.T) {
 	m := NewEscalationManager(nil)
@@ -226,7 +226,7 @@ func TestGetCurrentLevelMultiStep(t *testing.T) {
 	}
 }
 
-// ---- ActionSeverity ----
+// ActionSeverity
 
 func TestActionSeverityBlock(t *testing.T) {
 	// "block" 映射到 Drop 优先级（90）
@@ -249,7 +249,7 @@ func TestActionSeverityChallenge(t *testing.T) {
 	}
 }
 
-// ---- SetRedis nil 安全 ----
+// SetRedis nil 安全
 
 func TestSetRedisOnNilManagerNoPanic(t *testing.T) {
 	defer func() {
@@ -261,7 +261,7 @@ func TestSetRedisOnNilManagerNoPanic(t *testing.T) {
 	m.SetRedis(nil)
 }
 
-// ---- Key 生成函数 ----
+// Key 生成函数
 
 func TestRedisEscalationKeyFormat(t *testing.T) {
 	got := redisEscalationKey("1.2.3.4", 42)
@@ -279,7 +279,7 @@ func TestLocalEscalationKeyFormat(t *testing.T) {
 	}
 }
 
-// ---- DefaultEscalationConfig ----
+// DefaultEscalationConfig
 
 func TestDefaultEscalationConfigValues(t *testing.T) {
 	cfg := DefaultEscalationConfig()
@@ -294,7 +294,7 @@ func TestDefaultEscalationConfigValues(t *testing.T) {
 	}
 }
 
-// ---- GetIPStatus ----
+// GetIPStatus
 
 func TestGetIPStatusReflectsRecordedHits(t *testing.T) {
 	m := NewEscalationManager(nil)
@@ -323,7 +323,7 @@ func TestGetIPStatusReflectsRecordedHits(t *testing.T) {
 	}
 }
 
-// ---- 不同 siteID 隔离 ----
+// 不同 siteID 隔离
 
 func TestRecordHitIsolatedBySiteID(t *testing.T) {
 	m := NewEscalationManager(nil)

@@ -51,7 +51,7 @@ import (
 	"My-OpenWaf/internal/waf/pages"
 )
 
-// Options configures a single data listener handler.
+// Options 配置单个数据平面监听器的处理器。
 type Options struct {
 	Holder                *snapshot.Holder
 	Engine                *engine.Engine
@@ -178,8 +178,10 @@ func scrubResponseHopByHopHeaders(c *app.RequestContext) {
 	}
 }
 
-// applyLuaResponse 应用 Lua 已通过运行时校验的响应控制字段。
-// 仅普通 Lua 终止拦截响应调用；挑战、重定向、丢弃和上游响应不允许被 Lua 改写。
+/**
+ * applyLuaResponse 应用 Lua 已通过运行时校验的响应控制字段。
+ * 仅普通 Lua 终止拦截响应调用；挑战、重定向、丢弃和上游响应不允许被 Lua 改写。
+ */
 func applyLuaResponse(c *app.RequestContext, result action.Result, statusCode int) bool {
 	if c == nil || result.SetHeaders == nil && result.ResponseBody == nil {
 		return false
@@ -200,7 +202,7 @@ func applyLuaResponse(c *app.RequestContext, result action.Result, statusCode in
 	return true
 }
 
-// Handler returns a Hertz middleware: maintenance → WAF → block fuse or reverse proxy.
+// Handler 返回 Hertz 中间件：维护模式 → WAF → 拦截熔断或反向代理。
 func Handler(opts Options) app.HandlerFunc {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
@@ -247,8 +249,8 @@ func Handler(opts Options) app.HandlerFunc {
 				}()
 			}
 		}
-		// WASM PoW assets must be checked before the generic static handler
-		// because serveOWAFStatic returns true (with 404) for unknown /__owaf/ paths.
+		// WASM PoW 资产必须先于通用静态处理器检查，因为 serveOWAFStatic
+		// 对未知的 /__owaf/ 路径会返回 true（并随之给出 404）。
 		if handleWASMAssets(c) {
 			return
 		}
@@ -257,7 +259,7 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
-		// Handle challenge verification endpoints
+		// 处理质询验证端点
 		if handleChallengeVerify(c, opts) {
 			recordChallengeVerifyAccessLog(c, opts)
 			return
@@ -336,9 +338,9 @@ func Handler(opts Options) app.HandlerFunc {
 			opts.Metrics.RecordClientIP(cipStr)
 		}
 
-		// Cache frequently accessed []byte → string conversions once per request.
-		// These fields are referenced 5-12 times in the original main flow,
-		// each call allocating + copying. Computing them once saves ~30 small allocs.
+		// 每请求只计算一次高频访问的 []byte → string 转换结果。
+		// 这些字段在原先的主流程中被引用 5-12 次，每次调用都要分配并拷贝。
+		// 只算一次可省下约 30 次小对象分配。
 		if opts.Log.Enabled(ctx, slog.LevelDebug) {
 			fp, _ := tlsFingerprintFromRequestContext(c)
 			opts.Log.Debug("dataplane request accepted",
@@ -588,11 +590,10 @@ func Handler(opts Options) app.HandlerFunc {
 			return
 		}
 
-		// Request-stage JavaScript may move a request into a different access-gated path.
-		// Re-check the final path before entering the WAF pipeline; the earlier check is
-		// retained to prevent protected original paths from reaching the script stage.
-		// Internal OWAF endpoints are dispatched only for the original request;
-		// a script-created internal path must never be proxied to an upstream.
+		// 请求阶段的 JavaScript 可能把请求改写到另一条受访问控制保护的路径。
+		// 进入 WAF 管道前重新检查最终路径；先前那次检查保留着，用于阻止
+		// 受保护的原始路径进入脚本阶段。内部 OWAF 端点只为原始请求派发；
+		// 脚本构造出的内部路径绝不能代理到上游。
 		if isScriptCreatedOWAFPath(path) {
 			c.SetStatusCode(http.StatusNotFound)
 			c.SetBodyString("not found")
@@ -688,7 +689,7 @@ func Handler(opts Options) app.HandlerFunc {
 		// 在响应体到手后应用；没有改写时不写入任何值。
 		ContextWithLuaResponseMutations(c, reqCtx.DrainResponseMutations())
 
-		// Bot score logging via buffered writer.
+		// Bot 评分日志经缓冲写入器落库。
 		if reqCtx.BotScoreResult != nil && opts.Writer != nil {
 			bsi := reqCtx.BotScoreResult
 			if bsi.Details != nil {
@@ -802,8 +803,8 @@ func Handler(opts Options) app.HandlerFunc {
 			if challengePassed && result.Action.IsChallenge() {
 				result.Action = action.Pass()
 			}
-			// Challenge cookie bypass: if action is a challenge type but client has a
-			// valid signed pass cookie, downgrade to pass and skip the challenge.
+			// 质询 cookie 放行：动作虽是质询类型，但客户端持有有效的签名通行
+			// cookie 时，降级为放行并跳过质询。
 			if result.Action.IsChallenge() {
 				if challengeIdentityCookie != "" && challenge.VerifyChallengePassCookieWithClaims(challengeIdentityCookie, challenge.ChallengePassClaims{Host: host, ClientIP: clientIP, UserAgent: challengeIdentityUA, SiteID: rt.Site.ID, Bind: bind}, time.Now()) {
 					result.Action = action.Pass()
@@ -1041,7 +1042,7 @@ func Handler(opts Options) app.HandlerFunc {
 						StatusCode:   statusCode,
 					})
 				}
-				// Route to appropriate challenge handler
+				// 路由到对应的质询处理器
 				// 质询动作覆盖只作用于「泛化 challenge」终态：站点/全局的
 				// challenge_action 决定具体渲染哪一页；规则显式选择的
 				// captcha/shield/chain 保持原样，不被站点/全局默认值顶替。
@@ -1230,10 +1231,9 @@ func Handler(opts Options) app.HandlerFunc {
 			}
 		}
 
-		// Abort proxying if the client body stream ended prematurely before the
-		// request body snapshot could be fully prefetched. This prevents starting
-		// upstream requests for clients that closed the connection (or sent an
-		// HTTP/2 RST_STREAM) while the WAF body prefetch is still reading.
+		// 客户端请求体流在请求体快照被完整预取之前就提前结束的话，放弃
+		// 代理。这样可避免在客户已关闭连接（或发来 HTTP/2 RST_STREAM）、
+		// 而 WAF 请求体预取仍在读取时，就向上游发起请求。
 		if c.Request.IsBodyStream() {
 			if err := requestBodySnapshotError(c); err != nil && !errors.Is(err, io.EOF) {
 				if secLog.Enabled(ctx, slog.LevelDebug) {
@@ -1286,9 +1286,9 @@ func Handler(opts Options) app.HandlerFunc {
 		case IsSSERequest(c):
 			upstreamErr = ForwardSSE(ctx, c, *result.Site, base, clientIP, host)
 		case recordResponseBody:
-			// Cap post-decode buffering to the same limit used by dynamic transform so a
-			// compressed upstream body cannot force unlimited memory growth. Oversized
-			// responses keep a readable remainder and stream without transformation.
+			// 解码后的缓冲上限与动态保护变换所用的一致，使压缩过的
+			// 上游响应体无法撑出无限内存增长。超限的响应保留一段
+			// 可读的剩余内容，不做变换直接流式转发。
 			bufferedResp, upstreamErr = proxy.FetchHTTPForAppRouteCapture(ctx, c, *result.Site, base, clientIP, host)
 			if upstreamErr == nil {
 				upstreamErr = proxy.ForwardCapturedResponseForSiteWithClientIP(ctx, c, bufferedResp, *result.Site, clientIP)
@@ -1389,8 +1389,8 @@ func Handler(opts Options) app.HandlerFunc {
 					}
 				}
 			} else {
-				// Upstream empty body fallback: if upstream returns empty body
-				// with a non-204/304 status, render a friendly error page.
+				// 上游空响应体兜底：上游返回空响应体且状态码非 204/304 时，
+				// 渲染一个友好的错误页。
 				respStatus := c.Response.StatusCode()
 				respBodyLen := len(c.Response.Body())
 				responseSize = int64(respBodyLen)
@@ -1515,9 +1515,10 @@ func bufferedResponseBody(resp *proxy.HTTPResponse) []byte {
 	return resp.Body
 }
 
-// hasExcludedHeader checks whether the request carries any header configured
-// in bot_settings.exclude_record_headers. If so, the request should not be
-// recorded as an application route resource.
+/**
+ * hasExcludedHeader 检查请求是否携带了 bot_settings.exclude_record_headers
+ * 中配置的任一请求头。若携带，该请求不应被记录为应用路由资源。
+ */
 func hasExcludedHeader(c *app.RequestContext, excluded []string) bool {
 	if len(excluded) == 0 {
 		return false
@@ -1544,9 +1545,8 @@ func hasConditionalOrRangeHeaders(c *app.RequestContext) bool {
 }
 
 /**
- * isScriptCreatedOWAFPath reports whether a JavaScript-mutated path targets the
- * internal OWAF namespace. A single URL-path decode also closes encoded forms
- * that an upstream router may decode before route matching.
+ * isScriptCreatedOWAFPath 判断被 JavaScript 改写过的路径是否指向内部 OWAF 命名空间。
+ * 额外做一次 URL 路径解码，可一并封堵那些上游路由器可能在路由匹配前自行解码的编码形式。
  */
 func isScriptCreatedOWAFPath(rawPath string) bool {
 	isInternal := func(value string) bool {
@@ -1565,8 +1565,8 @@ func isScriptCreatedOWAFPath(rawPath string) bool {
 }
 
 /**
- * matchInlineOWASPGuards checks the request shortcuts that must run before
- * the general pipeline and again after a request-stage path or body mutation.
+ * matchInlineOWASPGuards 检查那些必须在通用管道之前执行、且在请求阶段的路径或请求体
+ * 改写之后还要再执行一次的请求级快捷判定。
  */
 func matchInlineOWASPGuards(path string, body []byte, contentType, host string) (action.Result, bool) {
 	lowerPath := toLowerASCII(path)
@@ -2102,10 +2102,10 @@ func isDynamicProtectionKeyPath(c *app.RequestContext, loggedPath string) bool {
 }
 
 /**
- * sanitizeUpstreamURL removes URL userinfo before an upstream endpoint is persisted in logs.
+ * sanitizeUpstreamURL 在把上游端点写入日志之前移除 URL 中的 userinfo。
  *
- * @param raw Configured upstream URL.
- * @returns Upstream URL without userinfo, or a redaction marker when parsing fails.
+ * @param raw 已配置的上游 URL。
+ * @returns 去掉 userinfo 的上游 URL；解析失败时返回脱敏标记。
  */
 func sanitizeUpstreamURL(raw string) string {
 	parsed, err := url.Parse(raw)
@@ -2204,8 +2204,10 @@ func sanitizeQueryPair(pair string) (key, sanitized string, changed, malformed b
 	return decodedKey, sanitized, sanitized != value, false
 }
 
-// queryParams 以与 net/url 相同的解码规则生成 Lua 可见的查询参数。
-// 重复键保留第一个值，与 dry-run 的 map 契约一致；解析失败时返回 nil。
+/**
+ * queryParams 以与 net/url 相同的解码规则生成 Lua 可见的查询参数。
+ * 重复键保留第一个值，与 dry-run 的 map 契约一致；解析失败时返回 nil。
+ */
 func sanitizeBodyPreview(body, contentType string) string {
 	if body == "" {
 		return ""
@@ -2256,13 +2258,15 @@ func sanitizeJSONValue(value any) any {
 	}
 }
 
-// sensitiveLogValueHints 是 sensitiveLogValuePattern 首个捕获组的字面量集合。
-//
-// 正则含 (?i)，故这里全部为小写，判定前先把输入转为小写比较。任何一项都不出现时，
-// 正则必然无法匹配，可直接跳过 ReplaceAllString。
-//
-// 与正则保持同步：新增关键字时两处都要改，由 TestSensitiveLogValueHintsCoverPattern
-// 兜住漏改。
+/**
+ * sensitiveLogValueHints 是 sensitiveLogValuePattern 首个捕获组的字面量集合。
+ *
+ * 正则含 (?i)，故这里全部为小写，判定前先把输入转为小写比较。任何一项都不出现时，
+ * 正则必然无法匹配，可直接跳过 ReplaceAllString。
+ *
+ * 与正则保持同步：新增关键字时两处都要改，由 TestSensitiveLogValueHintsCoverPattern
+ * 兜住漏改。
+ */
 var sensitiveLogValueHints = []string{
 	"password", "passwd", "pwd", "token", "secret", "session",
 	"api_key", "api-key", "apikey", "auth_token", "auth-token", "authtoken",
@@ -2425,8 +2429,8 @@ func enqueueAccessLog(writer accessLogRecorder, al store.AccessLog) {
 
 func recordAccessLog(c *app.RequestContext, opts Options, info accessLogInfo) {
 	if c != nil {
-		// Mark the request before sampling/writer checks so the finalizer does not
-		// duplicate an intentionally sampled-out record.
+		// 在采样/写入器判定之前先标记请求，避免终结器重复写入一条
+		// 本就被采样丢弃的记录。
 		c.Set(dataplaneAccessRecordedContextKey, true)
 	}
 	if opts.Writer == nil || !shouldRecordAccessLog(info, opts.AccessLogSamplingRate) {
@@ -2438,13 +2442,14 @@ func recordAccessLog(c *app.RequestContext, opts Options, info accessLogInfo) {
 	enqueueAccessLog(opts.Writer, buildAccessLogEntry(c, info))
 }
 
-// finalizeUnrecordedAccessLog writes a minimal audit row for early exits that
-// happen before the normal site/WAF flow (static assets, challenge endpoints,
-// and missing snapshots). Protocol/routing rejects mark themselves explicitly;
-// normal paths mark themselves through
-// recordAccessLog, so this does not alter their sampling or create duplicates.
-// A client-cancelled plain proxy request is recorded with status 0 instead of a
-// synthetic 200 row after RST_STREAM; explicit 4xx/5xx early failures retain their status.
+/**
+ * finalizeUnrecordedAccessLog 为那些发生在常规站点/WAF 流程之前的提前退出
+ * 写一条最小审计记录（静态资产、质询端点、快照缺失）。协议/路由层面的拒绝
+ * 会显式标记自身；常规路径则通过 recordAccessLog 标记自身，因此本函数既不
+ * 改变它们的采样，也不会产生重复记录。客户端主动取消的普通代理请求在
+ * RST_STREAM 之后以状态码 0 记录，而不是伪造一行 200；显式的 4xx/5xx 提前
+ * 失败仍保留其原状态码。
+ */
 func finalizeUnrecordedAccessLog(ctx context.Context, c *app.RequestContext, opts Options, fallbackRequestID string) {
 	if c == nil || opts.Writer == nil {
 		return
@@ -2620,16 +2625,20 @@ func shouldRecordAccessLog(info accessLogInfo, rate uint32) bool {
 	return accessLogSampleCounter.Add(1)%rate == 0
 }
 
-// wafReqCtxHeaderOrderCacheKey 主路径把「populate 记录序一次 Join」的结果
-// 寄存在请求上下文，后续 WAF/访问记录复用，避免每行日志重复 VisitAll。
+/**
+ * wafReqCtxHeaderOrderCacheKey 主路径把「populate 记录序一次 Join」的结果
+ * 寄存在请求上下文，后续 WAF/访问记录复用，避免每行日志重复 VisitAll。
+ */
 const wafReqCtxHeaderOrderCacheKey = "owaf.dataplane.header_order_cache"
 
-// requestHeaderOrder 返回原字面顺序的请求头键列表。
-//
-// 与 populateRequestCtxHeaders 的同一次顺序记录对齐：该列表与内部顺序头槽的
-// 差异仅无关头聚合（Cookie 折叠、Connection 合成行），对 HeaderOrder 语义
-// 无影响。性能上把每请求 1 次遍历的次数控制为 1（有 reqCtx 时）或 0，
-// 未进入 WAF 流程的记录路径仍按原有方式枚举。
+/**
+ * requestHeaderOrder 返回原字面顺序的请求头键列表。
+ *
+ * 与 populateRequestCtxHeaders 的同一次顺序记录对齐：该列表与内部顺序头槽的
+ * 差异仅无关头聚合（Cookie 折叠、Connection 合成行），对 HeaderOrder 语义
+ * 无影响。性能上把每请求 1 次遍历的次数控制为 1（有 reqCtx 时）或 0，
+ * 未进入 WAF 流程的记录路径仍按原有方式枚举。
+ */
 func requestHeaderOrder(c *app.RequestContext) []string {
 	keys := make([]string, 0, 16)
 	c.Request.Header.VisitAll(func(k, _ []byte) {
@@ -3117,9 +3126,11 @@ func recordAntiReplayRenewEvent(
 	})
 }
 
-// siteChallengeAction 按「站点 → 全局」顺序解析质询动作覆盖：
-// 站点 rt.ChallengeAction 非空则优先；否则全局 ProtectionConfig.ChallengeAction
-// 非空且合法时使用；两者都不可用时返回空串，由调用方按原 result.Action.Type 分发。
+/**
+ * siteChallengeAction 按「站点 → 全局」顺序解析质询动作覆盖：
+ * 站点 rt.ChallengeAction 非空则优先；否则全局 ProtectionConfig.ChallengeAction
+ * 非空且合法时使用；两者都不可用时返回空串，由调用方按原 result.Action.Type 分发。
+ */
 func siteChallengeAction(rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) string {
 	if rt != nil && rt.ChallengeAction != "" {
 		act := action.Normalize(action.Type(rt.ChallengeAction))
@@ -3139,9 +3150,11 @@ func siteChallengeAction(rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) string
 	return ""
 }
 
-// effectiveCaptchaType 计算验证码渲染分支使用的验证码类型：
-// 规则级 result.Action.CaptchaType 合法则优先；否则站点 rt.ChallengeCaptchaType；
-// 再否则全局 sn.Protection.CaptchaType。
+/**
+ * effectiveCaptchaType 计算验证码渲染分支使用的验证码类型：
+ * 规则级 result.Action.CaptchaType 合法则优先；否则站点 rt.ChallengeCaptchaType；
+ * 再否则全局 sn.Protection.CaptchaType。
+ */
 func effectiveCaptchaType(result action.Result, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) challenge.CaptchaType {
 	if challenge.IsValidCaptchaType(challenge.CaptchaType(result.CaptchaType)) {
 		return challenge.CaptchaType(result.CaptchaType)
@@ -3159,9 +3172,11 @@ func effectiveCaptchaType(result action.Result, rt *snapshot.SiteRuntime, sn *sn
 	return "math"
 }
 
-// challengeTokenClaims 组装 JS 挑战 token 的客户端绑定信息。
-// 客户端 IP 按站点的 XFF 策略解析，与通行 cookie 使用同一套身份字段，
-// 保证挑战页与其换取的通行凭证绑定到同一个客户端。
+/**
+ * challengeTokenClaims 组装 JS 挑战 token 的客户端绑定信息。
+ * 客户端 IP 按站点的 XFF 策略解析，与通行 cookie 使用同一套身份字段，
+ * 保证挑战页与其换取的通行凭证绑定到同一个客户端。
+ */
 func challengeSessionBinding(c *app.RequestContext, opts Options) (challenge.ChallengeSessionBinding, bool) {
 	if opts.Holder == nil {
 		return challenge.ChallengeSessionBinding{}, false
@@ -3266,7 +3281,7 @@ func isTimeoutError(err error) bool {
 	return false
 }
 
-// handleWASMAssets serves the PoW WASM binary and JS glue.
+// handleWASMAssets 提供 PoW WASM 二进制与 JS 胶水文件。
 func handleWASMAssets(c *app.RequestContext) bool {
 	path := string(c.Path())
 	switch path {
@@ -3280,8 +3295,10 @@ func handleWASMAssets(c *app.RequestContext) bool {
 	return false
 }
 
-// handleChallengeVerify handles POST requests to challenge verification endpoints.
-// Returns true if the request was handled (caller should return early).
+/**
+ * handleChallengeVerify 处理发往质询验证端点的 POST 请求。
+ * 返回 true 表示请求已被处理（调用方应提前返回）。
+ */
 func handleChallengeVerify(c *app.RequestContext, opts Options) bool {
 	if string(c.Method()) != "POST" {
 		return false
@@ -3304,8 +3321,10 @@ type dynamicProtectionKeyRequest struct {
 	Key    string `json:"key"`
 }
 
-// parseDynamicProtectionKeyRequest 仅解析服务端签发票据所需的字段。
-// 浏览器环境信号可由客户端任意构造，不能作为 KEK 兑换授权条件。
+/**
+ * parseDynamicProtectionKeyRequest 仅解析服务端签发票据所需的字段。
+ * 浏览器环境信号可由客户端任意构造，不能作为 KEK 兑换授权条件。
+ */
 func parseDynamicProtectionKeyRequest(body []byte) (dynamicProtectionKeyRequest, bool) {
 	if len(body) == 0 {
 		return dynamicProtectionKeyRequest{}, false
@@ -3455,7 +3474,7 @@ func recordChallengeFailure(c *app.RequestContext, opts Options) {
 	}
 }
 
-// siteIPWhitelistContains applies the same expiration-aware entry semantics as the IP reputation phase.
+// siteIPWhitelistContains 采用与 IP 声誉相位相同的带过期时间条目语义。
 func siteIPWhitelistContains(entries []iprep.IPListEntry, clientIP net.IP) bool {
 	if clientIP == nil {
 		return false
@@ -3472,7 +3491,7 @@ func siteIPWhitelistContains(entries []iprep.IPListEntry, clientIP net.IP) bool 
 	return false
 }
 
-// requestProtoFromContext extracts the request protocol from headers or TLS context.
+// requestProtoFromContext 从请求头或 TLS 上下文提取请求协议。
 func requestProtoFromContext(c *app.RequestContext) string {
 	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
 		return strings.ToLower(v)
@@ -3633,11 +3652,13 @@ func setChallengeCookie(c *app.RequestContext, opts Options) {
 	c.Response.Header.Add("Set-Cookie", cookie)
 }
 
-// clearChallengePassCookie 在防重放命中等安全场景下吊销挑战免验态。
-// __waf_passed 是无状态签名（服务端无存储），吊销语义即响应追加该 cookie
-// 的清除头。属性必须与签发侧 BuildChallengePassCookieWithClaims 一致
-// （Path=/、HttpOnly、SameSite=Strict、Secure 随站点 TLS），否则浏览器会
-// 视作不同 cookie 而清不掉。
+/**
+ * clearChallengePassCookie 在防重放命中等安全场景下吊销挑战免验态。
+ * __waf_passed 是无状态签名（服务端无存储），吊销语义即响应追加该 cookie
+ * 的清除头。属性必须与签发侧 BuildChallengePassCookieWithClaims 一致
+ * （Path=/、HttpOnly、SameSite=Strict、Secure 随站点 TLS），否则浏览器会
+ * 视作不同 cookie 而清不掉。
+ */
 func clearChallengePassCookie(c *app.RequestContext, secure bool) {
 	cookie := challenge.ChallengePassCookieName + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
 	if secure {

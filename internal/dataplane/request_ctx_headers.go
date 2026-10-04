@@ -111,9 +111,10 @@ func takeInternalHTTP3CancelSignal(token string) (<-chan struct{}, bool) {
 	return done, ok && done != nil
 }
 
-// populateRequestCtxHeaders copies request headers into RequestCtx using
-// lowercase keys only. HeaderKeys still preserves the original order and case
-// for header-order fingerprinting and logging.
+/**
+ * populateRequestCtxHeaders 将请求头拷入 RequestCtx，且只使用小写键名。
+ * HeaderKeys 仍保留原始顺序与大小写，供请求头顺序指纹与日志使用。
+ */
 func populateRequestCtxHeaders(reqCtx *pipeline.RequestCtx, c *app.RequestContext) {
 	reqCtx.HeadersLowercase = true
 	if reqCtx.Headers == nil {
@@ -408,11 +409,13 @@ func parseInternalHTTP3Uint8List(raw string) []uint8 {
 	return values
 }
 
-// parseInternalHTTP3ALPNList 解析内部头里的 ALPN 声明列表。
-//
-// 与 parseInternalHTTP3Uint16List 的「任一项非法则整体丢弃」不同：ALPN 是
-// 字符串列表，且属于诊断性元数据，单个损坏项不应让整份声明列表消失。
-// 空项被跳过，全空时返回 nil。
+/**
+ * parseInternalHTTP3ALPNList 解析内部头里的 ALPN 声明列表。
+ *
+ * 与 parseInternalHTTP3Uint16List 的「任一项非法则整体丢弃」不同：ALPN 是
+ * 字符串列表，且属于诊断性元数据，单个损坏项不应让整份声明列表消失。
+ * 空项被跳过，全空时返回 nil。
+ */
 func parseInternalHTTP3ALPNList(raw string) []string {
 	if raw == "" {
 		return nil
@@ -448,9 +451,11 @@ func hasInternalHTTP3Marker(c *app.RequestContext) bool {
 		strings.EqualFold(trimRequestHeaderValue(c.GetHeader("X-Forwarded-Proto")), "h3")
 }
 
-// TrustedInboundForwardedProto reports the authenticated inbound protocol.
-// HTTP/3 loopback metadata is accepted only after applyInternalHTTP3RequestMetadata
-// has verified both the marker and the loopback peer.
+/**
+ * TrustedInboundForwardedProto 报告已通过认证的入站协议。
+ * HTTP/3 回环元数据只有在 applyInternalHTTP3RequestMetadata 同时校验过标记
+ * 与回环对端之后才会被采信。
+ */
 func TrustedInboundForwardedProto(c *app.RequestContext) string {
 	if hasInternalHTTP3Marker(c) {
 		return "h3"

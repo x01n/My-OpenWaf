@@ -13,7 +13,7 @@ import (
 	"My-OpenWaf/internal/utils"
 )
 
-// DropPolicyResponse represents the drop policy configuration.
+// DropPolicyResponse 是 drop 策略配置。
 type DropPolicyResponse struct {
 	Enabled             bool `json:"enabled"`
 	BotScoreThreshold   int  `json:"bot_score_threshold"`
@@ -21,7 +21,7 @@ type DropPolicyResponse struct {
 	CVEAutoDropHigh     bool `json:"cve_auto_drop_high"`
 }
 
-// DropPolicyUpdate represents the request body for updating drop policy.
+// DropPolicyUpdate 是更新 drop 策略的请求体。
 type DropPolicyUpdate struct {
 	Enabled             *bool `json:"enabled"`
 	BotScoreThreshold   *int  `json:"bot_score_threshold"`

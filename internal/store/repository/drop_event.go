@@ -19,7 +19,7 @@ func NewDropEventRepo(db *gorm.DB) *DropEventRepo {
 	return &DropEventRepo{db: db}
 }
 
-// SetCountCache configures an optional count cache for list queries.
+// SetCountCache 为列表查询配置可选的计数缓存。
 func (r *DropEventRepo) SetCountCache(c CountCache) {
 	r.countCache = c
 }
@@ -32,12 +32,12 @@ func (r *DropEventRepo) invalidateCountCache() {
 	invalidateCountCachePrefixes(r.countCache, dropEventCountCachePrefix)
 }
 
-// SetWriteQueue configures async write queue for batch writes.
+// SetWriteQueue 为批量写入配置异步写队列。
 func (r *DropEventRepo) SetWriteQueue(wq WriteQueueBackend) {
 	r.writeQueue = wq
 }
 
-// DropEventFilter holds query filters for listing drop events.
+// DropEventFilter 保存列出 drop 事件所用的查询过滤条件。
 type DropEventFilter struct {
 	SiteID    uint
 	ClientIP  string
@@ -64,7 +64,7 @@ func (r *DropEventRepo) Create(item *store.DropEvent) error {
 	return err
 }
 
-// BatchCreate inserts multiple drop events in a single transaction.
+// BatchCreate 在单个事务中插入多条 drop 事件。
 func (r *DropEventRepo) BatchCreate(items []store.DropEvent) error {
 	if len(items) == 0 {
 		return nil
@@ -153,7 +153,7 @@ func dropEventCountCacheKey(f DropEventFilter) string {
 	return key
 }
 
-// DropStatsSummary holds aggregated drop statistics.
+// DropStatsSummary 保存聚合后的 drop 统计。
 type DropStatsSummary struct {
 	Total24h       int64 `gorm:"column:total_24h" json:"total_24h"`
 	ByBot          int64 `gorm:"column:by_bot" json:"by_bot"`
@@ -162,8 +162,8 @@ type DropStatsSummary struct {
 	ByIPReputation int64 `gorm:"column:by_ip_reputation" json:"by_ip_reputation"`
 }
 
-// DeleteOlderThan removes drop events older than the given time. Returns deleted count.
-// Uses batched deletion to reduce lock contention on large tables.
+// DeleteOlderThan 删除早于给定时间的 drop 事件，返回删除条数。
+// 采用分批删除，以降低大表上的锁竞争。
 func (r *DropEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 	var totalDeleted int64
 	const batchSize = 5000

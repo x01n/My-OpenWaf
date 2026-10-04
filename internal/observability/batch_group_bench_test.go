@@ -14,7 +14,7 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// ---- 多值组大小微基准 ----
+// 多值组大小微基准
 //
 // 复刻 UnifiedWriter.sqliteBulkFlusher 的生产写入路径：真实 LogDB（temp 目录
 // SQLite 文件）、真实 GORM 事务与连接池、长期语句 + 多值组语句。可控变量只有

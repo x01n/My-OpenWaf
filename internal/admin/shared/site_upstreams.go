@@ -20,7 +20,7 @@ var (
 	errSiteUpstreamHostInvalidHost     = errors.New("upstream_host contains invalid host")
 )
 
-// ValidateSiteUpstreamURLs validates site upstream URL syntax and supported schemes.
+// ValidateSiteUpstreamURLs 校验站点上游 URL 的语法与受支持的协议方案。
 func ValidateSiteUpstreamURLs(raw string) error {
 	upstreams, err := parseSiteUpstreamURLsForValidation(raw)
 	if err != nil {

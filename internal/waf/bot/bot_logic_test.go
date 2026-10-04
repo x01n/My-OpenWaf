@@ -6,7 +6,7 @@ import (
 	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
-// --- containsASCIIFold ---
+// containsASCIIFold
 
 func TestContainsASCIIFold(t *testing.T) {
 	cases := []struct {
@@ -32,7 +32,7 @@ func TestContainsASCIIFold(t *testing.T) {
 	}
 }
 
-// --- matchMaliciousToolUA ---
+// matchMaliciousToolUA
 
 func TestMatchMaliciousToolUA(t *testing.T) {
 	t.Run("empty ua returns no match", func(t *testing.T) {
@@ -90,9 +90,9 @@ func TestMatchMaliciousToolUAGotestwaf(t *testing.T) {
 	}
 }
 
-// --- fingerprintScore ---
+// fingerprintScore
 
-// --- uaScore（UA 模块） ---
+// uaScore（UA 模块）
 
 // 旧断言：指纹模块里 empty_ua 加 40 分、short_ua 加 25 分。
 // 新断言：UA 字面独立成 uaScore 模块（empty_ua=100、short_ua=70），
@@ -338,7 +338,7 @@ func TestFingerprintScoreCleanBrowserHasNoUASignals(t *testing.T) {
 	}
 }
 
-// --- CheckBotTwoPhase 预筛直通与工具 UA 的真实入口语义 ---
+// CheckBotTwoPhase 预筛直通与工具 UA 的真实入口语义
 
 // 干净浏览器不触发 PreScreen，两阶段路径在此直接返回，不进入评分。
 func TestCheckBotTwoPhaseCleanBrowserPassesThroughPreScreen(t *testing.T) {
@@ -370,7 +370,7 @@ func TestCheckBotTwoPhaseToolUAPreScreenHitStillPasses(t *testing.T) {
 	}
 }
 
-// --- CheckBotTwoPhase 不命中预筛时的返回契约 ---
+// CheckBotTwoPhase 不命中预筛时的返回契约
 
 // 短 UA 无任何缺头信号，不构成预筛命中，返回 prescreen 直通结果。
 func TestCheckBotTwoPhaseShortUANoPreScreenHit(t *testing.T) {
@@ -420,7 +420,7 @@ func TestCheckBotTwoPhaseGoodBotNoIP(t *testing.T) {
 	}
 }
 
-// --- DeepScore 基础路径 ---
+// DeepScore 基础路径
 
 func TestDeepScoreNoGeoNoIPRep(t *testing.T) {
 	r := cleanBrowserBotRequest()
@@ -478,7 +478,7 @@ func TestDeepScoreTLSDetailsRecorded(t *testing.T) {
 	}
 }
 
-// --- CheckBotTwoPhase ---
+// CheckBotTwoPhase
 
 func TestCheckBotTwoPhaseCleanPassesPreScreen(t *testing.T) {
 	r := cleanBrowserBotRequest()
@@ -541,7 +541,7 @@ func TestCheckBotTwoPhaseAutomationUAStaysBenign(t *testing.T) {
 	}
 }
 
-// --- 五档边界值 ---
+// 五档边界值
 
 func TestClassifyScoreBandBoundaries(t *testing.T) {
 	cases := []struct {
@@ -586,7 +586,7 @@ func TestBotTierCategoryAndLogAction(t *testing.T) {
 	}
 }
 
-// --- 行为模块 ---
+// 行为模块
 
 func TestBehaviorScoreFromCountLadder(t *testing.T) {
 	cases := []struct {
@@ -630,7 +630,7 @@ func TestDeepScoreWithBehaviorRaisesTotal(t *testing.T) {
 	}
 }
 
-// --- PreScreen ---
+// PreScreen
 
 func TestPreScreenEmptyUAPassesWhenNoIPRep(t *testing.T) {
 	r := BotRequest{UserAgent: ""}
@@ -640,7 +640,7 @@ func TestPreScreenEmptyUAPassesWhenNoIPRep(t *testing.T) {
 	}
 }
 
-// --- helper ---
+// helper
 
 // TestHeaderOrderScoreDetectsAlphabeticOrder 归位自 tlsfp 子包：被测函数属 bot 评分职责。
 func TestHeaderOrderScoreDetectsAlphabeticOrder(t *testing.T) {

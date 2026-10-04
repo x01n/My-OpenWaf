@@ -26,7 +26,7 @@ func NewSecurityEventRepo(db *gorm.DB) *SecurityEventRepo {
 	}
 }
 
-// SetCountCache configures an optional count cache for list queries.
+// SetCountCache 为列表查询配置可选的计数缓存。
 func (r *SecurityEventRepo) SetCountCache(c CountCache) {
 	r.countCache = c
 }
@@ -39,17 +39,17 @@ func (r *SecurityEventRepo) invalidateCountCache() {
 	invalidateCountCachePrefixes(r.countCache, securityEventCountCachePrefix)
 }
 
-// SetHotCache configures Redis-backed hot cache for large query results.
+// SetHotCache 为大体量查询结果配置 Redis 热缓存。
 func (r *SecurityEventRepo) SetHotCache(hc HotCacheBackend) {
 	r.hotCache = hc
 }
 
-// SetWriteQueue configures async write queue for batch writes.
+// SetWriteQueue 为批量写入配置异步写队列。
 func (r *SecurityEventRepo) SetWriteQueue(wq WriteQueueBackend) {
 	r.writeQueue = wq
 }
 
-// SecurityEventFilter holds query filters for listing events.
+// SecurityEventFilter 保存列出事件所用的查询过滤条件。
 type SecurityEventFilter struct {
 	ID              uint
 	SiteID          uint
@@ -95,8 +95,8 @@ func quotedIdentifier(db *gorm.DB, name string) string {
 	return `"` + name + `"`
 }
 
-// securityEventListColumns excludes the large request audit payloads from list
-// and realtime polling queries. Get and FindByRequestID keep full-detail reads.
+// securityEventListColumns 把体积庞大的请求审计载荷排除在列表查询与
+// 实时轮询查询之外。Get 与 FindByRequestID 仍做完整详情的读取。
 var securityEventListColumns = append(append([]string{
 	"id", "created_at", "site_id", "request_id", "client_ip", "host", "path", "query_string", "method", "user_agent",
 	"rule_id", "rule_id_str",
@@ -110,7 +110,7 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 	f = normalizeSecurityEventFilter(f)
 	cacheKey := secEventCountCacheKey(f)
 
-	// Try Redis hot cache for large query results.
+	// 先试 Redis 热缓存，命中即可直接返回大体量查询结果。
 	if r.hotCache != nil && r.hotCache.Available() {
 		hcKey := "se_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(hcKey); ok {
@@ -151,7 +151,7 @@ func (r *SecurityEventRepo) List(offset, limit int, f SecurityEventFilter) ([]st
 		return nil, 0, err
 	}
 
-	// Cache results in Redis.
+	// 把结果缓存进 Redis。
 	if r.hotCache != nil && r.hotCache.Available() {
 		hcKey := "se_list:" + cacheKey + ":o" + strconv.Itoa(offset) + ":l" + strconv.Itoa(limit)
 		r.hotCache.SetList(hcKey, items, total, 5*time.Second)

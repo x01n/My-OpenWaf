@@ -15,8 +15,12 @@ import (
 	"time"
 )
 
-// benchServerCertificate generates a throwaway self-signed certificate for the
-// local benchmark listener.
+/**
+ * benchServerCertificate 为本地基准监听器生成一张一次性自签名证书。
+ *
+ * @param b 基准测试对象，用于标记 helper 与报告失败。
+ * @return 供本地 TLS 监听器使用的一次性自签名证书。
+ */
 func benchServerCertificate(b *testing.B) tls.Certificate {
 	b.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -52,8 +56,14 @@ func benchServerCertificate(b *testing.B) tls.Certificate {
 	return cert
 }
 
-// benchTLSEchoServer starts a TLS listener that completes the handshake and
-// closes, so benchmarks measure handshake cost only.
+/**
+ * benchTLSEchoServer 启动一个完成握手后即关闭的 TLS 监听器。
+ *
+ * 这样基准测得的只有握手开销，不含应用层往返。
+ *
+ * @param b 基准测试对象，用于标记 helper 与报告失败。
+ * @return addr 监听地址；stop 关闭监听并等待所有连接 goroutine 退出。
+ */
 func benchTLSEchoServer(b *testing.B) (addr string, stop func()) {
 	b.Helper()
 	cert := benchServerCertificate(b)
@@ -85,9 +95,9 @@ func benchTLSEchoServer(b *testing.B) (addr string, stop func()) {
 				defer wg.Done()
 				if tc, ok := c.(*tls.Conn); ok {
 					if err := tc.Handshake(); err == nil {
-						// Writing after the handshake flushes the TLS 1.3
-						// NewSessionTicket message, which is what makes a later
-						// resumption possible at all.
+						// 握手后写入一次会冲刷出 TLS 1.3 的
+						// NewSessionTicket 消息，这正是后续
+						// 能够恢复会话的前提。
 						_, _ = c.Write([]byte{0})
 						var buf [1]byte
 						_, _ = c.Read(buf[:])
@@ -117,8 +127,8 @@ func benchDialHandshake(b *testing.B, addr string, cfg *tls.Config) bool {
 		b.Fatalf("handshake: %v", err)
 	}
 	resumed := conn.ConnectionState().DidResume
-	// Reading once lets the client process the server's NewSessionTicket and
-	// populate ClientSessionCache; without it TLS 1.3 can never resume.
+	// 读一次让客户端处理服务端的 NewSessionTicket 并填充
+	// ClientSessionCache；不读则 TLS 1.3 永远无法恢复会话。
 	var buf [1]byte
 	_, _ = conn.Read(buf[:])
 	_, _ = conn.Write([]byte{0})
@@ -126,10 +136,12 @@ func benchDialHandshake(b *testing.B, addr string, cfg *tls.Config) bool {
 	return resumed
 }
 
-// BenchmarkUpstreamTLSHandshakeFreshConfig reproduces the current WebSocket
-// upstream path: TLSDialWithDialer calls HTTPSClientTLSConfig per connection, so
-// every dial gets a brand new tls.Config with no ClientSessionCache and every
-// handshake is a full one.
+/**
+ * BenchmarkUpstreamTLSHandshakeFreshConfig 复现当前的 WebSocket 上游路径。
+ *
+ * TLSDialWithDialer 对每条连接都调用一次 HTTPSClientTLSConfig，因此每次拨号
+ * 都拿到全新的 tls.Config、没有 ClientSessionCache，每一次握手都是完整握手。
+ */
 func BenchmarkUpstreamTLSHandshakeFreshConfig(b *testing.B) {
 	addr, stop := benchTLSEchoServer(b)
 	defer stop()
@@ -142,16 +154,19 @@ func BenchmarkUpstreamTLSHandshakeFreshConfig(b *testing.B) {
 	}
 }
 
-// BenchmarkUpstreamTLSHandshakeSharedConfig models the same dials against one
-// reused tls.Config carrying a ClientSessionCache, so handshakes after the first
-// can resume instead of redoing the asymmetric key exchange.
+/**
+ * BenchmarkUpstreamTLSHandshakeSharedConfig 以一份复用的 tls.Config 模拟同样的拨号。
+ *
+ * 该配置带 ClientSessionCache，因此除首次以外的握手都能恢复会话，
+ * 而不必重做非对称密钥交换。
+ */
 func BenchmarkUpstreamTLSHandshakeSharedConfig(b *testing.B) {
 	addr, stop := benchTLSEchoServer(b)
 	defer stop()
 
 	cfg := HTTPSClientTLSConfig("bench.upstream.test", true)
 	cfg.ClientSessionCache = tls.NewLRUClientSessionCache(32)
-	// Prime the cache so the measured loop exercises the resumption path.
+	// 先预热缓存，让计时循环走的是会话恢复路径。
 	benchDialHandshake(b, addr, cfg)
 	benchDialHandshake(b, addr, cfg)
 
@@ -162,9 +177,11 @@ func BenchmarkUpstreamTLSHandshakeSharedConfig(b *testing.B) {
 	}
 }
 
-// BenchmarkUpstreamTLSHandshakeSharedConfigResumeRate is a guard: it fails the
-// premise loudly if resumption is not actually happening, so the paired numbers
-// above cannot be misread.
+/**
+ * BenchmarkUpstreamTLSHandshakeSharedConfigResumeRate 是一道守卫。
+ *
+ * 若会话恢复实际并未发生，它会显式失败，避免上面那对基准的读数被误读。
+ */
 func BenchmarkUpstreamTLSHandshakeSharedConfigResumeRate(b *testing.B) {
 	addr, stop := benchTLSEchoServer(b)
 	defer stop()
@@ -189,10 +206,12 @@ func BenchmarkUpstreamTLSHandshakeSharedConfigResumeRate(b *testing.B) {
 	b.ReportMetric(float64(resumed)/float64(b.N)*100, "%resumed")
 }
 
-// BenchmarkUpstreamTLSHandshakeSharedDialConfig exercises the production path
-// after the change: TLSDialWithDialer now resolves a reused config through
-// sharedDialTLSConfig, so it is measured the same way as the paired benchmarks
-// above rather than being assumed to behave like them.
+/**
+ * BenchmarkUpstreamTLSHandshakeSharedDialConfig 实测改动后的生产路径。
+ *
+ * TLSDialWithDialer 现在经 sharedDialTLSConfig 取到复用配置，因此这里按上面
+ * 那对基准同样的方式实测，而不是假设它的行为与之一致。
+ */
 func BenchmarkUpstreamTLSHandshakeSharedDialConfig(b *testing.B) {
 	addr, stop := benchTLSEchoServer(b)
 	defer stop()
@@ -213,8 +232,11 @@ func BenchmarkUpstreamTLSHandshakeSharedDialConfig(b *testing.B) {
 	b.ReportMetric(float64(resumed)/float64(b.N)*100, "%resumed")
 }
 
-// BenchmarkHTTPSClientTLSConfigAlloc measures just the per-call config
-// construction, including the cipher suite slice copy.
+/**
+ * BenchmarkHTTPSClientTLSConfigAlloc 只测量每次调用的配置构造开销。
+ *
+ * 其中包含 cipher suite 切片的复制。
+ */
 func BenchmarkHTTPSClientTLSConfigAlloc(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()

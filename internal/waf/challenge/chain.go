@@ -16,7 +16,7 @@ import (
 	rueidis "github.com/redis/rueidis"
 )
 
-// ChainStepType defines the type of a chain challenge step.
+// ChainStepType 定义链式挑战单个步骤的类型。
 type ChainStepType string
 
 const (
@@ -25,14 +25,14 @@ const (
 	ChainStepCaptcha ChainStepType = "captcha"
 )
 
-// ChainStepConfig defines one step in the chain challenge pipeline.
+// ChainStepConfig 定义链式挑战流水线中的一个步骤。
 type ChainStepConfig struct {
 	Type        ChainStepType `json:"type"`
 	Condition   string        `json:"condition,omitempty"`
 	CaptchaType CaptchaType   `json:"captcha_type,omitempty"`
 }
 
-// ChainState is the server-side state for an ongoing chain challenge.
+// ChainState 是进行中的链式挑战的服务端状态。
 type ChainSessionInfo struct {
 	ID          string `json:"id"`
 	CurrentStep int    `json:"current_step"`
@@ -130,7 +130,7 @@ func (g *chainSessionGate) unlock(id string) {
 	entry.mu.Unlock()
 }
 
-// ChainChallengeManager manages multi-step chain challenges with a state machine.
+// ChainChallengeManager 以状态机管理多步链式挑战。
 type ChainChallengeManager struct {
 	captcha     *CaptchaManager
 	redis       rueidis.Client
@@ -145,7 +145,7 @@ type ChainChallengeManager struct {
 	once        sync.Once
 }
 
-// NewChainChallengeManager creates a new ChainChallengeManager with default steps.
+// NewChainChallengeManager 用默认步骤创建一个 ChainChallengeManager。
 func NewChainChallengeManager(captcha *CaptchaManager, redis rueidis.Client) *ChainChallengeManager {
 	cm := &ChainChallengeManager{
 		captcha:     captcha,
@@ -302,12 +302,12 @@ func (cm *ChainChallengeManager) difficultyValue() int {
 	return difficulty
 }
 
-// StartChain begins a new chain challenge and returns the session ID and HTML for the first step.
+// StartChain 开始一次链式挑战，返回会话 ID 与首步的 HTML。
 func (cm *ChainChallengeManager) StartChain(originalURL string) (string, string) {
 	return cm.StartChainWithBinding(originalURL, ChallengeSessionBinding{})
 }
 
-// StartChainWithBinding creates a chain session bound to the matched site.
+// StartChainWithBinding 创建一个绑定到匹配站点的链式会话。
 func (cm *ChainChallengeManager) StartChainWithBinding(originalURL string, binding ChallengeSessionBinding) (string, string) {
 	sid := chainGenID()
 	state := &ChainState{
@@ -325,11 +325,13 @@ func (cm *ChainChallengeManager) StartChainWithBinding(originalURL string, bindi
 	return sid, cm.renderStepHTML(state)
 }
 
-// ChainStepOutcome 描述一次链式挑战提交的处理结果。
-//
-// 单看 (passed, redirectURL, nextHTML) 无法区分「步内校验失败、重新渲染当前步」
-// 与「当前步通过、渲染下一步」——两者都是 (false, "", html)。调用方若据此记录
-// 失败会误伤正常推进多步挑战的访客，故用本类型显式区分。
+/**
+ * ChainStepOutcome 描述一次链式挑战提交的处理结果。
+ *
+ * 单看 (passed, redirectURL, nextHTML) 无法区分「步内校验失败、重新渲染当前步」
+ * 与「当前步通过、渲染下一步」——两者都是 (false, "", html)。调用方若据此记录
+ * 失败会误伤正常推进多步挑战的访客，故用本类型显式区分。
+ */
 type ChainStepOutcome struct {
 	// Passed 为 true 表示整条链已全部通过。
 	Passed bool
@@ -348,7 +350,7 @@ func (cm *ChainChallengeManager) ProcessStepDetailed(sessionID string, formData 
 	return cm.ProcessStepDetailedWithBinding(sessionID, formData, ChallengeSessionBinding{})
 }
 
-// ProcessStepDetailedWithBinding advances a chain only for its issuing site.
+// ProcessStepDetailedWithBinding 只为签发该链的站点推进链。
 func (cm *ChainChallengeManager) ProcessStepDetailedWithBinding(sessionID string, formData map[string]string, binding ChallengeSessionBinding) ChainStepOutcome {
 	passed, redirectURL, nextHTML, failed := cm.processStepWithBinding(sessionID, formData, binding)
 	return ChainStepOutcome{
@@ -717,9 +719,8 @@ func (cm *ChainChallengeManager) loadChainState(id string) *ChainState {
 	return state.clone()
 }
 
-// takeChainStateWithBinding atomically claims a chain state after checking its
-// persisted site binding. Successful nonterminal processing stores the updated
-// state again; terminal success intentionally leaves it consumed.
+// takeChainStateWithBinding 在核对持久化的站点绑定后原子领取一份链状态。
+// 非终态处理成功会再次存回更新后的状态；终态成功则有意让它保持已消费。
 func (cm *ChainChallengeManager) takeChainStateWithBinding(id string, binding ChallengeSessionBinding) *ChainState {
 	if id == "" {
 		return nil

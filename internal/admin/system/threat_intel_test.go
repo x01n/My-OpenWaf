@@ -271,8 +271,8 @@ func TestUpdateThreatIntelFeedRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-// TestCreateThreatIntelFeedAuthHeaders verifies auth_header_name/auth_header_value
-// are persisted via create and echoed back via list/update.
+// TestCreateThreatIntelFeedAuthHeaders 验证 auth_header_name/auth_header_value
+// 经 create 持久化，并由 list/update 原样回显。
 func TestCreateThreatIntelFeedAuthHeaders(t *testing.T) {
 	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
 	payload := []byte(`{"name":"authed","url":"https://intel.example.test/auth.txt","kind":"blacklist","auth_header_name":"Authorization","auth_header_value":"Bearer secret-token"}`)
@@ -381,8 +381,8 @@ func TestThreatIntelFeedAuthHeaderMaskingKeepsShortValueFullyMasked(t *testing.T
 	}
 }
 
-// TestUpdateThreatIntelFeedAuthHeaders verifies auth_header_name/auth_header_value
-// can be updated and omitted fields are preserved.
+// TestUpdateThreatIntelFeedAuthHeaders 验证 auth_header_name/auth_header_value
+// 可被更新，且缺席字段保持不变。
 func TestUpdateThreatIntelFeedAuthHeaders(t *testing.T) {
 	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
 	seed := &store.ThreatIntelFeed{

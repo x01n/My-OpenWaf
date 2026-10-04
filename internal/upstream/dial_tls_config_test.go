@@ -41,7 +41,7 @@ func TestSharedDialTLSConfigIsolatesServerNameAndVerifyPolicy(t *testing.T) {
 	}
 }
 
-// The shared config must not weaken the settings HTTPSClientTLSConfig produces.
+// 共享配置不得削弱 HTTPSClientTLSConfig 产出的安全设置。
 func TestSharedDialTLSConfigPreservesSecurityParameters(t *testing.T) {
 	reference := HTTPSClientTLSConfig("parity.example.test", false)
 	shared := sharedDialTLSConfig("parity.example.test", false)
@@ -62,8 +62,12 @@ func TestSharedDialTLSConfigPreservesSecurityParameters(t *testing.T) {
 	}
 }
 
-// HTTPSClientTLSConfig keeps returning fresh instances because callers such as
-// http3LoopbackTLSConfig mutate NextProtos on the returned value.
+/**
+ * TestHTTPSClientTLSConfigReturnsIndependentInstances 覆盖「每次返回独立实例」这一契约。
+ *
+ * HTTPSClientTLSConfig 必须继续返回全新实例，因为 http3LoopbackTLSConfig 之类的
+ * 调用方会就地修改返回值的 NextProtos。
+ */
 func TestHTTPSClientTLSConfigReturnsIndependentInstances(t *testing.T) {
 	first := HTTPSClientTLSConfig("independent.example.test", false)
 	second := HTTPSClientTLSConfig("independent.example.test", false)

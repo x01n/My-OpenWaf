@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-// testHertzConn / loopbackHertzConn mirror the dataplane package fixtures used
-// by the CloseNotify binding tests. The tests moved here with the runtime, so
-// the fixtures are reproduced locally per the package's own test scope.
+/**
+ * testHertzConn / loopbackHertzConn 镜像 CloseNotify 绑定测试所用的
+ * dataplane 包 fixtures。测试随运行时一并迁移到这里，因此按本包自身
+ * 的测试范围在本地重建这些 fixtures。
+ */
 type testHertzConn struct {
 	net.Conn
 }

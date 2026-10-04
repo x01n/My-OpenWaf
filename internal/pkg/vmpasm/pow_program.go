@@ -79,7 +79,7 @@ const (
 //
 // 与容器魔数 `OWVM`（4 字节）、输入侧 `OWAINPT\0` 都不同长不同拼写，
 // 便于在 hex dump 里一眼区分是哪一侧出错。
-const BlobOutputMagic uint64 = 0x005054554F41574F // "OWAOUTP\0" little-endian
+const BlobOutputMagic uint64 = 0x005054554F41574F // "OWAOUTP\0" 的小端表示
 
 // PoW 工作区在内存里的偏移（相对 `HeapBase`）。
 //
@@ -176,7 +176,7 @@ func PoWProgramLayout() Layout {
 func BuildPoWProgram() []Instr {
 	var p []Instr
 
-	// ---- 序言 1：校验输入 ----
+	// 序言 1：校验输入
 	p = append(p,
 		Instr{Op: OpMovi, A: R4, Imm: HeapBase},
 		Instr{Op: OpMovi, A: R1, Imm: BlobNonceLenOff},
@@ -192,7 +192,7 @@ func BuildPoWProgram() []Instr {
 		Instr{Op: OpMovi, A: R15, Imm: 0},         // 常数 0
 	)
 
-	// ---- 序言 2：清零 128 字节消息区（块 1 + 块 2，各 8 条 STORE64） ----
+	// 序言 2：清零 128 字节消息区（块 1 + 块 2，各 8 条 STORE64）
 	p = append(p,
 		Instr{Op: OpMovi, A: R12, Imm: powBlock1Off},
 		Instr{Op: OpAdd, A: R12, B: R4, C: R12}, // R12 = &block1[0]
@@ -206,7 +206,7 @@ func BuildPoWProgram() []Instr {
 		p = append(p, Instr{Op: OpStore64, A: R2, B: R15, Off: int32(off)})
 	}
 
-	// ---- 序言 3：nonce → block1[0, nonceLen)（每批只做一次） ----
+	// 序言 3：nonce → block1[0, nonceLen)（每批只做一次）
 	p = append(p,
 		Instr{Op: OpMovi, A: R11, Imm: BlobNonceOff},
 		Instr{Op: OpMovi, A: R7, Imm: 0},
@@ -222,7 +222,7 @@ func BuildPoWProgram() []Instr {
 		Label("ncdone"),
 	)
 
-	// ---- 序言 4：counter ← start_counter，end ← start_counter + batch_size ----
+	// 序言 4：counter ← start_counter，end ← start_counter + batch_size
 	p = append(p,
 		Instr{Op: OpMovi, A: R1, Imm: BlobBatchSizeOff},
 		Instr{Op: OpLoad64, A: R10, B: R1, Off: 0}, // R10 = batch_size
@@ -231,7 +231,7 @@ func BuildPoWProgram() []Instr {
 		Instr{Op: OpAdd, A: R10, B: R9, C: R10},   // R10 = end（不含）
 	)
 
-	// ---- 主循环 ----
+	// 主循环
 	p = append(p, Label("mainloop"),
 		Instr{Op: OpCmp, A: R9, B: R10},
 		Instr{Op: OpJge, Target: "miss"}, // 本批耗尽 → 未命中
@@ -252,7 +252,7 @@ func BuildPoWProgram() []Instr {
 		Label("zdone"),
 	)
 
-	// ---- 十进制 counter → block1[nonceLen, nonceLen+numDigits) ----
+	// 十进制 counter → block1[nonceLen, nonceLen+numDigits)
 	//
 	// 先数位数（反复除 10），再从末位向前写。全部在副本 R7 上做，
 	// R9（循环变量）必须保持原值。
@@ -277,7 +277,7 @@ func BuildPoWProgram() []Instr {
 		Instr{Op: OpMovi, A: R3, Imm: '0'},
 		Instr{Op: OpAdd, A: R13, B: R13, C: R3},
 		Instr{Op: OpStore8, A: R11, B: R13, Off: 0},
-		Instr{Op: OpDivu, A: R7, B: R7, C: R2}, // counter /= 10
+		Instr{Op: OpDivu, A: R7, B: R7, C: R2}, // counter /= 10（去掉一位）
 		Instr{Op: OpCmp, A: R7, B: R15},
 		Instr{Op: OpJeq, Target: "decdone"},
 		Instr{Op: OpSub, A: R11, B: R11, C: R14},
@@ -286,7 +286,7 @@ func BuildPoWProgram() []Instr {
 		Instr{Op: OpAdd, A: R8, B: R8, C: R5}, // R8 = msgLen
 	)
 
-	// ---- 0x80 填充字节（地址 = block1 + msgLen） ----
+	// 0x80 填充字节（地址 = block1 + msgLen）
 	//
 	// msgLen ≥ 64 时该地址自动落进块 2（两块连续），无需分支。
 	p = append(p,
@@ -295,7 +295,7 @@ func BuildPoWProgram() []Instr {
 		Instr{Op: OpStore8, A: R1, B: R2, Off: 0},
 	)
 
-	// ---- SHA-256 初始状态（bswap32 后小端写 = 内存里的大端） ----
+	// SHA-256 初始状态（bswap32 后小端写 = 内存里的大端）
 	p = append(p,
 		Instr{Op: OpMovi, A: R1, Imm: powStateOff},
 		Instr{Op: OpAdd, A: R1, B: R4, C: R1}, // R1 = &state[0]
@@ -307,7 +307,7 @@ func BuildPoWProgram() []Instr {
 		)
 	}
 
-	// ---- 单块 / 双块分支 ----
+	// 单块 / 双块分支
 	//
 	// 单块条件：0x80 不撞长度字段，即 msgLen ≤ 55。
 	// 长度字段 = msgLen*8 ≤ 672 < 65536，大端 u64 的高 6 字节恒为 0
@@ -333,7 +333,7 @@ func BuildPoWProgram() []Instr {
 		// 单块分支的 nonceLen ≤ 54（否则 msgLen > 55 走双块），故此处安全。
 		Instr{Op: OpStore64, A: R12, B: R15, Off: powLenOff1},
 		Instr{Op: OpMovi, A: R2, Imm: 8},
-		Instr{Op: OpMul, A: R3, B: R8, C: R2}, // R3 = bitLen = msgLen * 8
+		Instr{Op: OpMul, A: R3, B: R8, C: R2}, // R3 = bitLen = msgLen * 8（消息位长）
 		Instr{Op: OpMovi, A: R13, Imm: 0xFF},
 		Instr{Op: OpAnd, A: R11, B: R3, C: R13}, // 低字节
 		Instr{Op: OpShr, A: R3, B: R3, C: R2},   // 高字节
@@ -370,7 +370,7 @@ func BuildPoWProgram() []Instr {
 		Label("hashdone1"),
 	)
 
-	// ---- 逐 nibble 检查前导零（ISA §4.3.6 的等价实现） ----
+	// 逐 nibble 检查前导零（ISA §4.3.6 的等价实现）
 	//
 	// R2 = 已检查的 nibble 数，R3 = 当前字节下标，R6 = difficulty。
 	// 每轮查高 nibble；若还没查够再查低 nibble 并前进一字节。
@@ -402,7 +402,7 @@ func BuildPoWProgram() []Instr {
 		Instr{Op: OpJmp, Target: "nibloop"},
 	)
 
-	// ---- 命中：写输出区，R0 = 1 ----
+	// 命中：写输出区，R0 = 1
 	//
 	// 状态区是大端字节序，直接按 8 字节块搬运即得标准摘要的字节序列。
 	p = append(p,
@@ -420,19 +420,19 @@ func BuildPoWProgram() []Instr {
 	p = append(p,
 		Instr{Op: OpMovi, A: R2, Imm: BlobOutputMagic},
 		Instr{Op: OpStore64, A: R1, B: R2, Off: BlobOutMagicOff},
-		Instr{Op: OpStore64, A: R1, B: R9, Off: BlobOutCounterOff}, // found_counter
+		Instr{Op: OpStore64, A: R1, B: R9, Off: BlobOutCounterOff}, // found_counter（命中计数）
 		Instr{Op: OpMovi, A: R0, Imm: 1},
 		Instr{Op: OpHalt},
 	)
 
-	// ---- 本 counter 不是解 → 试下一个 ----
+	// 本 counter 不是解 → 试下一个
 	p = append(p,
 		Label("nextiter"),
 		Instr{Op: OpAdd, A: R9, B: R9, C: R14},
 		Instr{Op: OpJmp, Target: "mainloop"},
 	)
 
-	// ---- 本批耗尽 / 输入非法 → 未命中（输出区不写） ----
+	// 本批耗尽 / 输入非法 → 未命中（输出区不写）
 	p = append(p,
 		Label("miss"),
 		Instr{Op: OpMovi, A: R0, Imm: 0},

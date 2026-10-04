@@ -703,7 +703,7 @@ func TestCheckOWASP_SQLi(t *testing.T) {
 }
 
 func TestCheckOWASP_SQLi_Low(t *testing.T) {
-	// Low sensitivity requires higher score, simple comment alone shouldn't trigger
+	// 低敏感度要求更高分值，单独的注释不应触发
 	hits := CheckOWASP("low", "/page", "q=hello--", nil, nil)
 	if len(hits) > 0 {
 		t.Fatal("low sensitivity should not trigger on simple comment")
@@ -909,8 +909,8 @@ script:alert(1)">`, want: `<a href="javascript:alert(1)">`},
 func TestNormalize_OverlongUTF8(t *testing.T) {
 	input := "%c0%ae%c0%ae/%c0%ae%c0%ae/etc/passwd"
 	result := normalize(input)
-	// Overlong UTF-8 %c0%ae→"." and remaining is URL-decoded; exact output depends on decode order.
-	// The key invariant: result must contain ".." for path traversal detection.
+	// overlong UTF-8 %c0%ae→"."，其余部分被 URL 解码；具体输出取决于解码顺序。
+	// 关键不变量：结果须含 ".." 才能被路径遍历检测命中。
 	if !strings.Contains(result, "..") || !strings.Contains(result, "etc/passwd") {
 		t.Fatalf("expected overlong UTF-8 to normalize to traversal path, got %q", result)
 	}
@@ -1231,7 +1231,7 @@ func TestCheckOWASP_Clean_CGIErrorTelemetry(t *testing.T) {
 }
 
 func TestCheckOWASP_BlazeShortBase64QueryStillDetected(t *testing.T) {
-	// Full base64 payload that decodes to "1 # ... aND\x00/* ... */1=1" — real SQLi tautology
+	// 完整 base64 载荷，解码后为 "1 # ... aND\x00/* ... */1=1"——真实的 SQLi 恒等式
 	hits := CheckOWASP("high", "/subsidiary/adapt", "refresh=mediocre&module=leverage&initiative=MSAjIGZlZmZsYWJlbGxlZGJ5dGFiaW5kZXhpbnRlZ3JpdHl1bmRvcHJvZ3Jlc3NncmF5dG9mZmVvcGVuIAphTkQALyogY29sbGVjdGlvbnNhd2FpdApjbG9zZXN0cG9zaXRpb25zbGlucHVzdmltZW9taW5pbW9ibGF6ZXJ0cmltdHlwZQpyc3luYw1uaWNlbmFtZWV4Y2x1c2l2ZXBvaW50ZGlydHkgKi8xPTE%3D", map[string]string{"Cookie": "master=undertake; SESSIONID=1e0c2f9b6fa06a255da5e3"}, nil)
 	if len(hits) == 0 {
 		t.Fatal("expected suspicious short base64 query payload to be detected")
@@ -1658,7 +1658,7 @@ func TestCheckOWASP_Clean_S3ARNWildcard(t *testing.T) {
 
 // 真实 SQL 注入用 /* 未闭合注释仍然检出（sqli:005 /* 分支）
 func TestCheckOWASP_SQLi_SlashStarComment(t *testing.T) {
-	// Unclosed /* comment (not stripped by stripSQLComments) — real SQL injection probing
+	// 未闭合的 /* 注释（不会被 stripSQLComments 剥离）——真实的 SQL 注入探测
 	hits := CheckOWASP("high", "/", "id=queryvalue1/*", nil, nil)
 	if !hasCategory(hits, CatSQLi) {
 		t.Fatal("SQL unclosed /* comment injection should still trigger SQLi")

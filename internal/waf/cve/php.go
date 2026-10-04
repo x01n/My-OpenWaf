@@ -56,7 +56,7 @@ func init() {
 	})
 }
 
-// PHPCVEDetector detects PHP-specific CVE exploitation attempts.
+// PHPCVEDetector 检测 PHP 技术栈特有的 CVE 利用尝试。
 type PHPCVEDetector struct {
 	rules []phpCVERule
 }
@@ -66,24 +66,24 @@ type phpCVERule struct {
 	severity    string
 	description string
 	patterns    []*regexp.Regexp
-	target      string // "all", "url", "body", "header", "cookie"
+	target      string // 取值："all"、"url"、"body"、"header"、"cookie"
 }
 
-// Compiled regex patterns (init-time, no runtime compilation).
+// 正则表达式在 init 阶段编译，运行时不再编译。
 var (
-	// PHP object deserialization (CVE-2015-6835 and related)
+	// PHP 对象反序列化（CVE-2015-6835 及相关）
 	rePHPSerObj      = regexp.MustCompile(`(?i)O:\d+:"`)
 	rePHPSerArray    = regexp.MustCompile(`(?i)a:\d+:\{`)
 	rePHPUnserialize = regexp.MustCompile(`(?i)unserialize\s*\(`)
 
-	// PHP stream wrappers / file inclusion (CVE-2018-xxxx family)
+	// PHP 流包装器 / 文件包含（CVE-2018-xxxx 系列）
 	rePHPFilterStream = regexp.MustCompile(`(?i)php://filter/`)
 	rePHPInputStream  = regexp.MustCompile(`(?i)php://input`)
 	rePHPDataStream   = regexp.MustCompile(`(?i)data://text/plain;base64,`)
 	rePHPExpect       = regexp.MustCompile(`(?i)expect://`)
 	rePHPPhar         = regexp.MustCompile(`(?i)phar://`)
 
-	// ThinkPHP RCE (CVE-2018-20062 and related)
+	// ThinkPHP RCE（CVE-2018-20062 及相关）
 	reThinkPHP1 = regexp.MustCompile(`(?i)s=index/think\\\\app/invokefunction`)
 	reThinkPHP2 = regexp.MustCompile(`(?i)_method=__construct.*filter\[\]=system`)
 	reThinkPHP3 = regexp.MustCompile(`(?i)c=Runtime&a=getContent`)
@@ -96,7 +96,7 @@ var (
 	reLaravel3 = regexp.MustCompile(`(?i)_ignition/health-check`)
 	reLaravel4 = regexp.MustCompile(`(?i)Illuminate\\\\Foundation\\\\Testing`)
 
-	// Webshell upload detection
+	// Webshell 上传检测
 	rePHPTag       = regexp.MustCompile(`(?i)<\?php`)
 	rePHPEval      = regexp.MustCompile(`(?i)\beval\s*\(`)
 	rePHPSystem    = regexp.MustCompile(`(?i)\bsystem\s*\(`)
@@ -105,26 +105,26 @@ var (
 	rePHPShellExec = regexp.MustCompile(`(?i)\bshell_exec\s*\(`)
 	rePHPExtUpload = regexp.MustCompile(`(?i)\.(php[345s7]?|phtml|pht|phps|phar)\b`)
 
-	// Drupal Drupalgeddon2 (CVE-2018-7600)
+	// Drupal Drupalgeddon2（CVE-2018-7600）
 	reDrupal1 = regexp.MustCompile(`(?i)#post_render.*#type\s*=\s*markup`)
 	reDrupal2 = regexp.MustCompile(`(?i)#lazy_builder`)
 
-	// PHPUnit RCE (CVE-2017-9841)
+	// PHPUnit RCE（CVE-2017-9841）
 	rePHPUnit = regexp.MustCompile(`(?i)/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin\.php`)
 
-	// PHP-CGI argument injection via soft-hyphen (CVE-2024-4577)
+	// 通过软连字符的 PHP-CGI 参数注入（CVE-2024-4577）
 	rePHPCGI_SoftHyphenArg = regexp.MustCompile(`(?i)%[aA][dD].*-[drnfem]`)
 	rePHPCGI_AutoPrepend   = regexp.MustCompile(`(?i)auto_prepend_file\s*=\s*php://`)
 	rePHPCGI_AllowInclude  = regexp.MustCompile(`(?i)allow_url_include\s*=\s*[1oOyY]`)
 
-	// WordPress arbitrary file read (CVE-2024-2961)
+	// WordPress 任意文件读取（CVE-2024-2961）
 	reWPFileRead = regexp.MustCompile(`(?i)/wp-admin/admin-ajax\.php.*action=.*file`)
 
-	// Craft CMS RCE (CVE-2023-41892)
+	// Craft CMS RCE（CVE-2023-41892）
 	reCraftCMS = regexp.MustCompile(`(?i)/actions/conditions/render.*configObject`)
 )
 
-// NewPHPCVEDetector creates a PHP CVE detector with all built-in rules.
+// NewPHPCVEDetector 创建带全部内置规则的 PHP CVE 检测器。
 func NewPHPCVEDetector() *PHPCVEDetector {
 	d := &PHPCVEDetector{}
 	d.rules = []phpCVERule{
@@ -236,7 +236,7 @@ func (d *PHPCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMat
 						Action:      "drop",
 						Snippet:     snippet.Extract([]*regexp.Regexp{pat}, t),
 					})
-					goto nextRule // one match per rule is enough
+					goto nextRule // 每条规则命中一次即可
 				}
 			}
 		}
@@ -275,7 +275,7 @@ func (d *PHPCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits) (CV
 	return CVEMatch{}, false
 }
 
-// resolveTargets returns the set of strings to scan based on target type.
+// resolveTargets 按 target 类型返回待扫描字符串集合。
 func resolveTargets(req *CVERequest, target string) []string {
 	switch target {
 	case "url":
@@ -303,12 +303,12 @@ func resolveTargets(req *CVERequest, target string) []string {
 			return nil
 		}
 		return []string{c}
-	default: // "all"
+	default: // "all"（全目标视图）
 		return req.AllTargets
 	}
 }
 
-// guessMatchedPart tries to determine which part of the request was matched.
+// guessMatchedPart 推断命中落在请求的哪个部分。
 func guessMatchedPart(req *CVERequest, matched string) string {
 	if strings.Contains(req.Path, matched) || strings.Contains(req.DecodedPath, matched) ||
 		strings.Contains(req.RawQuery, matched) || strings.Contains(req.DecodedQuery, matched) {

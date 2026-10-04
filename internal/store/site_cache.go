@@ -10,15 +10,15 @@ import (
 )
 
 const (
-	// MaxSiteCacheRulesJSONBytes limits persisted rule data parsed on every snapshot build.
+	// MaxSiteCacheRulesJSONBytes 限制每次快照构建都要解析的持久化规则数据量。
 	MaxSiteCacheRulesJSONBytes = 64 << 10
-	// MaxSiteCacheRules bounds per-request rule matching work.
+	// MaxSiteCacheRules 限制单请求的规则匹配工作量。
 	MaxSiteCacheRules = 128
-	// MaxSiteCacheRulePatternBytes bounds compiled and compared pattern data.
+	// MaxSiteCacheRulePatternBytes 限制参与编译与比对的模式数据量。
 	MaxSiteCacheRulePatternBytes = 1024
-	// MaxSiteCacheTTLSeconds bounds cached response lifetime to thirty days.
+	// MaxSiteCacheTTLSeconds 把缓存响应存活时间上限设为三十天。
 	MaxSiteCacheTTLSeconds = 30 * 24 * 60 * 60
-	// MaxSiteCacheStaleIfErrorSeconds bounds stale fallback to one day.
+	// MaxSiteCacheStaleIfErrorSeconds 把 stale 兜底时长上限设为一天。
 	MaxSiteCacheStaleIfErrorSeconds = 24 * 60 * 60
 )
 
@@ -34,9 +34,8 @@ var (
 	errSiteCacheRuleStale       = errors.New("cache rule stale_if_error_seconds is out of range")
 )
 
-// ValidateAndCompileSiteCacheRules validates persisted cache rules and returns
-// their immutable runtime representation. A rule TTL of zero inherits defaultTTL;
-// paths without a matching rule remain uncacheable.
+// ValidateAndCompileSiteCacheRules 校验已持久化的缓存规则，并返回其不可变运行时表示。
+// 规则的 TTL 为零表示继承 defaultTTL；没有规则命中的路径保持不可缓存。
 func ValidateAndCompileSiteCacheRules(raw string, defaultTTL int) ([]SiteCacheRule, error) {
 	if defaultTTL < 0 || defaultTTL > MaxSiteCacheTTLSeconds {
 		return nil, errSiteCacheDefaultTTL
@@ -114,8 +113,8 @@ func compileSiteCacheRule(rule SiteCacheRule, defaultTTL int) ([]SiteCacheRule, 
 	}
 
 	values := []string{value}
-	// Comma-separated suffix lists are a documented legacy format. Other rule
-	// types keep commas literal so regex quantifiers and query values are intact.
+	// 逗号分隔的后缀列表是有文档记载的 legacy 格式。其他规则类型
+	// 保留逗号的字面含义，以免破坏正则量词与查询串取值。
 	if ruleType == "suffix" && strings.Contains(value, ",") {
 		values = strings.Split(value, ",")
 	}

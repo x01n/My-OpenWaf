@@ -20,7 +20,6 @@
 //!         sha256_compress_at / sm3_compress_at / sm4_enc_block_at / sm4_dec_block_at
 //!                 —— 操作数地址由执行器解析，越界返回 OutOfBounds，绝不 panic
 //! ```
-//!
 //! # 跳转语义
 //!
 //! `Op::Jmp { rel }` 等携带的是**原始 i32 相对量**，目标 = **下一条指令的
@@ -32,11 +31,6 @@
 //! `vmp.rs` 用 `binary_search_by_key(&target, |i| i.pc)` 完成映射，
 //! 并把 `Vm.pc` 定义为**数组下标** —— 与解码器的 `Instr.pc`（字节偏移）
 //! 是两种量，不要混用。
-//!
-//! # 错误码：单一真源在本文件，但**分两层**
-//!
-//! 14 个变体全部定义在本文件（见 §「错误」），`vmp.rs` 只 `use` 不另定义。
-//! 分层的含义是**哪一层能报出**，不是类型分家：
 //!
 //! - **解码期**（`parse` 阶段，不分配内存、不执行任何指令即可全量报出）：
 //!   `BadMagic` / `UnsupportedVersion` / `BadFlags` / `TrailingBytes` /

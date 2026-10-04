@@ -68,7 +68,7 @@ func decodeJSEscapesReference(s string) string {
 				}
 			}
 		}
-		// Not a recognized escape — keep the backslash.
+		// 不是可识别的转义——保留反斜杠。
 		b.WriteByte(s[i])
 		i++
 	}

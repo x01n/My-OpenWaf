@@ -14,7 +14,7 @@ const (
 	maxFingerprintString = 1024
 )
 
-// Material holds extracted HTTP fields used for application-route matching and recording.
+// Material 保存应用路由匹配与记录所用的 HTTP 提取字段。
 type Material struct {
 	Method              string
 	Path                string
@@ -42,7 +42,7 @@ type Material struct {
 	ResponseBodySnippet string
 }
 
-// TLSMetadata captures the TLS fields used by application-route recording.
+// TLSMetadata 保存应用路由记录所用的 TLS 字段。
 type TLSMetadata struct {
 	TLSVersion string
 	TLSSNI     string
@@ -65,7 +65,14 @@ func requestPath(c *app.RequestContext) string {
 	return string(c.Path())
 }
 
-// RequestHeaderLookup returns the concatenated values for a header (case-insensitive key).
+/**
+ * RequestHeaderLookup 返回按大小写不敏感键拼接同名多值后的取值函数。
+ *
+ * 首次调用时才遍历全部请求头并建缓存，避免对未用到的头付出构建成本。
+ *
+ * @param c 请求上下文。
+ * @return 传入头名即可取得其拼接值的函数。
+ */
 func RequestHeaderLookup(c *app.RequestContext) func(string) string {
 	var cached map[string]string
 	var loaded bool
@@ -86,20 +93,36 @@ func RequestHeaderLookup(c *app.RequestContext) func(string) string {
 	}
 }
 
-// BuildMaterial extracts strings from the request context synchronously.
-// tls is optional; pass a zero-value metadata struct when unavailable.
-// If upstreamHeader is non-nil, response header fields prefer upstream headers;
-// respBody should be upstream body bytes when available.
+/**
+ * BuildMaterial 同步地从请求上下文提取各字段。
+ *
+ * @param c 请求上下文；为 nil 时返回 nil。
+ * @param clientIP 客户端 IP。
+ * @param tls TLS 元数据；不可用时传零值结构体。
+ * @param respBody 上游响应体字节；可用时传入。
+ * @param upstreamHeader 上游响应头；非 nil 时响应头字段优先取上游值。
+ * @return 提取出的 material。
+ */
 func BuildMaterial(c *app.RequestContext, clientIP net.IP, tls TLSMetadata, respBody []byte, upstreamHeader http.Header) *Material {
 	reqBodyBytes, _ := c.Body()
 	return BuildMaterialFromRequestBody(c, clientIP, tls, reqBodyBytes, respBody, upstreamHeader, true)
 }
 
-// BuildMaterialFromRequestBody builds material using a caller-supplied request
-// body snapshot. Callers may pass nil to skip request-body capture without
-// consuming an unread request stream.
-// When captureResponse is false, the full response body and response header text
-// are skipped to keep resource recording on the hot path lightweight.
+/**
+ * BuildMaterialFromRequestBody 用调用方提供的请求体快照构建 material。
+ *
+ * 调用方可传 nil 跳过请求体采集，从而不消费尚未读取的请求流。
+ * captureResponse 为 false 时跳过完整响应体与响应头文本，让热路径上的资源记录保持轻量。
+ *
+ * @param c 请求上下文；为 nil 时返回 nil。
+ * @param clientIP 客户端 IP。
+ * @param tls TLS 元数据。
+ * @param reqBody 请求体快照；nil 且请求体非流式时回退读取请求体。
+ * @param respBody 上游响应体字节。
+ * @param upstreamHeader 上游响应头。
+ * @param captureResponse 是否采集完整响应体与响应头文本。
+ * @return 提取出的 material。
+ */
 func BuildMaterialFromRequestBody(c *app.RequestContext, clientIP net.IP, tls TLSMetadata, reqBody []byte, respBody []byte, upstreamHeader http.Header, captureResponse bool) *Material {
 	if c == nil {
 		return nil

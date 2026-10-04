@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// RateLimiterBackend is shared by local and Redis-backed rate limiters.
+// RateLimiterBackend 由本地与 Redis 两套限流实现共享。
 type RateLimiterBackend interface {
 	Enabled() bool
 	Reconfigure(windowSec, maxReqs int, enabled bool)
@@ -16,7 +16,7 @@ type RateLimiterBackend interface {
 	Close()
 }
 
-// RateLimiter implements fixed-window rate limiting keyed by (clientIP + host).
+// RateLimiter 实现以 (clientIP + host) 为键的固定窗口限流。
 type RateLimiter struct {
 	mu        sync.Mutex
 	configMu  sync.RWMutex
@@ -30,7 +30,7 @@ type RateLimiter struct {
 
 type window struct {
 	count  atomic.Int64
-	expiry int64 // unix seconds
+	expiry int64 // unix 秒
 }
 
 func NewRateLimiter(windowSec, maxReqs int, enabled bool) *RateLimiter {
@@ -117,7 +117,7 @@ func (rl *RateLimiter) Allow(key string) bool {
 	return n <= maxReqs
 }
 
-// Increment is used for error rate counting (called after upstream response).
+// Increment 用于错误率计数（在上游响应之后调用）。
 func (rl *RateLimiter) Increment(key string) int64 {
 	if rl == nil {
 		return 0
@@ -140,7 +140,7 @@ func (rl *RateLimiter) Increment(key string) int64 {
 	return w.count.Add(1)
 }
 
-// IsOverLimit checks whether the current count exceeds max.
+// IsOverLimit 检查当前计数是否已超过 max。
 func (rl *RateLimiter) IsOverLimit(key string) bool {
 	if rl == nil {
 		return false

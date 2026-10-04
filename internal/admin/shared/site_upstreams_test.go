@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// --- ValidateSiteUpstreamURLs ---
+// ValidateSiteUpstreamURLs
 
 func TestValidateSiteUpstreamURLsValid(t *testing.T) {
 	cases := []string{
@@ -113,7 +113,7 @@ func TestValidateSiteUpstreamURLsRPCUpstreamAliases(t *testing.T) {
 	}
 }
 
-// --- ValidateSiteUpstreamHost ---
+// ValidateSiteUpstreamHost
 
 func TestValidateSiteUpstreamHostEmpty(t *testing.T) {
 	if err := ValidateSiteUpstreamHost(""); err != nil {
@@ -157,7 +157,7 @@ func TestValidateSiteUpstreamHostInvalidHost(t *testing.T) {
 	}
 }
 
-// --- trimNonEmptyStrings (内部) ---
+// trimNonEmptyStrings (内部)
 
 func TestTrimNonEmptyStrings(t *testing.T) {
 	got := trimNonEmptyStrings([]string{"a", "  ", "b", ""})

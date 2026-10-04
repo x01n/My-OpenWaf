@@ -14,7 +14,7 @@ import (
 	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
 )
 
-// BotSettingsUpdate represents the request body for updating bot settings.
+// BotSettingsUpdate 是更新 bot 设置的请求体。
 type BotSettingsUpdate struct {
 	Enabled                  *bool    `json:"enabled"`
 	ScoreThreshold           *int     `json:"score_threshold"`
@@ -137,7 +137,7 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			*req.AntiReplayCookieMode = mode
 		}
 
-		// Load current settings
+		// 读取当前设置
 		current := defaultBotSettingsResponse(settingsRepo)
 		if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
 			_ = json.Unmarshal([]byte(val), &current)
@@ -145,7 +145,7 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		// protection.captcha_enabled 是运行时权威源，避免部分更新把旧投影写回。
 		current.CaptchaEnabled = shared.LoadProtectionConfig(settingsRepo).CaptchaEnabled
 
-		// Apply updates
+		// 应用本次更新
 		if req.Enabled != nil {
 			current.Enabled = *req.Enabled
 		}
@@ -224,8 +224,8 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 			}
 
 			if req.Enabled != nil {
-				// Sync BotDetectionEnabled into the protection config so the engine
-				// sees a consistent value regardless of which page the user toggles.
+				// 把 BotDetectionEnabled 同步进 protection 配置，
+				// 这样无论用户在哪个页面切换开关，引擎读到的值都一致。
 				if err := shared.SyncBotEnabledToProtection(txRepo, current.Enabled); err != nil {
 					return err
 				}

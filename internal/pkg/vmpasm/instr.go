@@ -2,15 +2,17 @@ package vmpasm
 
 import "fmt"
 
-// Instr 是一条待编码或已解码的指令。
-//
-// 各字段按指令类别使用：
-//   - 无操作数指令只用 Op
-//   - 含一个寄存器操作数的指令用 A
-//   - 含两个寄存器操作数的指令用 A、B
-//   - 含三个寄存器操作数的指令用 A、B、C
-//   - 含立即数的指令用 A（寄存器）与 Imm
-//   - 含跳转偏移的指令用 Target，汇编期由 Label 解析填入
+/**
+ * Instr 是一条待编码或已解码的指令。
+ *
+ * 各字段按指令类别使用：
+ *   - 无操作数指令只用 Op
+ *   - 含一个寄存器操作数的指令用 A
+ *   - 含两个寄存器操作数的指令用 A、B
+ *   - 含三个寄存器操作数的指令用 A、B、C
+ *   - 含立即数的指令用 A（寄存器）与 Imm
+ *   - 含跳转偏移的指令用 Target，汇编期由 Label 解析填入
+ */
 type Instr struct {
 	// Op 是 opcode 常量。
 	Op byte
@@ -28,10 +30,12 @@ type Instr struct {
 	Target string
 }
 
-// Text 返回指令的汇编文本形态，用于反汇编与测试可读性。
-//
-// 输出是**规范性**的：同一条指令的文本形态唯一，且能被 ParseText 重新解析，
-// 再被 Assemble 汇编回逐字节相同的编码（往返闭合，见 vmpasm_test.go）。
+/**
+ * Text 返回指令的汇编文本形态，用于反汇编与测试可读性。
+ *
+ * 输出是**规范性**的：同一条指令的文本形态唯一，且能被 ParseText 重新解析，
+ * 再被 Assemble 汇编回逐字节相同的编码（往返闭合，见 vmpasm_test.go）。
+ */
 func (in Instr) Text() string {
 	switch in.Op {
 	case OpNop:
@@ -62,10 +66,12 @@ func (in Instr) Text() string {
 	}
 }
 
-// mnemonicOf 返回 opcode 的助记符，未知 opcode 返回 "???"。
-//
-// 助记符与 wasm-pow-solver/src/isa.rs 的常量名去前缀形态一致
-// （`OP_SHA256_COMPRESS` → `SHA256_COMPRESS`），便于对照两侧的调试输出。
+/**
+ * mnemonicOf 返回 opcode 的助记符，未知 opcode 返回 "???"。
+ *
+ * 助记符与 wasm-pow-solver/src/isa.rs 的常量名去前缀形态一致
+ * （`OP_SHA256_COMPRESS` → `SHA256_COMPRESS`），便于对照两侧的调试输出。
+ */
 func mnemonicOf(op byte) string {
 	if name, ok := goNames[op]; ok {
 		return rustMnemonic(name)
@@ -73,11 +79,13 @@ func mnemonicOf(op byte) string {
 	return "???"
 }
 
-// rustMnemonic 把本包的标识符名转成 isa.rs 常量名的助记符部分。
-//
-// `OpSha256Compress` → `SHA256_COMPRESS`。
-// 规则：去掉 `Op` 前缀后，在大写字母前插入下划线（仅当其前一字符是小写字母
-// 或数字），再把所有小写字母转大写。
+/**
+ * rustMnemonic 把本包的标识符名转成 isa.rs 常量名的助记符部分。
+ *
+ * `OpSha256Compress` → `SHA256_COMPRESS`。
+ * 规则：去掉 `Op` 前缀后，在大写字母前插入下划线（仅当其前一字符是小写字母
+ * 或数字），再把所有小写字母转大写。
+ */
 func rustMnemonic(goName string) string {
 	const prefix = "Op"
 	if len(goName) <= len(prefix) || goName[:len(prefix)] != prefix {

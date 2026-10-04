@@ -7,7 +7,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 )
 
-// stubPhase is a test double implementing the Phase interface.
+// stubPhase 是实现 Phase 接口的测试替身。
 type stubPhase struct {
 	name   string
 	result action.Result

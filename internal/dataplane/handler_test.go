@@ -48,9 +48,11 @@ import (
 
 /* 站点级质询策略（challenge_action / captcha_type）渲染链路测试。 */
 
-// TestHandlerSiteChallengeActionOverridesGlobal 覆盖站点级质询动作优先级：
-// 命中通用 challenge 动作时，站点配置 render 到 captcha 流；验证码类型
-// 规则级 → 站点 → 全局 的链在站点覆盖存在时取站点值。
+/**
+ * TestHandlerSiteChallengeActionOverridesGlobal 覆盖站点级质询动作优先级：
+ * 命中通用 challenge 动作时，站点配置 render 到 captcha 流；验证码类型
+ * 规则级 → 站点 → 全局 的链在站点覆盖存在时取站点值。
+ */
 func TestHandlerSiteChallengeActionOverridesGlobal(t *testing.T) {
 	protection := store.DefaultProtectionConfig()
 	protection.BotDetectionEnabled = false
@@ -125,8 +127,10 @@ func TestHandlerSiteChallengeActionOverridesGlobal(t *testing.T) {
 	}
 }
 
-// extractCaptchaSessionFromPage 从渲染后的验证码页 HTML 里提取会话 ID。
-// session 隐藏域或 JS 绑定都可能携带它；本辅助只做渲染断言，不改渲染链路。
+/**
+ * extractCaptchaSessionFromPage 从渲染后的验证码页 HTML 里提取会话 ID。
+ * session 隐藏域或 JS 绑定都可能携带它；本辅助只做渲染断言，不改渲染链路。
+ */
 func extractCaptchaSessionFromPage(t *testing.T, body string) string {
 	t.Helper()
 	// __waf_captcha_session 隐藏域 value 即会话 ID。
@@ -151,8 +155,10 @@ func extractCaptchaSessionFromPage(t *testing.T, body string) string {
 	return rest[1 : 1+end]
 }
 
-// captchaEnvelopeType 从页面信封解出题目类型，与内存会话密钥对账。
-// 信封断言走真实解密链路（session EnvKey + envDecrypt），确保页面下发物可还原。
+/**
+ * captchaEnvelopeType 从页面信封解出题目类型，与内存会话密钥对账。
+ * 信封断言走真实解密链路（session EnvKey + envDecrypt），确保页面下发物可还原。
+ */
 func captchaEnvelopeType(t *testing.T, manager *challenge.CaptchaManager, sessionID, body string) string {
 	t.Helper()
 	dataIdx := strings.Index(body, `id="cap-data"`)
@@ -185,8 +191,10 @@ func captchaEnvelopeType(t *testing.T, manager *challenge.CaptchaManager, sessio
 	return payload.Type
 }
 
-// TestHandlerGlobalChallengeActionOverrides 覆盖全局质询动作优先级：
-// 站点未配置时，全局 ProtectionConfig.ChallengeAction 生效。
+/**
+ * TestHandlerGlobalChallengeActionOverrides 覆盖全局质询动作优先级：
+ * 站点未配置时，全局 ProtectionConfig.ChallengeAction 生效。
+ */
 func TestHandlerGlobalChallengeActionOverrides(t *testing.T) {
 	protection := store.DefaultProtectionConfig()
 	protection.BotDetectionEnabled = false
@@ -238,8 +246,10 @@ func TestHandlerGlobalChallengeActionOverrides(t *testing.T) {
 	}
 }
 
-// TestHandlerRuleCaptchaTypeBeatsSiteAndSiteBeatsGlobal 覆盖验证码类型优先级链
-// 规则级 > 站点 > 全局：规则带 rotate、站点带 slide、全局 math 时取规则 rotate。
+/**
+ * TestHandlerRuleCaptchaTypeBeatsSiteAndSiteBeatsGlobal 覆盖验证码类型优先级链
+ * 规则级 > 站点 > 全局：规则带 rotate、站点带 slide、全局 math 时取规则 rotate。
+ */
 func TestHandlerRuleCaptchaTypeBeatsSiteAndSiteBeatsGlobal(t *testing.T) {
 	protection := store.DefaultProtectionConfig()
 	protection.BotDetectionEnabled = false
@@ -291,9 +301,11 @@ func TestHandlerRuleCaptchaTypeBeatsSiteAndSiteBeatsGlobal(t *testing.T) {
 	}
 }
 
-// TestHandlerGlobalChallengeActionEmptyRendersDefaultChallenge 覆盖全局
-// ProtectionConfig.ChallengeAction 为空串（旧数据兼容路径）时的回退：
-// 命中通用 challenge 动作渲染默认 JS 挑战页，不崩溃、不 500。
+/**
+ * TestHandlerGlobalChallengeActionEmptyRendersDefaultChallenge 覆盖全局
+ * ProtectionConfig.ChallengeAction 为空串（旧数据兼容路径）时的回退：
+ * 命中通用 challenge 动作渲染默认 JS 挑战页，不崩溃、不 500。
+ */
 func TestHandlerGlobalChallengeActionEmptyRendersDefaultChallenge(t *testing.T) {
 	protection := store.DefaultProtectionConfig()
 	protection.BotDetectionEnabled = false
@@ -792,8 +804,10 @@ func TestChallengeSubmissionValuesOnlyAcceptsURLEncodedForm(t *testing.T) {
 	}
 }
 
-// solveChallengePoW 以挑战页脚本相同的算法求出合法工作量证明，
-// 供端到端测试构造「客户端已完成挑战」的提交。
+/**
+ * solveChallengePoW 以挑战页脚本相同的算法求出合法工作量证明，
+ * 供端到端测试构造「客户端已完成挑战」的提交。
+ */
 func solveChallengePoW(t *testing.T, token string) (counter, hash string) {
 	t.Helper()
 	prefix := strings.Repeat("0", challenge.ChallengeProofDifficulty)
@@ -1014,11 +1028,13 @@ func TestHandlerEvaluatesWAFBeforeChallengeRedirect(t *testing.T) {
 	}
 }
 
-// TestChallengeTokenCannotBeReplayedOrShared 端到端验证 JS 挑战 token 的两条约束：
-// 同一 token 只能兑换一次通行 cookie，且不能被另一个客户端（不同 UA）复用。
-//
-// 修复前 token = HMAC(reqID+":"+ts)，既不绑定客户端也没有一次性约束，
-// 抓取一份挑战页即可让任意数量的客户端在 5 分钟内反复换取通行 cookie。
+/**
+ * TestChallengeTokenCannotBeReplayedOrShared 端到端验证 JS 挑战 token 的两条约束：
+ * 同一 token 只能兑换一次通行 cookie，且不能被另一个客户端（不同 UA）复用。
+ *
+ * 修复前 token = HMAC(reqID+":"+ts)，既不绑定客户端也没有一次性约束，
+ * 抓取一份挑战页即可让任意数量的客户端在 5 分钟内反复换取通行 cookie。
+ */
 func TestChallengeTokenCannotBeReplayedOrShared(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1669,8 +1685,10 @@ func TestHandlerAllProtectionsDisabledAttributesUpstreamStatus(t *testing.T) {
 	}
 }
 
-// TestHandlerInvalidEnabledRateLimitNeverSynthesizes429 覆盖旧配置中开关为真但
-// 窗口/配额为零的情况：限流器必须安全停用，普通请求仍应到达上游。
+/**
+ * TestHandlerInvalidEnabledRateLimitNeverSynthesizes429 覆盖旧配置中开关为真但
+ * 窗口/配额为零的情况：限流器必须安全停用，普通请求仍应到达上游。
+ */
 func TestHandlerInvalidEnabledRateLimitNeverSynthesizes429(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -2252,9 +2270,11 @@ func TestHandlerRuleCaptchaTypeInheritsGlobal(t *testing.T) {
 	}
 }
 
-// TestHandlerExplicitCaptchaActionIgnoresGlobalAutoSwitch 验证规则明确要求
-// captcha_challenge 时仍按规则类型渲染；全局开关只控制自动触发，不应把显式
-// CAPTCHA 动作降级成通用状态页。
+/**
+ * TestHandlerExplicitCaptchaActionIgnoresGlobalAutoSwitch 验证规则明确要求
+ * captcha_challenge 时仍按规则类型渲染；全局开关只控制自动触发，不应把显式
+ * CAPTCHA 动作降级成通用状态页。
+ */
 func TestHandlerExplicitCaptchaActionIgnoresGlobalAutoSwitch(t *testing.T) {
 	protection := store.DefaultProtectionConfig()
 	protection.CaptchaEnabled = false
@@ -4236,8 +4256,8 @@ func TestErrorRateLimitDisabledOrInvalidSnapshotNeverReadsOrWritesBackend(t *tes
 		ErrorRateLimitCountBlock: true,
 	}
 
-	// The runtime backend is enabled, but the current snapshot explicitly disables
-	// error limiting. Neither the decision nor the historical counters may apply.
+	// 运行时后端已启用，但当前快照显式关闭了错误限流。
+	// 无论是判定还是历史计数器都不应生效。
 	incrementErrorRateLimitStatus(eng, base, key, 404)
 	incrementErrorRateLimitStatus(eng, base, key, 500)
 	incrementErrorRateLimitBlock(eng, base, key)
@@ -4397,8 +4417,10 @@ func TestHandlerRecordsAccessLogWhenNoUpstreamConfigured(t *testing.T) {
 	}
 }
 
-// TestHandlerFinalizesEarlyExitAccessLog 验证配置快照未加载时仍会留下最小
-// 访问审计行，并保留已捕获的 TLS 指纹。无站点路由由独立用例覆盖。
+/**
+ * TestHandlerFinalizesEarlyExitAccessLog 验证配置快照未加载时仍会留下最小
+ * 访问审计行，并保留已捕获的 TLS 指纹。无站点路由由独立用例覆盖。
+ */
 func TestHandlerFinalizesEarlyExitAccessLog(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -4445,8 +4467,10 @@ func TestHandlerFinalizesEarlyExitAccessLog(t *testing.T) {
 	}
 }
 
-// TestFinalizeUnrecordedAccessLogKeepsExplicitErrorAfterClientCancel 锁定早期
-// 失败的审计边界：客户端取消不能把已经产生的 4xx/5xx 错误从日志中抹掉。
+/**
+ * TestFinalizeUnrecordedAccessLogKeepsExplicitErrorAfterClientCancel 锁定早期
+ * 失败的审计边界：客户端取消不能把已经产生的 4xx/5xx 错误从日志中抹掉。
+ */
 func TestFinalizeUnrecordedAccessLogKeepsExplicitErrorAfterClientCancel(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -4605,9 +4629,11 @@ func TestHandlerRecordsAccessLogForRequestBodyPrefetchError(t *testing.T) {
 	}
 }
 
-// TestHeaderOrderCacheSingleVisitAll 验证主路径头顺序缓存：整请求生命周期内
-// requestHeaderOrder 只执行一次（第一条记录时槽已命中），且 WAF 安全事件与
-// 访问日志共享同一顺序字符串。JSDoc 注释与契约同步。
+/**
+ * TestHeaderOrderCacheSingleVisitAll 验证主路径头顺序缓存：整请求生命周期内
+ * requestHeaderOrder 只执行一次（第一条记录时槽已命中），且 WAF 安全事件与
+ * 访问日志共享同一顺序字符串。JSDoc 注释与契约同步。
+ */
 func TestHeaderOrderCacheSingleVisitAll(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

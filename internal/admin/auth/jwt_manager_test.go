@@ -71,7 +71,7 @@ func baseClaims(username, role string, exp time.Time) Claims {
 	}
 }
 
-// ---------- 签发与校验成功路径 ----------
+// 签发与校验成功路径
 
 func TestTokenManagerSignAndVerify(t *testing.T) {
 	tm := NewTokenManager([]byte("primary-secret-key"), nil)
@@ -137,7 +137,7 @@ func TestSignAccessTokenHashesIPAndDevice(t *testing.T) {
 	}
 }
 
-// ---------- 校验拒绝路径（安全边界） ----------
+// 校验拒绝路径（安全边界）
 
 func TestVerifyAccessTokenRejectsWrongSecret(t *testing.T) {
 	signer := NewTokenManager([]byte("secret-alpha"), nil)
@@ -249,7 +249,7 @@ func TestVerifyAccessTokenRejectsGarbage(t *testing.T) {
 	}
 }
 
-// ---------- 密钥轮换 ----------
+// 密钥轮换
 
 func TestRotateKeyAcceptsTokensSignedWithPreviousKey(t *testing.T) {
 	oldSecret := []byte("secret-generation-1")
@@ -316,7 +316,7 @@ func TestRotateKeyRejectsUnrelatedKey(t *testing.T) {
 	}
 }
 
-// ---------- 黑名单 / 吊销 ----------
+// 黑名单 / 吊销
 
 func TestVerifyAccessTokenRejectsBlacklistedToken(t *testing.T) {
 	tm := NewTokenManager([]byte("primary-secret-key"), nil)
@@ -532,7 +532,7 @@ func TestNewTokenManagerLoadsBlacklistFromDB(t *testing.T) {
 	}
 }
 
-// ---------- 包级兼容函数 ----------
+// 包级兼容函数
 
 func TestPackageVerifyAccessTokenRejectsExpired(t *testing.T) {
 	secret := []byte("legacy-secret")
@@ -569,7 +569,7 @@ func TestPackageSignAccessTokenUsesAdminRole(t *testing.T) {
 	}
 }
 
-// ---------- 哈希与刷新令牌 ----------
+// 哈希与刷新令牌
 
 func TestHashShort(t *testing.T) {
 	if got := hashShort(""); got != "" {

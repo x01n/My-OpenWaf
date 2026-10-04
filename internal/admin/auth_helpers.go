@@ -11,19 +11,18 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// refreshCookieName is the admin refresh-token cookie.
+// refreshCookieName 是管理端 refresh-token Cookie 名。
 const refreshCookieName = "my_openwaf_rt"
 
-// refreshCookieSeparator joins the server-side JTI with the raw token inside the
-// cookie value. A dot keeps the value percent-encoding free: hertz writes the
-// cookie through url.QueryEscape but reads it back verbatim without decoding, so
-// a separator that QueryEscape rewrites in place (a colon becomes %3A) can never
-// round-trip and every refresh attempt fails with "malformed refresh token".
+// refreshCookieSeparator 在 Cookie 值内连接服务端 JTI 与原始令牌。
+// 用点号可让取值免于百分号编码：hertz 写 Cookie 时走 url.QueryEscape，
+// 读回时却原样不解码，因此任何会被 QueryEscape 就地改写的分隔符
+// （例如冒号会变成 %3A）都无法往返，刷新时会一律报 "malformed refresh token"。
 const refreshCookieSeparator = '.'
 
-// setRefreshCookie writes the rotating refresh-token cookie.
-// Path is "/" to ensure the cookie is sent on all requests including refresh.
-// Secure flag follows the authenticated connection protocol or a loopback reverse proxy.
+// setRefreshCookie 写入轮换中的 refresh-token Cookie。
+// Path 为 "/"，保证包括 refresh 在内的所有请求都会带上该 Cookie。
+// Secure 标志跟随已认证的连接协议，或回环反向代理的场景。
 func setRefreshCookie(c *app.RequestContext, value string, ttl time.Duration) {
 	proto := adminRequestProtocol(c)
 	isSecure := proto == "https" || proto == "h3"
@@ -42,10 +41,9 @@ func setAuthNoStore(c *app.RequestContext) {
 	c.Response.Header.Set("Cache-Control", "no-store")
 }
 
-// refreshCookieLegacyEscapedSeparator is how a browser that logged in before the
-// separator change still carries the value: hertz escaped the colon on write, so
-// the stored cookie literally reads "<jti>%3A<raw>". JTI and raw token are both
-// hex, so the marker can only ever be the separator.
+// refreshCookieLegacyEscapedSeparator 描述分隔符变更之前登录的浏览器仍会携带的形态：
+// hertz 写入时把冒号转义了，所以存下来的 Cookie 字面读作 "<jti>%3A<raw>"。
+// JTI 与原始令牌都是十六进制，因此这个标记只可能是分隔符。
 const refreshCookieLegacyEscapedSeparator = "%3A"
 
 func splitRefreshCookie(val string) (jti, raw string, ok bool) {
@@ -62,7 +60,7 @@ func splitRefreshCookie(val string) (jti, raw string, ok bool) {
 	return "", "", false
 }
 
-// recordLoginAttempt asynchronously persists a login attempt for audit.
+// recordLoginAttempt 异步持久化一次登录尝试，用于审计。
 func recordLoginAttempt(db *gorm.DB, username, ip, userAgent string, success bool) {
 	if db == nil {
 		return

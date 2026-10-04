@@ -4,13 +4,15 @@ import (
 	"testing"
 )
 
-// 本文件补齐 15 个此前零测试覆盖的匹配器。
-//
-// 这些都是用户可直接配置的规则类型，实现本身没查出问题，但没有任何测试钉住语义——
-// 一次重构就能把「Host 为空时否定匹配返回 true」这类边界悄悄改掉，而 WAF 的规则
-// 判定出错的表现是漏拦或误拦，不会有报错。
-//
-// 每条用例都写明断言的是哪个具体语义，而不是只堆一个 true/false。
+/**
+ * 本文件补齐 15 个此前零测试覆盖的匹配器。
+ *
+ * 这些都是用户可直接配置的规则类型，实现本身没查出问题，但没有任何测试钉住语义——
+ * 一次重构就能把「Host 为空时否定匹配返回 true」这类边界悄悄改掉，而 WAF 的规则
+ * 判定出错的表现是漏拦或误拦，不会有报错。
+ *
+ * 每条用例都写明断言的是哪个具体语义，而不是只堆一个 true/false。
+ */
 
 // matchCase 是匹配器的一条断言。
 type matchCase struct {
@@ -42,12 +44,14 @@ func runMatchCases(t *testing.T, kind, arg string, cases []matchCase) {
 	}
 }
 
-// ---- Host 系列 ----
+// Host 系列
 
-// TestHostFullMatcher 覆盖含端口匹配与通配符。
-//
-// 通配 `*.example.com` 刻意同时匹配子域与裸域（实现里 HasSuffix 之外还比了
-// TrimPrefix 后的结果），配错会让「拦截整个域」的规则漏掉主域本身。
+/**
+ * TestHostFullMatcher 覆盖含端口匹配与通配符。
+ *
+ * 通配 `*.example.com` 刻意同时匹配子域与裸域（实现里 HasSuffix 之外还比了
+ * TrimPrefix 后的结果），配错会让「拦截整个域」的规则漏掉主域本身。
+ */
 func TestHostFullMatcher(t *testing.T) {
 	runMatchCases(t, "host_full", "api.example.com", []matchCase{
 		{"精确匹配", MatchCtx{Host: "api.example.com"}, true, "主机名相等应命中"},
@@ -132,10 +136,12 @@ func TestHostContainsMatcher(t *testing.T) {
 	})
 }
 
-// TestHostNotContainsMatcher 是否定逻辑，边界最容易写反。
-//
-// 尤其「Host 为空返回 true」这一条：实现选择把「没有 Host」视为「不包含」，
-// 若被改成 false，配了 host_not_contains 的拦截规则会对无 Host 的请求失效。
+/**
+ * TestHostNotContainsMatcher 是否定逻辑，边界最容易写反。
+ *
+ * 尤其「Host 为空返回 true」这一条：实现选择把「没有 Host」视为「不包含」，
+ * 若被改成 false，配了 host_not_contains 的拦截规则会对无 Host 的请求失效。
+ */
 func TestHostNotContainsMatcher(t *testing.T) {
 	runMatchCases(t, "host_not_contains", "trusted", []matchCase{
 		{"不含子串则命中", MatchCtx{Host: "evil.example.com"}, true, "否定匹配：不含即命中"},
@@ -147,7 +153,7 @@ func TestHostNotContainsMatcher(t *testing.T) {
 	})
 }
 
-// ---- URL 系列 ----
+// URL 系列
 
 // TestFullURLContainsMatcher 验证匹配目标是 path + "?" + query 且大小写不敏感。
 func TestFullURLContainsMatcher(t *testing.T) {
@@ -175,7 +181,7 @@ func TestFullURLRegexMatcher(t *testing.T) {
 	})
 }
 
-// ---- 请求头 / Cookie / Referer ----
+// 请求头 / Cookie / Referer
 
 func TestCookieContainsMatcher(t *testing.T) {
 	runMatchCases(t, "cookie_contains", "sessionid=", []matchCase{
@@ -197,9 +203,11 @@ func TestRefererContainsMatcher(t *testing.T) {
 	})
 }
 
-// TestHeaderOrderRegexMatcher 覆盖请求头顺序指纹。
-//
-// 请求头出现顺序是常用的客户端指纹信号：正常浏览器顺序稳定，脚本客户端往往不同。
+/**
+ * TestHeaderOrderRegexMatcher 覆盖请求头顺序指纹。
+ *
+ * 请求头出现顺序是常用的客户端指纹信号：正常浏览器顺序稳定，脚本客户端往往不同。
+ */
 func TestHeaderOrderRegexMatcher(t *testing.T) {
 	runMatchCases(t, "header_order_regex", `^host,user-agent,accept$`, []matchCase{
 		{"顺序命中", MatchCtx{HeaderOrder: "host,user-agent,accept"}, true, "顺序完全一致应命中"},
@@ -209,13 +217,15 @@ func TestHeaderOrderRegexMatcher(t *testing.T) {
 	})
 }
 
-// ---- 查询串 ----
+// 查询串
 
-// TestQueryContainsMatcher 注意此匹配器大小写敏感。
-//
-// 与 full_url_contains 用 containsFoldASCII 不同，block_query_contains 走
-// strings.Contains 且 arg 未转小写。这条差异必须钉住：若有人「统一」成大小写
-// 不敏感，配了精确大小写的规则会开始误拦。
+/**
+ * TestQueryContainsMatcher 注意此匹配器大小写敏感。
+ *
+ * 与 full_url_contains 用 containsFoldASCII 不同，block_query_contains 走
+ * strings.Contains 且 arg 未转小写。这条差异必须钉住：若有人「统一」成大小写
+ * 不敏感，配了精确大小写的规则会开始误拦。
+ */
 func TestQueryContainsMatcher(t *testing.T) {
 	runMatchCases(t, "block_query_contains", "UNION", []matchCase{
 		{"精确大小写命中", MatchCtx{Query: "id=1 UNION SELECT"}, true, "同样大小写应命中"},
@@ -225,7 +235,7 @@ func TestQueryContainsMatcher(t *testing.T) {
 	})
 }
 
-// ---- 请求体系列 ----
+// 请求体系列
 
 func TestBodyContainsMatcher(t *testing.T) {
 	runMatchCases(t, "body_contains", "<script>", []matchCase{
@@ -245,10 +255,12 @@ func TestBodyRegexMatcher(t *testing.T) {
 	})
 }
 
-// TestBodyJSONPathMatcher 覆盖路径定位与值匹配。
-//
-// 关键语义：路径不存在返回 false（而非把缺失当空串去匹配），否则一条
-// `$.user.role` 的规则会对所有不带该字段的请求生效。
+/**
+ * TestBodyJSONPathMatcher 覆盖路径定位与值匹配。
+ *
+ * 关键语义：路径不存在返回 false（而非把缺失当空串去匹配），否则一条
+ * `$.user.role` 的规则会对所有不带该字段的请求生效。
+ */
 func TestBodyJSONPathMatcher(t *testing.T) {
 	runMatchCases(t, "block_body_json_path", `$.user.role:^admin$`, []matchCase{
 		{"路径存在且值匹配", MatchCtx{Body: []byte(`{"user":{"role":"admin"}}`)}, true, "嵌套路径应能定位到值"},
@@ -270,12 +282,14 @@ func TestBodyJSONPathMatcher(t *testing.T) {
 	})
 }
 
-// ---- multipart ----
+// multipart 上传
 
-// TestMultipartMatcher 覆盖上传文件名扫描。
-//
-// 前置条件是 Content-Type 必须是 multipart/form-data：缺了这一步就会把普通
-// 请求体也当作 multipart 扫描。
+/**
+ * TestMultipartMatcher 覆盖上传文件名扫描。
+ *
+ * 前置条件是 Content-Type 必须是 multipart/form-data：缺了这一步就会把普通
+ * 请求体也当作 multipart 扫描。
+ */
 func TestMultipartMatcher(t *testing.T) {
 	body := "--BOUNDARY\r\n" +
 		"Content-Disposition: form-data; name=\"file\"; filename=\"shell.php\"\r\n" +
@@ -300,13 +314,15 @@ func TestMultipartMatcher(t *testing.T) {
 	})
 }
 
-// ---- 地理封锁 ----
+// 地理封锁
 
-// TestGeoBlockMatcher 覆盖按国家码封锁。
-//
-// 国家码来自上游 CDN 注入的请求头，实现按 x-geo-country、cf-ipcountry 的顺序查找。
-// 值得钉住的是「第一个头存在但不在名单里时，仍会继续查第二个头」——若被改成
-// 直接返回 false，同时经过两级 CDN 的部署会漏掉后一个头携带的国家码。
+/**
+ * TestGeoBlockMatcher 覆盖按国家码封锁。
+ *
+ * 国家码来自上游 CDN 注入的请求头，实现按 x-geo-country、cf-ipcountry 的顺序查找。
+ * 值得钉住的是「第一个头存在但不在名单里时，仍会继续查第二个头」——若被改成
+ * 直接返回 false，同时经过两级 CDN 的部署会漏掉后一个头携带的国家码。
+ */
 func TestGeoBlockMatcher(t *testing.T) {
 	runMatchCases(t, "geo_block", "CN,RU, kp ", []matchCase{
 		{"x-geo-country 命中", MatchCtx{

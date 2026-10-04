@@ -19,7 +19,7 @@ type v9Policy struct {
 
 func (v9Policy) TableName() string { return "policies" }
 
-// V9EnsureDefaultPolicy repairs legacy policy references and establishes one explicit default policy.
+// V9EnsureDefaultPolicy 修复 legacy 策略引用，并确立一个显式的默认策略。
 func V9EnsureDefaultPolicy(db *gorm.DB) error {
 	if !db.Migrator().HasTable("policies") || !db.Migrator().HasColumn("policies", "default_slot") {
 		return nil

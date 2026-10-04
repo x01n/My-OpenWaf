@@ -9,25 +9,31 @@ import (
 	"testing"
 )
 
-// 新实现与 199051e 前的旧实现逐字节等价：前缀与后缀均为 RawURLEncoding
-// 输出（字符集 [A-Za-z0-9_-]、无填充、恒 11 位），栈上 Encode 与
-// EncodeToString 的字节等价由 TestReqIDCounterEncodingMatchesEncodeToString
-// 覆盖 2000 个随机样本 + 边界值。
+/**
+ * 新实现与 199051e 前的旧实现逐字节等价：前缀与后缀均为 RawURLEncoding
+ * 输出（字符集 [A-Za-z0-9_-]、无填充、恒 11 位），栈上 Encode 与
+ * EncodeToString 的字节等价由 TestReqIDCounterEncodingMatchesEncodeToString
+ * 覆盖 2000 个随机样本 + 边界值。
+ */
 var (
 	requestIDPrefixRe = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 	requestIDSuffixRe = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 )
 
-// legacyFastRequestIDForTest 还原旧实现的组装逻辑，仅用于等价对照。
-// suffix 用 EncodeToString 验证 encode 的“先小写过滤”在 11 字节空间内不生效。
+/**
+ * legacyFastRequestIDForTest 还原旧实现的组装逻辑，仅用于等价对照。
+ * suffix 用 EncodeToString 验证 encode 的“先小写过滤”在 11 字节空间内不生效。
+ */
 func legacyFastRequestIDForTest(prefix, suffix string) string {
 	return prefix + "-" + suffix
 }
 
 type requestIDStrings struct{ id, prefix, suffix string }
 
-// splitRequestID 按固定布局 11-1-11 切分（前缀与后缀本身就是 11 位
-// base64url，可含 '-'，不能用查找分隔符的方式切）。
+/**
+ * splitRequestID 按固定布局 11-1-11 切分（前缀与后缀本身就是 11 位
+ * base64url，可含 '-'，不能用查找分隔符的方式切）。
+ */
 func splitRequestID(id string) requestIDStrings {
 	if len(id) == 23 && id[11] == '-' {
 		return requestIDStrings{id: id, prefix: id[:11], suffix: id[12:]}

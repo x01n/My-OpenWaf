@@ -77,7 +77,7 @@ func UpdateSensitivityConfig(repo *repository.SystemSettingsRepo, reload func() 
 		}
 		cfg := shared.LoadProtectionConfig(repo)
 		cfg.SetCategorySensitivity(normalized)
-		// category_sensitivity is the canonical UI source; clear legacy module overrides.
+		// category_sensitivity 是 UI 的权威来源；清除 legacy 的模块级覆盖。
 		cfg.OWASPModules = "{}"
 		if err := shared.SaveProtectionConfig(repo, cfg); err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})

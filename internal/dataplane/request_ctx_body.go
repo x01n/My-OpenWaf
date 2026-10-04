@@ -109,10 +109,9 @@ func ensureRequestBodySnapshot(c *app.RequestContext) requestBodySnapshot {
 		snap.size = int64(len(prefetched))
 	}
 
-	// Rebinding a request body stream must not call SetBodyStream here.
-	// Hertz SetBodyStream() resets and closes the current body stream first,
-	// which breaks HTTP/2 requestBody pipes before the proxy can continue
-	// streaming the unread remainder upstream.
+	// 重新绑定请求体流时不能在这里调用 SetBodyStream：Hertz 的
+	// SetBodyStream() 会先重置并关闭当前请求体流，这会破坏 HTTP/2
+	// 的 requestBody 管道，使 proxy 无法继续把未读完的剩余部分流式送上游。
 	forward := &prefetchedRequestBodyStream{
 		reader: io.MultiReader(bytes.NewReader(prefetched), stream),
 	}

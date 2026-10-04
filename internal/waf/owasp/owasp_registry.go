@@ -7,47 +7,47 @@ import (
 	"sync"
 )
 
-// OWASPRule represents a single granular OWASP detection rule with its own ID,
-// category, and enable/disable switch. Each rule wraps one check function.
+// OWASPRule 表示一条颗粒化的 OWASP 检测规则，拥有独立的 ID、类别与启停开关，
+// 每条规则封装一个检测函数。
 type OWASPRule struct {
-	ID          string // e.g. "OWASP-SQLI-001"
-	Category    string // e.g. "sqli"
-	Name        string // e.g. "SQL Union Injection"
+	ID          string // 示例："OWASP-SQLI-001"
+	Category    string // 示例："sqli"
+	Name        string // 示例："SQL Union Injection"
 	Description string
-	Enabled     bool // default true
+	Enabled     bool // 默认 true
 	CheckFunc   func(input string) (score int, matched bool, desc string)
 }
 
-// OWASPRuleOverride allows per-rule configuration stored in ProtectionConfig.
+// OWASPRuleOverride 保存存放在 ProtectionConfig 中的规则级配置。
 type OWASPRuleOverride struct {
 	Enabled     *bool    `json:"enabled,omitempty"`
-	Whitelist   []string `json:"whitelist,omitempty"` // path whitelist — matching paths skip this rule
+	Whitelist   []string `json:"whitelist,omitempty"` // 路径白名单——命中的路径跳过本规则
 	Action      string   `json:"action,omitempty"`
 	StatusCode  int      `json:"status_code,omitempty"`
 	RedirectTo  string   `json:"redirect_to,omitempty"`
 	CaptchaType string   `json:"captcha_type,omitempty"`
-	Sensitivity string   `json:"sensitivity,omitempty"` // per-rule OWASP level (e.g. strict, high, medium)
+	Sensitivity string   `json:"sensitivity,omitempty"` // 规则级 OWASP 级别（如 strict、high、medium）
 }
 
-// OWASPRuleRegistry is a thread-safe registry of all granular OWASP rules.
+// OWASPRuleRegistry 是全部颗粒化 OWASP 规则的并发安全注册表。
 type OWASPRuleRegistry struct {
 	rules map[string]*OWASPRule
 	mu    sync.RWMutex
 }
 
-// DefaultOWASPRegistry is the global singleton rule registry.
+// DefaultOWASPRegistry 是全局单例规则注册表。
 var DefaultOWASPRegistry = &OWASPRuleRegistry{
 	rules: make(map[string]*OWASPRule),
 }
 
-// Register adds a rule to the registry.
+// Register 向注册表新增一条规则。
 func (r *OWASPRuleRegistry) Register(rule *OWASPRule) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rules[rule.ID] = rule
 }
 
-// Get returns a rule by ID.
+// Get 按 ID 返回规则。
 func (r *OWASPRuleRegistry) Get(id string) (*OWASPRule, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -55,7 +55,7 @@ func (r *OWASPRuleRegistry) Get(id string) (*OWASPRule, bool) {
 	return rule, ok
 }
 
-// All returns a snapshot of all registered rules.
+// All 返回全部已注册规则的快照。
 func (r *OWASPRuleRegistry) All() []*OWASPRule {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -66,7 +66,7 @@ func (r *OWASPRuleRegistry) All() []*OWASPRule {
 	return out
 }
 
-// AllByCategory returns all rules belonging to a given category.
+// AllByCategory 返回指定类别下的全部规则。
 func (r *OWASPRuleRegistry) AllByCategory(category string) []*OWASPRule {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -79,24 +79,24 @@ func (r *OWASPRuleRegistry) AllByCategory(category string) []*OWASPRule {
 	return out
 }
 
-// Count returns the total number of registered rules.
+// Count 返回已注册规则总数。
 func (r *OWASPRuleRegistry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.rules)
 }
 
-// IsRuleEnabled checks whether a specific rule is enabled given the override config.
-// If no override exists, the rule's default Enabled value is used.
+// IsRuleEnabled 按覆盖配置判断指定规则是否启用。
+// 无覆盖配置时采用规则自身的 Enabled 默认值。
 func IsRuleEnabled(ruleID string, overrides map[string]OWASPRuleOverride) bool {
 	if ov, ok := overrides[ruleID]; ok && ov.Enabled != nil {
 		return *ov.Enabled
 	}
-	// Check registry default.
+	// 回查注册表默认值
 	if rule, ok := DefaultOWASPRegistry.Get(ruleID); ok {
 		return rule.Enabled
 	}
-	return true // unknown rules default to enabled
+	return true // 未知规则默认启用
 }
 
 /**
@@ -296,7 +296,7 @@ func MatchPathList(path string, entries []string) bool {
 	return false
 }
 
-// ParseOWASPRulesConfig parses a JSON string into the override map.
+// ParseOWASPRulesConfig 把 JSON 字符串解析为覆盖映射。
 func ParseOWASPRulesConfig(raw string) map[string]OWASPRuleOverride {
 	if raw == "" || raw == "{}" {
 		return nil
@@ -308,7 +308,7 @@ func ParseOWASPRulesConfig(raw string) map[string]OWASPRuleOverride {
 	return m
 }
 
-// SerializeOWASPRulesConfig serialises the override map into a JSON string.
+// SerializeOWASPRulesConfig 把覆盖映射序列化为 JSON 字符串。
 func SerializeOWASPRulesConfig(m map[string]OWASPRuleOverride) string {
 	if len(m) == 0 {
 		return "{}"
@@ -320,8 +320,8 @@ func SerializeOWASPRulesConfig(m map[string]OWASPRuleOverride) string {
 	return string(b)
 }
 
-// ShouldSkipRule combines enable check and path whitelist check for a hit.
-// Returns true if the rule should be skipped for the given request path.
+// ShouldSkipRule 合并「启用检查」与「路径白名单检查」。
+// 若该规则对给定请求路径应被跳过则返回 true。
 func ShouldSkipRule(ruleID, path string, overrides map[string]OWASPRuleOverride) bool {
 	if !IsRuleEnabled(ruleID, overrides) {
 		return true
@@ -332,8 +332,7 @@ func ShouldSkipRule(ruleID, path string, overrides map[string]OWASPRuleOverride)
 	return false
 }
 
-// HitPassesOverrideSensitivity returns false when a per-rule sensitivity override
-// requires a higher score than the hit carries.
+// HitPassesOverrideSensitivity 在规则级敏感度覆盖要求的分值高于本次命中时返回 false。
 func HitPassesOverrideSensitivity(hit OWASPHit, ov OWASPRuleOverride, catSens map[string]string) bool {
 	s := strings.TrimSpace(ov.Sensitivity)
 	if s == "" || catSens == nil {
@@ -346,8 +345,8 @@ func HitPassesOverrideSensitivity(hit OWASPHit, ov OWASPRuleOverride, catSens ma
 	return hit.Score >= th
 }
 
-// FilterHits filters OWASP hits based on rule overrides, path whitelists, and optional
-// per-rule sensitivity overrides (requires category sensitivity map from ProtectionConfig).
+// FilterHits 依据规则覆盖、路径白名单与可选的规则级敏感度覆盖过滤 OWASP 命中
+// （后者需要 ProtectionConfig 提供的分类敏感度映射）。
 
 // HitPassesFilters 判断单个命中是否通过覆盖/白名单/类别灵敏度过滤。
 func HitPassesFilters(h OWASPHit, path string, overrides map[string]OWASPRuleOverride, catSens ...map[string]string) bool {
@@ -416,7 +415,7 @@ func FilterHits(hits []OWASPHit, path string, overrides map[string]OWASPRuleOver
 	return filtered
 }
 
-// RuleOverride returns the effective per-rule override for a hit.
+// RuleOverride 返回本次命中实际生效的规则级覆盖配置。
 func RuleOverride(ruleID string, overrides map[string]OWASPRuleOverride) OWASPRuleOverride {
 	if len(overrides) == 0 {
 		return OWASPRuleOverride{}

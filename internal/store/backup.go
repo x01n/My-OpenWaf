@@ -275,7 +275,7 @@ func validateBackupJSPlugins(plugins []JSPlugin) error {
 	return nil
 }
 
-// validateBackupProtectionSettings validates the persisted global CAPTCHA mode before import.
+// validateBackupProtectionSettings 在导入前校验持久化的全局 CAPTCHA 模式。
 func validateBackupProtectionSettings(settings []SystemSettings) error {
 	for _, setting := range settings {
 		if setting.Key != "protection" || strings.TrimSpace(setting.Value) == "" {

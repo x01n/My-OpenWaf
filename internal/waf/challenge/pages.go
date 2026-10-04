@@ -126,7 +126,7 @@ func WriteCaptchaChallengeResponse(c *app.RequestContext, reqID string, cm *Capt
 	c.Data(statusCode, "text/html; charset=utf-8", renderCaptchaPage(captchaChallenge, reqID, envJS, cfg))
 }
 
-// WriteChainChallengeResponse starts a chain challenge and renders the first step.
+// WriteChainChallengeResponse 开始一次链式挑战并渲染首步。
 func inputModeForCaptcha(captchaType string) string {
 	switch CaptchaType(captchaType) {
 	case CaptchaTypeClick:

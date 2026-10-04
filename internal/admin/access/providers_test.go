@@ -43,7 +43,7 @@ func invokeProviderHandler(
 	return ctx
 }
 
-// ---- ListProviders ----
+// ListProviders
 
 func TestListProvidersEmptyReturns200(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
@@ -71,7 +71,7 @@ func TestListProvidersInvalidSiteIDReturns400(t *testing.T) {
 	}
 }
 
-// ---- CreateProvider ----
+// CreateProvider
 
 func TestCreateProviderPasswordType(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
@@ -231,7 +231,7 @@ func TestCreateProviderHonorsExplicitDisabled(t *testing.T) {
 	}
 }
 
-// ---- UpdateProvider ----
+// UpdateProvider
 
 // seedOAuthProvider 创建一条 oauth2 提供方并返回其 ID 字符串。
 func seedOAuthProvider(t *testing.T, repo interface {
@@ -387,7 +387,7 @@ func TestUpdateProviderCrossSiteReturns404(t *testing.T) {
 	}
 }
 
-// ---- DeleteProvider ----
+// DeleteProvider
 
 func TestDeleteProviderSucceeds(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
@@ -431,7 +431,7 @@ func TestDeleteProviderInvalidProviderIDReturns400(t *testing.T) {
 	}
 }
 
-// ---- previousClientSecret ----
+// previousClientSecret
 
 func TestPreviousClientSecret(t *testing.T) {
 	if got := previousClientSecret(""); got != "" {

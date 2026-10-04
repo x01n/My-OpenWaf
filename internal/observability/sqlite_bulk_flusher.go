@@ -43,11 +43,13 @@ type bulkModelSpec struct {
 	values    func(v any, created time.Time) []any
 }
 
-// newSQLiteBulkFlusher 构建四张日志表的长期语句快路径。
-//
-// 任一模型的列清单无法对齐时返回 nil 并告警：调用方（flushBuffered）见 nil
-// 即回退 GORM 原路径——长期语句因此只是一个可自愈的加速器，不会让审计
-// 落库整体失败。
+/**
+ * newSQLiteBulkFlusher 构建四张日志表的长期语句快路径。
+ *
+ * 任一模型的列清单无法对齐时返回 nil 并告警：调用方（flushBuffered）见 nil
+ * 即回退 GORM 原路径——长期语句因此只是一个可自愈的加速器，不会让审计
+ * 落库整体失败。
+ */
 func newSQLiteBulkFlusher(log *slog.Logger) *sqliteBulkFlusher {
 	specs := []bulkModelSpec{
 		{tableName: "access_logs", model: &store.AccessLog{}, values: accessLogSpecValues},
@@ -156,10 +158,12 @@ func (bf *sqliteBulkFlusher) attachSQLDB(db *gorm.DB) error {
 	return nil
 }
 
-// insertSQLText 生成单行 INSERT 语句文本；首次 prepare 时生成一次。
-//
-// 列名必须按 SQLite 标识符转义：references 是 SQL 保留字，未加双引号时
-// 语句在解析阶段即报 "near \"references\": syntax error"。
+/**
+ * insertSQLText 生成单行 INSERT 语句文本；首次 prepare 时生成一次。
+ *
+ * 列名必须按 SQLite 标识符转义：references 是 SQL 保留字，未加双引号时
+ * 语句在解析阶段即报 "near \"references\": syntax error"。
+ */
 func insertSQLText(tableName string, cols []string) string {
 	var sb strings.Builder
 	sb.Grow(len(tableName) + len(cols)*16 + 32)

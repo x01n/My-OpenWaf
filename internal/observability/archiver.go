@@ -17,8 +17,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// RetentionConfig holds per-data-type retention periods in days.
-// 0 means never clean (keep forever).
+/**
+ * RetentionConfig 保存各数据类型的保留天数。
+ *
+ * 0 表示永不清理（永久保留）。
+ */
 type RetentionConfig struct {
 	SecurityEventDays int `json:"security_event_retention_days"`
 	AccessLogDays     int `json:"access_log_retention_days"`
@@ -26,8 +29,12 @@ type RetentionConfig struct {
 	StatsDays         int `json:"stats_retention_days"`
 }
 
-// Archiver periodically deletes security events, access logs and drop events older than the retention period.
-// After cleanup it runs lightweight SQLite planner/WAL maintenance or the native server-database optimizer.
+/**
+ * Archiver 周期性地删除超过保留期的安全事件、访问日志与丢包事件。
+ *
+ * 清理完成后执行轻量的 SQLite planner/WAL 维护，或使用各服务端数据库
+ * 原生的优化命令。
+ */
 type Archiver struct {
 	repo         *repository.SecurityEventRepo
 	accessRepo   *repository.AccessLogRepo
@@ -37,7 +44,7 @@ type Archiver struct {
 	db           *gorm.DB
 	log          *slog.Logger
 	retention    atomic.Value // RetentionConfig
-	interval     atomic.Int64 // cleanup interval in seconds
+	interval     atomic.Int64 // 清理间隔，单位秒
 	stopCh       chan struct{}
 	wg           sync.WaitGroup
 	closeOnce    sync.Once
@@ -168,7 +175,7 @@ func NewArchiver(db *gorm.DB, repo *repository.SecurityEventRepo, accessRepo *re
 	return a
 }
 
-// SetSettingsRepo allows the archiver to read dynamic retention config from DB.
+/** SetSettingsRepo 让归档器能够从数据库读取动态保留配置。 */
 func (a *Archiver) SetSettingsRepo(repo *repository.SystemSettingsRepo) {
 	if a == nil {
 		return
@@ -185,7 +192,7 @@ func (a *Archiver) SetSyncLogRepo(repo *repository.ThreatIntelSyncLogRepo) {
 	a.syncLogRepo = repo
 }
 
-// SetRetention updates the retention config dynamically.
+/** SetRetention 动态更新保留配置。 */
 func (a *Archiver) SetRetention(cfg RetentionConfig) {
 	if a == nil {
 		return
@@ -244,7 +251,7 @@ func (a *Archiver) refreshRetentionFromDB() {
 		}
 	}()
 
-	// Refresh retention config.
+	// 刷新保留配置。
 	val, err := a.settingsRepo.Get("retention_config")
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -264,8 +271,8 @@ func (a *Archiver) refreshRetentionFromDB() {
 		}
 	}
 
-	// Also read individual settings keys for retention days. Individual keys
-	// intentionally override only their corresponding field in the JSON object.
+	// 同时读取各项单独的保留天数设置键。单独键刻意只覆盖
+	// JSON 对象里与之对应的那一个字段。
 	applyDaysSetting := func(key string, assign func(*RetentionConfig, int)) {
 		value, readErr := a.settingsRepo.Get(key)
 		if readErr != nil {
@@ -303,7 +310,7 @@ func (a *Archiver) refreshRetentionFromDB() {
 		cfg.AccessLogDays = days
 	})
 
-	// Refresh cleanup interval from DB setting (in hours).
+	// 从数据库设置（单位：小时）刷新清理间隔。
 	if iv, e := a.settingsRepo.Get("db_optimize_interval_hours"); e != nil {
 		if !errors.Is(e, gorm.ErrRecordNotFound) {
 			a.logger().Warn("archiver: failed to read cleanup interval", slog.Any("err", e))
@@ -393,8 +400,12 @@ func (a *Archiver) cleanup() {
 	}
 }
 
-// optimizeDB updates planner/storage state after cleanup.
-// SQLite uses PRAGMA optimize plus a non-blocking passive WAL checkpoint; MySQL and PostgreSQL use their native maintenance commands.
+/**
+ * optimizeDB 在清理之后更新 planner/存储状态。
+ *
+ * SQLite 使用 PRAGMA optimize 加一次非阻塞的被动 WAL checkpoint；
+ * MySQL 与 PostgreSQL 使用各自原生的维护命令。
+ */
 func (a *Archiver) optimizeDB() {
 	if a == nil || a.db == nil {
 		return
@@ -438,14 +449,14 @@ func (a *Archiver) optimizeSQLiteContext(ctx context.Context) error {
 	}
 	db := a.db.WithContext(ctx)
 	var errs []error
-	// PRAGMA optimize updates planner statistics only when SQLite determines it is useful.
+	// PRAGMA optimize 只在 SQLite 判定有必要时才更新 planner 统计信息。
 	if err := db.Exec("PRAGMA optimize").Error; err != nil {
 		a.logger().Warn("archiver: PRAGMA optimize failed", slog.Any("err", err))
 		errs = append(errs, fmt.Errorf("PRAGMA optimize: %w", err))
 	}
-	// PASSIVE checkpoints completed WAL frames without blocking active readers or writers.
-	// Deleted pages remain reusable by SQLite; shrinking the whole database requires an
-	// explicit maintenance operation instead of an unconditional daily VACUUM.
+	// PASSIVE checkpoint 会落盘已完成的 WAL 帧，且不阻塞活跃的读写者。
+	// 被删除的页仍可被 SQLite 复用；要真正缩小整个数据库文件需要显式的
+	// 维护操作，而不是每天无条件执行一次 VACUUM。
 	if err := db.Exec("PRAGMA wal_checkpoint(PASSIVE)").Error; err != nil {
 		a.logger().Warn("archiver: wal_checkpoint(PASSIVE) failed", slog.Any("err", err))
 		errs = append(errs, fmt.Errorf("wal_checkpoint(PASSIVE): %w", err))
@@ -473,7 +484,7 @@ func (a *Archiver) optimizeMySQLContext(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("OPTIMIZE TABLE %s: %w", t, err))
 		}
 	}
-	// Update table statistics for better query planning.
+	// 更新表统计信息，让查询计划更优。
 	for _, t := range tables {
 		if err := db.Exec(fmt.Sprintf("ANALYZE TABLE `%s`", t)).Error; err != nil {
 			a.logger().Warn("archiver: ANALYZE TABLE failed", slog.String("table", t), slog.Any("err", err))
@@ -499,7 +510,7 @@ func (a *Archiver) optimizePostgresContext(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// detectDriver determines the database driver type from the GORM dialector name.
+/** detectDriver 依据 GORM dialector 名称判定数据库驱动类型。 */
 func detectDriver(db *gorm.DB) string {
 	if db == nil || db.Dialector == nil {
 		return ""

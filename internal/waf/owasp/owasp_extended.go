@@ -8,9 +8,9 @@ import (
 	"My-OpenWaf/internal/core/score"
 )
 
-// hasSSRFIndicator returns true when the string contains URL schemes or known
-// private/cloud-internal addresses that may indicate an SSRF payload.
-// Avoids running 13 SSRF regexes on every clean request.
+// hasSSRFIndicator 在字符串含 URL scheme 或已知私网/云内网地址
+// （可能构成 SSRF 载荷）时返回 true。
+// 借此避免对每个干净请求都跑 13 条 SSRF 正则。
 func hasSSRFIndicator(s string) bool {
 	return strings.Contains(s, "://") ||
 		strings.Contains(s, "169.254.169.254") ||
@@ -34,11 +34,11 @@ func hasSSRFIndicator(s string) bool {
 }
 
 var ssrfPatterns = []owaspPattern{
-	// Cloud metadata endpoints
-	{regexp.MustCompile(`169\.254\.169\.254`), 6, "owasp:ssrf:001", "169.254.169.254"}, // AWS/Azure/GCP metadata
+	// 云元数据端点
+	{regexp.MustCompile(`169\.254\.169\.254`), 6, "owasp:ssrf:001", "169.254.169.254"}, // AWS/Azure/GCP 元数据
 	{regexp.MustCompile(`metadata\.google\.internal`), 6, "owasp:ssrf:002", "metadata.google.internal"},
-	{regexp.MustCompile(`100\.100\.100\.200`), 6, "owasp:ssrf:003", "100.100.100.200"}, // Alibaba Cloud
-	// Private IP ranges — raise to 5 for new threshold
+	{regexp.MustCompile(`100\.100\.100\.200`), 6, "owasp:ssrf:003", "100.100.100.200"}, // 阿里云
+	// 私网地址段——配合新阈值提升到 5 分
 	{regexp.MustCompile(`(https?://|ftps?://|[/@])10\.\d{1,3}\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:004", ""},
 	{regexp.MustCompile(`(https?://|ftps?://|[/@])172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:005", ""},
 	{regexp.MustCompile(`(https?://|ftps?://|[/@])192\.168\.\d{1,3}\.\d{1,3}`), 5, "owasp:ssrf:006", "192.168."},
@@ -50,33 +50,33 @@ var ssrfPatterns = []owaspPattern{
 	{regexp.MustCompile(`[:'"=]\s*\[::1\](?::\d+)?(?:\s|$|["'},])`), 4, "owasp:ssrf:024", "[::1]"},
 	// DNS rebinding / encoding bypasses（http(s) 前缀可有可无：0x7f000001 裸段落同样判）
 	{regexp.MustCompile(`https?://\s*0x[0-9a-f]{8}\b`), 5, "owasp:ssrf:009", ""},
-	// file:// / gopher:// / dict:// schemes
+	// file:// / gopher:// / dict:// 协议
 	{regexp.MustCompile(`(file|gopher|dict|ldap|sftp|tftp|php|expect|phar)://`), 5, "owasp:ssrf:010", ""},
-	// Decimal/octal IP encoding (e.g., http://2130706433 = 127.0.0.1)
+	// 十进制/八进制 IP 编码（如 http://2130706433 = 127.0.0.1）
 	{regexp.MustCompile(`https?://\d{8,10}(/|$|\s|:)`), 5, "owasp:ssrf:011", ""},
-	// IPv6-mapped IPv4 private addresses
+	// IPv6 映射的 IPv4 私网地址
 	{regexp.MustCompile(`::ffff:(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)`), 5, "owasp:ssrf:012", "::ffff:"},
-	// AWS IMDSv2 token header (indicates SSRF exploit chain)
+	// AWS IMDSv2 令牌请求头（SSRF 利用链的一环）
 	{regexp.MustCompile(`x-aws-ec2-metadata-token`), 5, "owasp:ssrf:013", "x-aws-ec2-metadata-token"},
-	// Unix socket SSRF (CVE-2023-46809 style): unix:path|http://...
+	// Unix socket SSRF（CVE-2023-46809 形态）：unix:path|http://...
 	{regexp.MustCompile(`\bunix:[^\s]{10,}`), 4, "owasp:ssrf:014", "unix:"},
-	// Azure Instance Metadata Service (IMDS)
+	// Azure 实例元数据服务（IMDS）
 	{regexp.MustCompile(`169\.254\.169\.254.{0,50}metadata/instance`), 6, "owasp:ssrf:015", "169.254.169.254"},
-	// GCP metadata with flavor header
+	// 带 flavor 请求头的 GCP 元数据
 	{regexp.MustCompile(`metadata\.google\.internal.{0,50}(computemetadata|v1/)`), 6, "owasp:ssrf:016", "metadata.google.internal"},
-	// AWS IMDSv2 token PUT request pattern
+	// AWS IMDSv2 令牌 PUT 请求模式
 	{regexp.MustCompile(`put.{0,100}169\.254\.169\.254.{0,50}api/token`), 6, "owasp:ssrf:017", "169.254.169.254"},
-	// DigitalOcean metadata endpoint
+	// DigitalOcean 元数据端点
 	{regexp.MustCompile(`169\.254\.169\.254.{0,50}/metadata/v1`), 5, "owasp:ssrf:018", "169.254.169.254"},
 	// Oracle Cloud IMDS
 	{regexp.MustCompile(`169\.254\.169\.254.{0,50}opc/v[12]/`), 5, "owasp:ssrf:019", "169.254.169.254"},
-	// Octal IP bypass: http://0177.0.0.1/ (127.0.0.1 in octal)
+	// 八进制 IP 绕过：http://0177.0.0.1/（八进制的 127.0.0.1）
 	{regexp.MustCompile(`https?://0[0-7]{1,3}\.0{0,3}\.0{0,3}\.[0-7]{1,3}(/|$|\s|:)`), 5, "owasp:ssrf:020", ""},
-	// DNS rebinding services: *.nip.io, *.xip.io, *.sslip.io pointing to internal IPs
+	// DNS 重绑定服务：*.nip.io、*.xip.io、*.sslip.io 指向内网地址
 	{regexp.MustCompile(`(127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\.(nip|xip|sslip)\.io\b`), 5, "owasp:ssrf:021", ""},
-	// IPv6 mapped IPv4 in URL context: http://[::ffff:127.0.0.1]/
+	// URL 上下文中的 IPv6 映射 IPv4：http://[::ffff:127.0.0.1]/
 	{regexp.MustCompile(`https?://\[::ffff:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\]`), 5, "owasp:ssrf:022", "::ffff:"},
-	// Decimal IP in URL: http://2130706433/ (127.0.0.1), http://3232235521/ (192.168.0.1)
+	// URL 中的十进制 IP：http://2130706433/（127.0.0.1）、http://3232235521/（192.168.0.1）
 	{regexp.MustCompile(`https?://\d{9,10}\b`), 4, "owasp:ssrf:023", ""},
 }
 
@@ -138,13 +138,13 @@ func checkSSRF(s string, threshold int) (OWASPHit, bool) {
 }
 
 var cmdInjectPatterns = []owaspPattern{
-	// Pipe / semicolon / backtick / $() command chaining.
-	// Using (?:[\s;|&`]|$) instead of \b prevents matching URL key=value params:
-	// "a=1;id=123" → ";id" followed by "=" → no match.
-	// "host=x;id" at end of string → matches via $.
+	// 管道 / 分号 / 反引号 / $() 命令拼接。
+	// 使用 (?:[\s;|&`]|$) 而非 \b，避免命中 URL 的 key=value 参数：
+	// "a=1;id=123" → ";id" 后跟 "=" → 不命中。
+	// "host=x;id" 位于串尾 → 通过 $ 命中。
 	{regexp.MustCompile("[;|&]\\s*(ls|cat|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|echo|rm|chmod|chown|ping|touch|kill|python|perl|ruby|php|node|java|nslookup|dig|ssh|tcpdump|printf|netstat|getent|set)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:001", ""},
-	// Backtick command substitution — require a known shell command in command
-	// position inside the backticks (avoids Markdown/prose FP).
+	// 反引号命令替换——要求反引号内处于命令位置的是已知 shell 命令
+	// （避免 Markdown/散文误报）。
 	// 判据由「体内任意位置出现命令词」收紧为「命令词位于命令位置」，两条通用约束：
 	//   1) 词边界 \b —— 命令词后必须是非单词字符，避免自然语言词内命中（typing→ping）；
 	//   2) 命令词位于体内开头（至多 4 个空白前缀）—— shell 命令替换的执行语义要求
@@ -154,47 +154,47 @@ var cmdInjectPatterns = []owaspPattern{
 	{regexp.MustCompile("`\\s{0,4}(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|find|grep|awk|sed|ps|kill|nslookup|dig|ping|sleep|dd|cp|mv|mkdir|touch|head|tail|sort|xxd)\\b[^`]{0,200}`"), 3, "owasp:cmd:002", ""},
 	// 参数上下文子命令替换：$() 形态。
 	{regexp.MustCompile(`\$\([^)]*\b(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|echo|rm|chmod|chown|python|perl|ruby|php|base64|dd|nslookup|dig|ping|sleep|kill|find|grep|awk|sed|head|tail|wc|sort|xxd|od)\b`), 4, "owasp:cmd:003", ""},
-	// Redirections that typically indicate injection
+	// 典型的重定向注入
 	{regexp.MustCompile(`(>|>>)\s*/(etc|tmp|var|root|home)/`), 4, "owasp:cmd:004", ">"},
-	// Explicit command execution
+	// 显式命令执行
 	{regexp.MustCompile(`(^|[\s;|&])(wget|curl)\s+https?://`), 3, "owasp:cmd:005", ""},
-	// Null byte / newline injection (includes actual newline/CR bytes from URL-decode)
+	// 空字节 / 换行注入（含 URL 解码后产出的真实换行/CR 字节）
 	{regexp.MustCompile(`%00|\x00|%0[aAdD]|\x0a|\x0d`), 3, "owasp:cmd:006", ""},
-	// Common discovery commands followed by semicolon
+	// 后接分号的常见探测命令
 	{regexp.MustCompile(`\b(id|uname|whoami|hostname|ifconfig|ipconfig)\s*;`), 3, "owasp:cmd:007", ""},
-	// Pipe to shell commands — same (?:[\s;|&`]|$) fix to avoid URL-param false positives
+	// 管道接到 shell 命令——同样用 (?:[\s;|&`]|$) 修正以避免 URL 参数误报
 	{regexp.MustCompile("\\|+\\s*(cat|ls|id|whoami|uname|pwd|ps|wget|curl|nc|bash|sh|ping|nslookup|dig|echo|head|tail|more|less|find|grep|awk|sed|base64|python|perl|ruby|php|node|java|ssh|tcpdump|printf|netstat|getent|set)(?:[\\s;|&`]|$)"), 5, "owasp:cmd:008", ""},
-	// ${IFS} space bypass (common in filter evasion)
+	// ${IFS} 空格绕过（过滤器绕过中常见）
 	{regexp.MustCompile(`\$\{?\s*ifs\s*\}?`), 4, "owasp:cmd:009", "ifs"},
-	// Env variable prefix + command execution: VAR=val command
+	// 环境变量前缀 + 命令执行：VAR=val command
 	{regexp.MustCompile(`\b\w+=\S+\s+(cat|id|whoami|curl|wget|bash|sh|python|perl|ruby|php)\b`), 3, "owasp:cmd:010", ""},
-	// Chained command using && or ||
+	// 用 && 或 || 串联的命令
 	{regexp.MustCompile("(&&|\\|\\|)\\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|rm|chmod|ssh|tcpdump|printf|netstat)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:011", ""},
-	// Bash brace expansion: {cat,/etc/passwd} — bypasses space detection
+	// Bash 花括号展开：{cat,/etc/passwd}——可绕过空格检测
 	{regexp.MustCompile(`\{\s*(cat|ls|id|whoami|echo|bash|sh|python|perl|ruby|wget|curl)\s*,`), 4, "owasp:cmd:012", "{"},
-	// Here-string injection: bash<<<'command'
+	// here-string 注入：bash<<<'command'
 	{regexp.MustCompile(`(bash|sh|python|perl|ruby)\s*<<<`), 4, "owasp:cmd:013", ""},
-	// ANSI-C quoting with hex/octal encoding: $'\x63\x61\x74'
+	// ANSI-C 十六进制/八进制引用：$'\x63\x61\x74'
 	{regexp.MustCompile(`\$'\s*\\[xX0][0-9a-fA-F]`), 4, "owasp:cmd:014", "$'"},
-	// Tee / dd / base64 piped to shell — alternative command execution chain
+	// tee / dd / base64 管道接 shell——另一种命令执行链
 	{regexp.MustCompile(`(base64\s+-d|dd\s+if=|tee\s+/tmp)\s*\|`), 4, "owasp:cmd:015", ""},
-	// Newline/CR-separated command injection (%0a / %0d bypass semicolon filters)
+	// 换行/CR 分隔的命令注入（%0a / %0d 绕过基于分号的过滤）
 	{regexp.MustCompile("[\\r\\n]\\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|python|perl|ruby|php|echo|rm|chmod|kill|nslookup|dig|ping|sleep|find|awk|sed)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:016", ""},
-	// Server-Side Include (SSI) injection: <!--#exec cmd="..."--> and <!--#include virtual="...">
+	// 服务端包含（SSI）注入：<!--#exec cmd="..."--> 与 <!--#include virtual="..."-->
 	{regexp.MustCompile(`<!--\s*#\s*(exec|include|echo|config|fsize|flastmod)\b`), 5, "owasp:cmd:017", "<!--"},
-	// Backtick concatenation evasion: wh``oami, c``at, i``d — empty backticks split command names
+	// 反引号拼接绕过：wh``oami、c``at、i``d——空反引号把命令名切开
 	{regexp.MustCompile("(?:^|[;|&\\s])(w``?h``?o``?a``?m``?i|i``d|c``?a``?t|u``?n``?a``?m``?e)(?:[\\s;|&`]|$)"), 4, "owasp:cmd:018", ""},
-	// touch/rm with path — file creation/deletion as RCE proof
+	// 带路径的 touch/rm——以创建/删除文件作为 RCE 证据
 	{regexp.MustCompile(`[;|&]\s*(?:touch|rm)\s+/`), 5, "owasp:cmd:019", "touch"},
-	// Git argument injection: --open-files-in-pager, --upload-pack, --exec, etc.
+	// Git 参数注入：--open-files-in-pager、--upload-pack、--exec 等
 	{regexp.MustCompile(`--(?:open-files-in-pager|upload-pack|exec|receive-pack)\s*=`), 5, "owasp:cmd:020", "--"},
-	// ${IFS} as space substitute in shell command injection.
+	// shell 命令注入中用 ${IFS} 替代空格。
 	{regexp.MustCompile(`\$\{ifs\}`), 5, "owasp:cmd:021", ""},
-	// $(command) subshell execution in parameter value context.
+	// 参数值上下文中执行 $(command) 子 shell。
 	{regexp.MustCompile(`\$\(\s*\w+[\s$]`), 4, "owasp:cmd:022", ""},
-	// Backtick-split evasion with empty backticks inside command: wh``oami, ca``t.
+	// 命令内插入空反引号的拆分绕过：wh``oami、ca``t。
 	{regexp.MustCompile("\\b\\w+``\\w+\\b"), 4, "owasp:cmd:023", ""},
-	// Backtick command execution: `ping ...`, `touch ...`, `whoami`
+	// 反引号命令执行：`ping ...`、`touch ...`、`whoami`
 	{regexp.MustCompile("`\\s*(ping|curl|wget|whoami|id|cat|ls|touch|rm|chmod|nc|nslookup|dig|python|perl|ruby|php|bash|sh|uname|ssh|tcpdump|printf|netstat)\\b"), 5, "owasp:cmd:024", ""},
 	// $@ / $$ 特殊变量插入命令名拆分：who$@ami、c$@at、l$@s、cur$@l（CRS 932200 类插值逃逸）。
 	// 前缀含 '='：URL 参数值形态 key=who$@ami 同样覆盖。
@@ -333,8 +333,8 @@ func hasScanIndexOfSplits(s string) bool {
 	return false
 }
 
-// hasEmptyBacktickSplit reports whether s contains two adjacent backtick
-// characters, the empty-backtick delimiter required by cmd:018/023.
+// hasEmptyBacktickSplit 判断 s 是否含两个相邻反引号，
+// 即 cmd:018/023 所依赖的空反引号分隔形态。
 func hasEmptyBacktickSplit(s string) bool {
 	return strings.Contains(s, "``")
 }
@@ -625,15 +625,15 @@ var xxePatterns = []owaspPattern{
 	{regexp.MustCompile(`<!doctype[^>]{1,100}\[`), 5, "owasp:xxe:001", "<!doctype"},
 	{regexp.MustCompile(`<!entity\s+\w+\s+system`), 6, "owasp:xxe:002", "<!entity"},
 	{regexp.MustCompile(`<!entity\s+\w+\s+public`), 6, "owasp:xxe:003", "<!entity"},
-	// Parametric entity expansion (exclude common HTML entities)
+	// 参数实体展开（排除常见 HTML 实体）
 	{regexp.MustCompile(`%\w+;`), 2, "owasp:xxe:004", ""},
 	// 参数实体连续引用链（%pe;%xx;）：外层实体展开又引内层实体，
 	// 经典的带外外带放大器结构。
 	{reParamEntityChain, 4, "owasp:xxe:009", "%"},
 	{regexp.MustCompile(`system\s+['"](file|http|ftp|php|expect|data)://`), 5, "owasp:xxe:005", "system"},
-	// Blind OOB XXE via parameter entity exfiltration
+	// 通过参数实体外带的盲注 OOB XXE
 	{regexp.MustCompile(`<!entity\s+%\s+\w+\s+system`), 6, "owasp:xxe:006", "<!entity"},
-	// XInclude injection
+	// XInclude 注入
 	{regexp.MustCompile(`<xi:include\s+.*href\s*=`), 5, "owasp:xxe:007", "xi:include"},
 	// xsi:schemaLocation / xsi:noNamespaceSchemaLocation 属性注入：
 	// schemaLocation 指向 attacker 的 .xsd 时校验器据此拉取外部资源。
@@ -649,11 +649,11 @@ func checkXXE(s string, threshold int) (OWASPHit, bool) {
 	if !hasACIndicator(famXXE, s) {
 		return OWASPHit{}, false
 	}
-	// Suppress XXE detection in large JSON/analytics payloads that contain serialized
-	// HTML with <!DOCTYPE html> but no actual XML entity declarations.
-	// Real XXE attacks require <!ENTITY or SYSTEM/PUBLIC keywords in DTD context.
-	// Use precise patterns: "<!entity" (DTD decl), " system " or " public " (DTD keywords),
-	// not just substrings like "system" which match JSON property names like ":systemId".
+	// 抑制大型 JSON/分析载荷中的 XXE 检测：这些载荷含序列化的
+	// HTML（<!DOCTYPE html>）但不含真正的 XML 实体声明。
+	// 真实 XXE 攻击需要在 DTD 上下文中出现 <!ENTITY 或 SYSTEM/PUBLIC 关键词。
+	// 因此使用精确模式："<!entity"（DTD 声明）、" system " 或 " public "（DTD 关键词），
+	// 而非 "system" 这类会命中 JSON 属性名 ":systemId" 的子串。
 	if len(s) > 500 {
 		lower := strings.ToLower(s)
 		hasEntity := strings.Contains(lower, "<!entity") || strings.Contains(lower, "!entity")
@@ -686,8 +686,7 @@ func checkXXE(s string, threshold int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
-// hasLDAPInjectionIndicator returns true when the string contains LDAP filter
-// structure characters specific to LDAP injection payloads.
+// hasLDAPInjectionIndicator 在字符串含 LDAP 注入载荷特有的过滤器结构字符时返回 true。
 func hasLDAPInjectionIndicator(s string) bool {
 	return strings.Contains(s, ")(") ||
 		strings.Contains(s, "objectclass") ||
@@ -747,19 +746,19 @@ var nosqliPatterns = []owaspPattern{
 	{regexp.MustCompile(`\b(?:do\s*\{|while\s*\(\s*new\s+date\s*\(|var\s+date\s*=\s*new\s+date)`), 4, "owasp:nosql:020", "new date"},
 	{regexp.MustCompile(`\$where\s*:\s*\{[^}]{0,100}\$function\b`), 5, "owasp:nosql:021", "$where"},
 	{regexp.MustCompile(`\$exists\b`), 3, "owasp:nosql:006", ""},
-	// MongoDB aggregation pipeline injection
+	// MongoDB 聚合管道注入
 	{regexp.MustCompile(`\$lookup\b\s*:\s*\{`), 4, "owasp:nosql:007", ""},
-	// JavaScript-based NoSQL injection in $where context
+	// $where 上下文中基于 JavaScript 的 NoSQL 注入
 	{regexp.MustCompile(`this\.\w+\s*(==|!=|===|!==)\s*['"]`), 3, "owasp:nosql:008", ""},
-	// MongoDB $function operator injection
+	// MongoDB $function 运算符注入
 	{regexp.MustCompile(`\$function\b\s*:\s*\{`), 5, "owasp:nosql:009", ""},
-	// MongoDB $accumulator operator injection
+	// MongoDB $accumulator 运算符注入
 	{regexp.MustCompile(`\$accumulator\b\s*:\s*\{`), 4, "owasp:nosql:010", ""},
-	// CouchDB _all_docs / _find / _view injection
+	// CouchDB _all_docs / _find / _view 注入
 	{regexp.MustCompile(`(/_all_docs|/_find|/_view/)\b`), 4, "owasp:nosql:011", ""},
-	// Redis protocol injection: EVAL / EVALSHA commands
+	// Redis 协议注入：EVAL / EVALSHA 命令
 	{regexp.MustCompile(`\b(eval|evalsha)\s+['"]`), 4, "owasp:nosql:012", ""},
-	// Cassandra CQL injection: ALLOW FILTERING
+	// Cassandra CQL 注入：ALLOW FILTERING
 	{regexp.MustCompile(`\ballow\s+filtering\b`), 3, "owasp:nosql:013", "filtering"},
 	{regexp.MustCompile(`["']?\$\w+["']?\s*:\s*\{\s*["']?\$(?:ne|gt|lt|gte|lte|regex|in|nin|exists)\b`), 5, "owasp:nosql:014", ""},
 	{regexp.MustCompile(`(?:^|[?&\s])\w+\[(?:\$ne|\$gt|\$lt|\$regex|\$exists)\]\s*=`), 5, "owasp:nosql:015", ""},
@@ -832,28 +831,28 @@ var tmplInjectPatterns = []owaspPattern{
 	{regexp.MustCompile(`\$\{.*?getclass\(\)`), 6, "owasp:ssti:005", "getclass()"},
 	// <%= ... %> ERB / JSP
 	{regexp.MustCompile(`<%=.*?%>`), 3, "owasp:ssti:006", ""},
-	// Smarty {php}...{/php} template execution
+	// Smarty {php}...{/php} 模板执行
 	{regexp.MustCompile(`\{/?php\}`), 5, "owasp:ssti:007", "{php}"},
-	// Python dunder attribute traversal (__subclasses__, __builtins__, __import__)
+	// Python dunder 属性遍历（__subclasses__、__builtins__、__import__）
 	{regexp.MustCompile(`__(subclasses|builtins|globals|import|init|reduce)__`), 5, "owasp:ssti:008", "__"},
-	// Pebble template engine: beans / getClass access
+	// Pebble 模板引擎：beans / getClass 访问
 	{regexp.MustCompile(`\{\{.*\.(getclass|forname|getmethod|invoke)\(`), 5, "owasp:ssti:009", ""},
-	// JavaScript prototype pollution via JSON key injection
+	// 通过 JSON 键注入实施 JavaScript 原型污染
 	{regexp.MustCompile(`["'\[\{]__proto__["'\]\}]`), 5, "owasp:ssti:010", "__proto__"},
-	// Constructor prototype pollution: {"constructor":{"prototype":...}}
+	// constructor 原型污染：{"constructor":{"prototype":...}}
 	{regexp.MustCompile(`["']constructor["']\s*:\s*\{`), 5, "owasp:ssti:011", "constructor"},
-	// EJS template RCE: <%- process.env / require(...)  %>
+	// EJS 模板 RCE：<%- process.env / require(...)  %>
 	{regexp.MustCompile(`<%[-=]?\s*(process\s*\.\s*env|require\s*\(|global\s*\[)`), 5, "owasp:ssti:012", ""},
-	// Handlebars/Mustache: {{lookup this ...}} or {{#with (...)}}
-	// Score reduced to 2: these helpers appear in legitimate Handlebars templates.
+	// Handlebars/Mustache：{{lookup this ...}} 或 {{#with (...)}}
+	// 分值降为 2：这些 helper 会出现在合法 Handlebars 模板中。
 	{regexp.MustCompile(`\{\{\s*(lookup|with|each|log)\s+`), 2, "owasp:ssti:013", ""},
-	// Tornado / Mako: ${self.module / caller.body}
+	// Tornado / Mako：${self.module / caller.body}
 	{regexp.MustCompile(`\$\{self\.(module|template|loader|init_code)\b`), 5, "owasp:ssti:014", "."},
-	// ThinkPHP template injection: {pbohome/Indexot:if(...)} or {pboot:if(...)}
+	// ThinkPHP 模板注入：{pbohome/Indexot:if(...)} 或 {pboot:if(...)}
 	{regexp.MustCompile(`\{[a-z]+[:/][a-z]+:[a-z]+\(`), 5, "owasp:ssti:015", ""},
-	// Generic template tag with function call: {tag:function(...)}
+	// 带函数调用的通用模板标签：{tag:function(...)}
 	{regexp.MustCompile(`\{[a-z_]+:[a-z_]+\([^}]{0,200}\)\}`), 4, "owasp:ssti:016", ""},
-	// DedeCMS template injection: {dede:field name='source' runphp='yes'}
+	// DedeCMS 模板注入：{dede:field name='source' runphp='yes'}
 	{regexp.MustCompile(`\{dede:\w+\s+[^}]*runphp`), 5, "owasp:ssti:017", "{dede:"},
 	// #{16*8787}：SPEL/JEXL 风格数字算术模板注入（`#{` → `\d+ 运算 \d+`）。
 	{regexp.MustCompile(`#\{\s*\d+\s*[*+\-/]\s*\d+\s*\}`), 4, "owasp:ssti:018", "#{"},
@@ -865,9 +864,8 @@ var tmplInjectPatterns = []owaspPattern{
 	{regexp.MustCompile(`\$\{[\w.]+\(`), 4, "owasp:ssti:020", "${"},
 }
 
-// hasTemplateInjectionIndicator returns true when the string contains markers
-// specific to template injection patterns, skipping the 14-regex SSTI battery
-// for strings with no plausible injection content.
+// hasTemplateInjectionIndicator 在字符串含模板注入特有标记时返回 true，
+// 对不含可疑内容的字符串跳过 14 条 SSTI 正则。
 func hasTemplateInjectionIndicator(s string) bool {
 	return strings.Contains(s, "{{") ||
 		strings.Contains(s, "${") ||
@@ -877,7 +875,7 @@ func hasTemplateInjectionIndicator(s string) bool {
 		strings.Contains(s, "__subclasses__") ||
 		strings.Contains(s, "__builtins__") ||
 		strings.Contains(s, "__import__") ||
-		// constructor only in template context ({{...constructor...}})
+		// constructor 仅出现在模板上下文（{{...constructor...}}）
 		(strings.Contains(s, "constructor") && (strings.Contains(s, "{{") || strings.Contains(s, "${") || strings.Contains(s, "<%"))) ||
 		strings.Contains(s, "getclass(") ||
 		strings.Contains(s, "java.lang.") ||
@@ -967,22 +965,22 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 	}
 	lower := strings.ToLower(filename)
 
-	// Null byte injection in filename.
+	// 文件名中的空字节注入。
 	if strings.Contains(lower, "\x00") || strings.Contains(lower, "%00") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:001", Score: 6,
 			Desc: "文件名中包含空字节"}, true
 	}
 
-	// Path traversal in filename (e.g. ../../tmp/shell.php)
+	// 文件名中的路径遍历（如 ../../tmp/shell.php）
 	if strings.Contains(lower, "../") || strings.Contains(lower, "..\\") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:006", Score: 6,
 			Desc: "文件名中包含路径遍历"}, true
 	}
 
-	// Normalize spaces and suffix separators used to disguise executable extensions.
+	// 归一化用于伪装可执行扩展名的空格与后缀分隔符。
 	normalized := normalizeUploadFilename(lower)
 
-	// Double extension e.g. shell.php.jpg, shell.php .jpg, or shell.php;.jpg.
+	// 双扩展名，例如 shell.php.jpg、shell.php .jpg 或 shell.php;.jpg。
 	ext := filepath.Ext(normalized)
 	if ext != "" {
 		withoutExt := normalized[:len(normalized)-len(ext)]
@@ -998,28 +996,28 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 			Desc: "危险文件扩展名：" + ext}, true
 	}
 
-	// Also check the original extension without normalization.
+	// 同时检查未归一化的原始扩展名。
 	origExt := filepath.Ext(lower)
 	if origExt != ext && dangerousExtensions[origExt] {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:003", Score: 5,
 			Desc: "危险文件扩展名：" + origExt}, true
 	}
 
-	// .htaccess override attempt
+	// .htaccess 覆写尝试
 	if strings.HasSuffix(lower, ".htaccess") || lower == ".htaccess" {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:004", Score: 5,
 			Desc: "htaccess 覆写尝试"}, true
 	}
 
-	// Content-Type mismatch with image extension
+	// Content-Type 与图片扩展名不匹配
 	if (origExt == ".jpg" || origExt == ".jpeg" || origExt == ".png" || origExt == ".gif") &&
 		contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "image/") {
 		return OWASPHit{Category: CatFileUpload, RuleID: "owasp:upload:005", Score: 3,
 			Desc: "图片文件的 content-type 不匹配"}, true
 	}
 
-	// Content-Type mismatch: executable extension with image content-type (bypass attempt).
-	// An attacker may upload shell.php with Content-Type: image/jpeg to evade server-side checks.
+	// Content-Type 不匹配：可执行扩展名搭配图片 Content-Type（绕过尝试）。
+	// 攻击者可能上传 shell.php 并声明 Content-Type: image/jpeg，以绕过服务端检查。
 	if contentType != "" && strings.HasPrefix(strings.ToLower(contentType), "image/") {
 		execExts := map[string]bool{
 			".php": true, ".php3": true, ".php4": true, ".php5": true, ".phtml": true, ".pht": true,
@@ -1035,8 +1033,7 @@ func checkFileUpload(filename, contentType string) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
-// hasJNDIIndicator returns true when the string contains JNDI/Log4Shell-style
-// injection markers.
+// hasJNDIIndicator 在字符串含 JNDI/Log4Shell 风格注入标记时返回 true。
 func hasJNDIIndicator(s string) bool {
 	return strings.Contains(s, "jndi:") ||
 		strings.Contains(s, "${lower") ||
@@ -1045,7 +1042,7 @@ func hasJNDIIndicator(s string) bool {
 		strings.Contains(s, "${sys:") ||
 		strings.Contains(s, "${java:") ||
 		strings.Contains(s, "${base64:") ||
-		strings.Contains(s, "\\u0024\\u007") // Unicode-escaped ${
+		strings.Contains(s, "\\u0024\\u007") // Unicode 转义的 ${
 }
 
 var jndiPatterns = []owaspPattern{
@@ -1053,11 +1050,11 @@ var jndiPatterns = []owaspPattern{
 	{regexp.MustCompile(`\$\{(lower|upper|env|sys|java|base64):.*\}`), 4, "owasp:jndi:002", ""},
 	{regexp.MustCompile(`\$\{.*\$\{.*\}\}`), 3, "owasp:jndi:003", ""},
 	{regexp.MustCompile(`\$\{(env|sys):.*\}`), 4, "owasp:jndi:004", ""},
-	// Split-character / obfuscated JNDI: ${j${::-n}d${::-i}:...}
+	// 拆字符 / 混淆的 JNDI：${j${::-n}d${::-i}:...}
 	{regexp.MustCompile(`\$\{[^}]*j[^}]*\$\{[^}]*\}[^}]*n[^}]*d[^}]*i\s*:`), 5, "owasp:jndi:005", "jndi"},
-	// URL-encoded JNDI: %24%7Bjndi:
+	// URL 编码的 JNDI：%24%7Bjndi:
 	{regexp.MustCompile(`%24%7[bB]jndi\s*%3[aA]`), 5, "owasp:jndi:006", "%24%7"},
-	// Unicode-escaped JNDI: \u0024\u007bjndi:
+	// Unicode 转义的 JNDI：\u0024\u007bjndi:
 	{regexp.MustCompile(`\\u0024\\u007[bB]jndi`), 5, "owasp:jndi:007", "\u0024"},
 }
 
@@ -1242,9 +1239,8 @@ func checkCRLF(s string, threshold int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
-// hasELIndicator returns true when the string contains expression language
-// injection markers (Spring EL, OGNL, SpEL) specific enough to justify
-// running the full EL regex battery.
+// hasELIndicator 在字符串含足以支撑跑完整 EL 正则组的表达式语言
+// （Spring EL、OGNL、SpEL）注入标记时返回 true。
 func hasELIndicator(s string) bool {
 	return strings.Contains(s, "#{t(") ||
 		strings.Contains(s, "${t(") ||
@@ -1265,28 +1261,28 @@ func hasELIndicator(s string) bool {
 }
 
 var exprLangPatterns = []owaspPattern{
-	// Spring Expression Language
+	// Spring 表达式语言
 	{regexp.MustCompile(`#\{t\(java\.lang\.`), 6, "owasp:el:001", "java.lang."},
 	{regexp.MustCompile(`\$\{t\(java\.lang\.`), 6, "owasp:el:002", "java.lang."},
 	// OGNL
 	{regexp.MustCompile(`%\{.*getclass\(\)`), 5, "owasp:el:003", "getclass()"},
 	{regexp.MustCompile(`\(#rt\s*=\s*@java\.lang\.runtime\)`), 6, "owasp:el:004", "@java.lang.runtime"},
-	// Generic class/runtime access
+	// 通用类/运行时访问
 	{regexp.MustCompile(`java\.lang\.(runtime|processbuilder|class|system)`), 4, "owasp:el:005", "java.lang."},
 	{regexp.MustCompile(`getruntime\(\)\s*\.\s*exec\s*\(`), 5, "owasp:el:006", "getruntime()"},
-	// Struts2 OGNL: %{#context['com.opensymphony...
+	// Struts2 OGNL：%{#context['com.opensymphony...
 	{regexp.MustCompile(`%\{#context\[`), 5, "owasp:el:007", "%{#context"},
-	// OGNL redirect/action: redirect:${...} or action:${...}
+	// OGNL 重定向/动作：redirect:${...} 或 action:${...}
 	{regexp.MustCompile(`(redirect|action)\s*:\s*\$\{`), 5, "owasp:el:008", ""},
-	// OGNL static method call: @class@method
+	// OGNL 静态方法调用：@class@method
 	{regexp.MustCompile(`@java\.\w+\.\w+@\w+`), 5, "owasp:el:009", "@java."},
-	// java.net.URL / new java construct
+	// java.net.URL / new java 构造
 	{regexp.MustCompile(`\bnew\s*java\.\w+\.`), 4, "owasp:el:010", "java."},
 	// OGNL #context.get / #req=#context
 	{regexp.MustCompile(`#(req|request|response|session|application|context)\s*[=.]`), 5, "owasp:el:011", ""},
-	// OGNL reflection chain: getDeclaredMethods + invoke
+	// OGNL 反射链：getDeclaredMethods + invoke
 	{regexp.MustCompile(`getdeclaredmethods\b.*\.invoke\s*\(`), 5, "owasp:el:012", "getdeclaredmethods"},
-	// OGNL reflection chain: getClass().forName() or Class.forName()
+	// OGNL 反射链：getClass().forName() 或 Class.forName()
 	{regexp.MustCompile(`(getclass\(\)|class)\s*\.\s*forname\s*\(`), 4, "owasp:el:013", "forname"},
 	// YAML 反序列化 RCE 载荷头（!!python/object/new:exec / !!javax.script.ScriptEngineManager
 	// 等）：与 deser 族的序列化字节/协议形态（rO0AB、%ac%ed、PHP o: 等）互不重叠，
@@ -1325,44 +1321,44 @@ func checkExprLang(s string, threshold int) (OWASPHit, bool) {
 }
 
 var deserialPatterns = []owaspPattern{
-	// Java serialization magic bytes
+	// Java 序列化魔数
 	{regexp.MustCompile(`\xac\xed\x00\x05`), 6, "owasp:deser:001", ""},
-	// Java serialization hex-encoded: aced0005 (common in URL params)
+	// 十六进制编码的 Java 序列化：aced0005（URL 参数中常见）
 	{regexp.MustCompile(`aced0005`), 6, "owasp:deser:008", "aced0005"},
-	// PHP serialization
+	// PHP 序列化
 	{regexp.MustCompile(`o:\d+:"[^"]+"`), 4, "owasp:deser:002", "o:"},
-	// PHP serialization in URL params: s:11:"key";s:16:"value"
+	// URL 参数中的 PHP 序列化：s:11:"key";s:16:"value"
 	{regexp.MustCompile(`s:\d+:"[^"]*";s:\d+:`), 4, "owasp:deser:009", ""},
 	// Python pickle
 	{regexp.MustCompile(`c(os|posix|nt)\n(system|popen)`), 5, "owasp:deser:003", ""},
 	// .NET ViewState
 	{regexp.MustCompile(`__viewstate.*ysoserial`), 5, "owasp:deser:004", ""},
-	// Ruby Marshal — require version bytes + type indicator to avoid matching random binary
+	// Ruby Marshal——要求版本字节 + 类型标识，避免命中随机二进制
 	{regexp.MustCompile(`\x04\x08[\x30\x49\x5b\x6f\x7b]`), 3, "owasp:deser:005", ""},
-	// .NET BinaryFormatter / LosFormatter magic
+	// .NET BinaryFormatter / LosFormatter 魔数
 	{regexp.MustCompile(`aaeaaad//`), 5, "owasp:deser:006", "aaeaaad//"},
-	// Node.js serialize-javascript RCE pattern
+	// Node.js serialize-javascript RCE 模式
 	{regexp.MustCompile(`\{"rce":\s*"_\$\$nd_func\$\$_`), 5, "owasp:deser:007", "nd_func"},
-	// Java serialization base64 magic: rO0AB (base64 of \xac\xed\x00\x05)
+	// Java 序列化 base64 魔数：rO0AB（\xac\xed\x00\x05 的 base64）
 	{regexp.MustCompile(`ro0ab`), 5, "owasp:deser:010", "ro0ab"},
-	// .NET ViewState base64 marker
+	// .NET ViewState base64 标记
 	{regexp.MustCompile(`javax\.faces\.viewstate\s*=\s*ro0ab`), 6, "owasp:deser:011", "ro0ab"},
-	// Raw Java serialization magic bytes (URL-encoded or hex)
+	// 原始 Java 序列化魔数字节（URL 编码或十六进制）
 	{regexp.MustCompile(`(%ac%ed|aced0005)`), 5, "owasp:deser:012", ""},
-	// XStream gadget chains
+	// XStream gadget 链
 	{regexp.MustCompile(`<(sorted-set|tree-map|java\.util|dynamic-proxy|javax\.\w+\.|jdk\.\w+\.)`), 5, "owasp:deser:013", ""},
-	// Java ObjectInputStream — used to deserialize untrusted data
+	// Java ObjectInputStream——用于反序列化不可信数据
 	{regexp.MustCompile(`\bobjectinputstream\b`), 4, "owasp:deser:014", "objectinputstream"},
-	// Apache Xalan gadget chain (CVE-2022-34169 and similar)
+	// Apache Xalan gadget 链（CVE-2022-34169 等）
 	{regexp.MustCompile(`com\.sun\.org\.apache\.xalan\b`), 5, "owasp:deser:015", "com.sun.org.apache.xalan"},
-	// Apache Commons Collections gadget chain (widely exploited)
+	// Apache Commons Collections gadget 链（被广泛利用）
 	{regexp.MustCompile(`org\.apache\.commons\.collections\b`), 5, "owasp:deser:016", "org.apache.commons.collections"},
-	// java.util.HashMap in suspicious serialization context (gadget trigger class)
+	// 可疑序列化上下文中的 java.util.HashMap（gadget 触发类）
 	{regexp.MustCompile(`java\.util\.hashmap\b.{0,100}(aced|ro0ab|serial|objectinput|readobject|deserializ)`), 5, "owasp:deser:017", ""},
 }
 
 func checkDeserialization(s string, threshold int) (OWASPHit, bool) {
-	// Direct binary Java serialization magic byte check
+	// 直接检查二进制 Java 序列化魔数字节
 	if strings.Contains(s, "\xac\xed\x00\x05") {
 		return OWASPHit{Category: CatDeserial, RuleID: "owasp:deser:001", Score: 5, Desc: "Java 序列化魔数"}, true
 	}
@@ -1415,7 +1411,7 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 		}
 	}
 
-	// HTTP Request Smuggling: both Content-Length and Transfer-Encoding set.
+	// HTTP 请求走私：Content-Length 与 Transfer-Encoding 同时出现。
 	if cl != "" && te != "" && containsASCIIFold(te, "chunked") {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:001", Score: 6,
@@ -1423,7 +1419,7 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 		}, true
 	}
 
-	// Duplicate Content-Length detection (rudimentary).
+	// 重复 Content-Length 检测（粗略）。
 	if strings.ContainsAny(cl, ",;") {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:002", Score: 5,
@@ -1431,7 +1427,7 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 		}, true
 	}
 
-	// Excessive header length (potential buffer overflow probe).
+	// 请求头长度异常（可能是缓冲区溢出探测）。
 	if oversizedHeader != "" {
 		return OWASPHit{
 			Category: CatProtoViol, RuleID: "owasp:proto:003", Score: 4,
@@ -1442,9 +1438,9 @@ func checkProtocolViolation(headers map[string]string, _ int) (OWASPHit, bool) {
 	return OWASPHit{}, false
 }
 
-// checkMethodViolation flags unusual HTTP methods that are commonly abused.
-// CORS preflight OPTIONS requests (with Origin and Access-Control-Request-Method)
-// are excluded as legitimate.
+// checkMethodViolation 标记常被滥用的异常 HTTP 方法。
+// 带 Origin 与 Access-Control-Request-Method 的 CORS 预检 OPTIONS 请求
+// 会被排除为合法流量。
 func checkMethodViolation(method string, headers map[string]string) (OWASPHit, bool) {
 	switch strings.ToUpper(method) {
 	case "TRACE", "TRACK":
@@ -1463,7 +1459,7 @@ func checkMethodViolation(method string, headers map[string]string) (OWASPHit, b
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:008", Score: 3,
 			Desc: "PATCH 方法（不常见）"}, true
 	case "OPTIONS":
-		// Allow CORS preflight requests (have Origin + Access-Control-Request-Method).
+		// 放行 CORS 预检请求（含 Origin + Access-Control-Request-Method）。
 		origin := ""
 		acrm := ""
 		for k, v := range headers {
@@ -1476,7 +1472,7 @@ func checkMethodViolation(method string, headers map[string]string) (OWASPHit, b
 			}
 		}
 		if origin != "" && acrm != "" {
-			// Legitimate CORS preflight — not suspicious.
+			// 合法 CORS 预检——不可疑。
 			return OWASPHit{}, false
 		}
 		return OWASPHit{Category: CatProtoViol, RuleID: "owasp:proto:009", Score: 3,
@@ -1485,8 +1481,7 @@ func checkMethodViolation(method string, headers map[string]string) (OWASPHit, b
 	return OWASPHit{}, false
 }
 
-// hasGraphQLIndicator returns true when the string contains GraphQL
-// introspection or injection markers.
+// hasGraphQLIndicator 在字符串含 GraphQL 内省或注入标记时返回 true。
 func hasGraphQLIndicator(s string) bool {
 	return strings.Contains(s, "__schema") ||
 		strings.Contains(s, "__type") ||
@@ -1495,22 +1490,22 @@ func hasGraphQLIndicator(s string) bool {
 }
 
 var graphqlPatterns = []owaspPattern{
-	// GraphQL introspection query with query keyword context.
+	// GraphQL 内省查询，带 query 关键词上下文。
 	// 放宽 {0,200} 至 . 通配：强信号是 __schema/__type 本身，别名形态
 	// （query { wuhu:__schema { ... } }）下早前的 [^}] 约束会漏检。
 	{regexp.MustCompile(`\bquery\b.{0,200}__schema\b`), 6, "owasp:graphql:001", "__schema"},
 	{regexp.MustCompile(`\bquery\b.{0,200}__type\b`), 5, "owasp:graphql:002", "__type"},
 	{regexp.MustCompile(`\bintrospectionquery\b`), 5, "owasp:graphql:003", "introspectionquery"},
-	// Direct __schema access in a GraphQL body (e.g., {"query":"{ __schema { ... } }"})
+	// GraphQL 请求体中直接访问 __schema（如 {"query":"{ __schema { ... } }"}）
 	{regexp.MustCompile(`\{\s*__schema\b`), 5, "owasp:graphql:004", "__schema"},
 	// __typename 是 Apollo 客户端查询与 GraphQL spec 元字段的常态用法，
 	// 不作为注入特征（见 path_traversal:017/ssrf:009 的误报修复口径）。
 	{regexp.MustCompile(`\{\s*__type\b`), 5, "owasp:graphql:005", "__type"},
-	// GraphQL batching attack: array of operations
+	// GraphQL 批量攻击：operation 数组
 	{regexp.MustCompile(`\[\s*\{\s*"query"\s*:`), 4, "owasp:graphql:006", ""},
-	// GraphQL directive abuse: @skip/@include with variable injection
+	// GraphQL 指令滥用：@skip/@include 携带变量注入
 	{regexp.MustCompile(`@(skip|include)\s*\(\s*if\s*:\s*\$`), 3, "owasp:graphql:007", ""},
-	// GraphQL subscription abuse
+	// GraphQL 订阅滥用
 	{regexp.MustCompile(`\bsubscription\b\s*\{`), 3, "owasp:graphql:008", "subscription"},
 }
 

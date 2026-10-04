@@ -410,12 +410,14 @@ func TestCtxFromPipelineUsesHostForHostMatchers(t *testing.T) {
 	}
 }
 
-// alwaysMatchStub 是测试专用的「无条件命中」匹配器。
-//
-// 这些用例要验证的是 phase 命中后的短路/优先级逻辑，与具体匹配器无关，
-// 因此直接注入 matcher 并留空 Kind（Kind 为空表示该 Compiled 由测试手工
-// 构造、未经 Compile 的 DSL 解析）。不要在此填任何 kind 字面量——生产
-// 编译器没有 always 这一 kind，写出来会让人误以为配置里可以这么写。
+/**
+ * alwaysMatchStub 是测试专用的「无条件命中」匹配器。
+ *
+ * 这些用例要验证的是 phase 命中后的短路/优先级逻辑，与具体匹配器无关，
+ * 因此直接注入 matcher 并留空 Kind（Kind 为空表示该 Compiled 由测试手工
+ * 构造、未经 Compile 的 DSL 解析）。不要在此填任何 kind 字面量——生产
+ * 编译器没有 always 这一 kind，写出来会让人误以为配置里可以这么写。
+ */
 type alwaysMatchStub struct{}
 
 // Match 恒为 true。
@@ -860,7 +862,7 @@ func TestBrowserSignPhaseRequiresAPISignature(t *testing.T) {
 	}
 	phase := NewBrowserSignPhase(cfg)
 
-	// non-api document navigation should pass
+	// 非 API 的文档导航应放行
 	pass, terminal := phase.Execute(&pipeline.RequestCtx{
 		Method: "GET",
 		Path:   "/",
@@ -874,7 +876,7 @@ func TestBrowserSignPhaseRequiresAPISignature(t *testing.T) {
 		t.Fatalf("document request should pass, terminal=%v result=%+v", terminal, pass)
 	}
 
-	// api without headers should challenge
+	// 无签名头的 API 请求应走挑战
 	result, terminal := phase.Execute(&pipeline.RequestCtx{
 		Method: "POST",
 		Path:   "/api/v1/items",

@@ -94,7 +94,7 @@ func shieldProtocolAllowed(cfg ShieldConfig, requestProtocol string) bool {
 	return true
 }
 
-// ShieldSession stores the server-side state for a pending shield challenge.
+// ShieldSession 保存待验证盾挑战的服务端状态。
 type ShieldSession struct {
 	ChallengeSessionBinding
 	ID                   string     `json:"id"`
@@ -111,7 +111,7 @@ type ShieldSession struct {
 	ProtocolConfigFrozen bool       `json:"protocol_config_frozen"`
 	OriginalURL          string     `json:"original_url"`
 	RequestProtocol      string     `json:"request_protocol"`
-	EnvKey               []byte     `json:"env_key"`               // 32-byte session master key (first 16 bytes feed SM4-GCM)
+	EnvKey               []byte     `json:"env_key"`               // 32 字节会话主密钥（前 16 字节供 SM4-GCM 使用）
 	EnvMission           EnvMission `json:"env_mission,omitempty"` // R2.2：本次挑战要求的环境因子子集
 	ClientIP             string     `json:"client_ip"`             // 签发请求的客户端 IP
 	CreatedAt            time.Time  `json:"created_at"`
@@ -170,8 +170,8 @@ func decodeShieldSession(data []byte) *ShieldSession {
 	return &session
 }
 
-// ShieldManager orchestrates 5-second shield challenges (PoW + env fingerprint).
-// Cloudflare-style: user clicks verify -> PoW runs in background -> auto-submit on success.
+// ShieldManager 编排 5 秒盾挑战（PoW + 环境指纹）。
+// 类 Cloudflare 形态：用户点击验证 -> 后台跑 PoW -> 成功后自动提交。
 type ShieldManager struct {
 	captcha   *CaptchaManager
 	redis     rueidis.Client
@@ -185,7 +185,7 @@ type ShieldManager struct {
 	sessions  map[string]*ShieldSession
 }
 
-// NewShieldManager creates a new ShieldManager.
+// NewShieldManager 创建一个 ShieldManager。
 func NewShieldManager(captcha *CaptchaManager, redis rueidis.Client, difficulty int) *ShieldManager {
 	cfg := DefaultShieldConfig()
 	if difficulty > 0 {
@@ -318,7 +318,7 @@ func (sm *ShieldManager) shieldPageConfig(session *ShieldSession) ShieldConfig {
 	return cfg
 }
 
-// GenerateChallenge creates a new shield challenge session (no captcha needed).
+// GenerateChallenge 新建一个盾挑战会话（不需要验证码）。
 func (sm *ShieldManager) GenerateChallenge(originalURL string, requestProtocol string) (*ShieldSession, error) {
 	return sm.GenerateChallengeWithBinding(originalURL, requestProtocol, ChallengeSessionBinding{})
 }
@@ -359,7 +359,7 @@ func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, reques
 	return session, nil
 }
 
-// VerifyChallenge checks PoW + env fingerprint.
+// VerifyChallenge 校验 PoW + 环境指纹。
 // 会话通过原子“取出即删除”获得，保证一份 PoW 解只能被兑换一次；
 // 过期会话直接拒绝，不依赖清理协程的调度间隔。
 func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, requestProtocol string) (bool, string) {
@@ -375,8 +375,7 @@ func (sm *ShieldManager) VerifyChallenge(sessionID, captchaAnswer string, powCou
 	)
 }
 
-// VerifyChallengeWithBinding compares the matched-site binding before atomically
-// consuming the shield session.
+// VerifyChallengeWithBinding 在原子消费盾会话之前先比对匹配站点绑定。
 func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer string, powCounter int64, powHash, envFPJSON, probeJSON, requestProtocol string, binding ChallengeSessionBinding) (bool, string) {
 	session := sm.takeShieldSessionWithBinding(sessionID, binding)
 	if session == nil {
@@ -507,7 +506,7 @@ func shieldProbeSoftScore(probeJSON string) (int, []string) {
 	return score, reasons
 }
 
-// WriteShieldChallengeResponse renders the Cloudflare-style shield HTML page.
+// WriteShieldChallengeResponse 渲染类 Cloudflare 形态的盾 HTML 页面。
 func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, reqID, originalURL, requestProtocol string, binding ChallengeSessionBinding, statusCode int) {
 	prepareChallengeResponseHeaders(c, reqID)
 	session, err := sm.GenerateChallengeWithBinding(originalURL, requestProtocol, binding)

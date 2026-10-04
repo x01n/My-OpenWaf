@@ -34,11 +34,13 @@ func gzipBytes(data []byte) []byte {
 	return buf.Bytes()
 }
 
-// PowGlueURL 返回 Gecko 侧引用的 glue 脚本 URL，带内容派生版本串。
-//
-// 版本串必须与资产内容绑定：这两个 URL 的响应带 `immutable`，浏览器在缓存
-// 窗口内不回源校验；URL 不随内容变时换资产会让老访客继续用旧文件。
-// 分开导出的原因见 ServePoWWASM 的注释。
+/**
+ * PowGlueURL 返回 Gecko 侧引用的 glue 脚本 URL，带内容派生版本串。
+ *
+ * 版本串必须与资产内容绑定：这两个 URL 的响应带 `immutable`，浏览器在缓存
+ * 窗口内不回源校验；URL 不随内容变时换资产会让老访客继续用旧文件。
+ * 分开导出的原因见 ServePoWWASM 的注释。
+ */
 func PowGlueURL() string {
 	return "/__owaf/pow_glue.js?v=" + powdata.GlueVersion()
 }
@@ -48,12 +50,14 @@ func PowWasmURL() string {
 	return "/__owaf/pow.wasm?v=" + powdata.WasmVersion()
 }
 
-// ServePoWWASM serves the pre-compiled WASM binary (gzipped).
-//
-// Cache-Control 用 `immutable` + 30 天：客户端引用的 URL 带内容派生版本串
-// （见 PowWasmURL），换资产即换 URL，因此长窗口不会造成旧资产滞留。
-// 反向约束：**改这个 max-age 必须与版本串机制同批**——只调大 max-age 而
-// URL 不随内容变，会把「旧 wasm 滞留 1 小时」恶化成「滞留 30 天」。
+/**
+ * ServePoWWASM 下发预编译的 WASM 二进制（gzip 压缩）。
+ *
+ * Cache-Control 用 `immutable` + 30 天：客户端引用的 URL 带内容派生版本串
+ * （见 PowWasmURL），换资产即换 URL，因此长窗口不会造成旧资产滞留。
+ * 反向约束：**改这个 max-age 必须与版本串机制同批**——只调大 max-age 而
+ * URL 不随内容变，会把「旧 wasm 滞留 1 小时」恶化成「滞留 30 天」。
+ */
 func ServePoWWASM(c *app.RequestContext) {
 	gzipWASMOnce.Do(func() { gzipWASM = gzipBytes(powdata.WASMBinary) })
 	c.Response.SetStatusCode(200)
@@ -63,7 +67,7 @@ func ServePoWWASM(c *app.RequestContext) {
 	c.Response.SetBody(gzipWASM)
 }
 
-// ServePowGlueJS serves the Rust wasm-bindgen glue JS (gzipped).
+// ServePowGlueJS 下发 Rust wasm-bindgen 生成的 glue JS（gzip 压缩）。
 // max-age 与版本串的配对关系同 ServePoWWASM。
 func ServePowGlueJS(c *app.RequestContext) {
 	gzipGlueOnce.Do(func() { gzipGlueJS = gzipBytes(powdata.PowGlueJS) })
@@ -74,7 +78,7 @@ func ServePowGlueJS(c *app.RequestContext) {
 	c.Response.SetBody(gzipGlueJS)
 }
 
-// GeneratePoWNonce creates a cryptographically random nonce for PoW challenges.
+// GeneratePoWNonce 为 PoW 挑战生成一个密码学随机的 nonce。
 func GeneratePoWNonce() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -124,12 +128,14 @@ func isLowerHexSHA256(s string) bool {
 	return true
 }
 
-// VerifyPoW verifies a proof-of-work solution.
-// It checks that SHA-256(nonce + counter) has the required leading zeros.
-//
-// 校验顺序：先拒绝非法难度与畸形摘要，再检查前导零，最后重算摘要做常量时间比较。
-// difficulty 超出 [minPoWDifficulty, maxPoWDifficulty] 一律拒绝——难度 0 会接受
-// 零工作量解答，负难度会让 strings.Repeat panic。
+/**
+ * VerifyPoW 校验一份工作量证明解答。
+ * 检查 SHA-256(nonce + counter) 是否具备要求的前导零个数。
+ *
+ * 校验顺序：先拒绝非法难度与畸形摘要，再检查前导零，最后重算摘要做常量时间比较。
+ * difficulty 超出 [minPoWDifficulty, maxPoWDifficulty] 一律拒绝——难度 0 会接受
+ * 零工作量解答，负难度会让 strings.Repeat panic。
+ */
 func VerifyPoW(nonce string, counter int64, hash string, difficulty int) bool {
 	if difficulty < minPoWDifficulty || difficulty > maxPoWDifficulty {
 		return false
@@ -155,21 +161,23 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// GenerateVMProgram 生成 PoW 程序字节码（程序容器格式，十六进制）。
-//
-// 程序内容是 `SHA-256(nonce ‖ decimal(counter))` 的完整实现 + 前导零判定，
-// 由 vmpasm 汇编成 ISA 字节码。**没有任何 PoW 专用指令**：前导零检查是
-// 「循环 + 无符号比较 + 条件跳转」（见 temp/_vmp-track/ISA.md §4.3.6）。
-//
-// # 为什么不再做多态填充
-//
-// 旧实现（固定 5 步状态机 + 随机 NOP 填充）已被删除：ISA 现在是通用指令集，
-// 程序是真实计算，多态性由**程序本身的结构**（分支、循环、变量布局）承担，
-// 而不是靠插入无操作字节。ISA 里也没有 NOP 填充这一说 —— `NOP` 是可执行
-// 指令，插进控制流会改变可达性分析，不是"无害填充"。
-//
-// 程序是**确定性**的：同一版本下所有客户端拿到相同字节码，其版本串通过
-// WASM 资产的内容派生版本机制传播（PowWasmURL / PowGlueURL）。
+/**
+ * GenerateVMProgram 生成 PoW 程序字节码（程序容器格式，十六进制）。
+ *
+ * 程序内容是 `SHA-256(nonce ‖ decimal(counter))` 的完整实现 + 前导零判定，
+ * 由 vmpasm 汇编成 ISA 字节码。**没有任何 PoW 专用指令**：前导零检查是
+ * 「循环 + 无符号比较 + 条件跳转」（见 temp/_vmp-track/ISA.md §4.3.6）。
+ *
+ * # 为什么不再做多态填充
+ *
+ * 旧实现（固定 5 步状态机 + 随机 NOP 填充）已被删除：ISA 现在是通用指令集，
+ * 程序是真实计算，多态性由**程序本身的结构**（分支、循环、变量布局）承担，
+ * 而不是靠插入无操作字节。ISA 里也没有 NOP 填充这一说 —— `NOP` 是可执行
+ * 指令，插进控制流会改变可达性分析，不是"无害填充"。
+ *
+ * 程序是**确定性**的：同一版本下所有客户端拿到相同字节码，其版本串通过
+ * WASM 资产的内容派生版本机制传播（PowWasmURL / PowGlueURL）。
+ */
 func GenerateVMProgram() string {
 	prog, err := vmpasm.Assemble(vmpasm.PoWProgramLayout(), vmpasm.BuildPoWProgram())
 	if err != nil {

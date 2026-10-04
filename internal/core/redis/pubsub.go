@@ -21,8 +21,11 @@ type configSyncMessage struct {
 	Action   string `json:"action"`
 }
 
-// ConfigSync publishes and subscribes to config-reload events via Redis pub/sub.
-// Multiple WAF nodes use this to stay in sync after admin API mutations.
+/**
+ * ConfigSync 通过 Redis 发布/订阅配置重载事件。
+ *
+ * 多个 WAF 节点借助它在管理端 API 变更后保持同步。
+ */
 type ConfigSync struct {
 	client    rueidis.Client
 	log       *slog.Logger
@@ -31,7 +34,7 @@ type ConfigSync struct {
 	closeOnce sync.Once
 }
 
-// NewConfigSync creates a config sync handler. Returns nil if client is nil.
+// NewConfigSync 创建配置同步处理器。client 为 nil 时返回 nil。
 func NewConfigSync(client rueidis.Client, log *slog.Logger, sourceID string) *ConfigSync {
 	if client == nil {
 		return nil
@@ -58,7 +61,7 @@ func newConfigSyncSourceID() string {
 	return hex.EncodeToString(b)
 }
 
-// PublishReload notifies all nodes that config has changed.
+// PublishReload 通知所有节点配置已变更。
 func (cs *ConfigSync) PublishReload() {
 	if cs == nil || cs.client == nil {
 		return
@@ -78,8 +81,8 @@ func (cs *ConfigSync) PublishReload() {
 	}
 }
 
-// Subscribe listens for reload events and calls the reload function.
-// Blocks until Close() is called.
+// Subscribe 监听重载事件并调用 reload 函数。
+// 在 Close() 被调用前一直阻塞。
 func (cs *ConfigSync) Subscribe(reload func() error) {
 	if cs == nil || cs.client == nil {
 		return
@@ -118,7 +121,7 @@ func (cs *ConfigSync) Subscribe(reload func() error) {
 	})
 }
 
-// Close stops the subscriber.
+// Close 停止订阅者。
 func (cs *ConfigSync) Close() {
 	if cs == nil {
 		return

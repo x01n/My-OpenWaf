@@ -15,7 +15,7 @@ import (
 	"My-OpenWaf/internal/waf/pageconfig"
 )
 
-// WriteBlockResponse renders the intercept block page.
+// WriteBlockResponse 渲染拦截页。
 func WriteBlockResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, res action.Result) {
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")
@@ -56,7 +56,7 @@ func WriteBlockResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRu
 	renderEmbeddedPage(c, "block/index.html", statusCode, reqID, res.RuleIDStr)
 }
 
-// WriteMaintenanceResponse renders the maintenance page.
+// WriteMaintenanceResponse 渲染维护页。
 func WriteMaintenanceResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot) {
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")
@@ -84,12 +84,15 @@ func WriteMaintenanceResponse(c *app.RequestContext, reqID string, rt *snapshot.
 	renderEmbeddedPage(c, "maintenance/index.html", statusCode, reqID, "")
 }
 
-// WriteChallengeResponse renders a JS challenge page that the client must solve.
-// envCheck 为 true 时在挑战页注入浏览器/环境采集 JS，提交时携带 v1 AES-256-GCM
-// 加密的 __waf_env_fp；服务端使用挑战令牌的原始 32 字节值校验该密文。
-//
-// tokenClaims 把挑战 token 绑定到发起请求的客户端（IP/UA/Host/站点），
-// 其他客户端拿到页面里的 rid/ts/token 三元组也无法换取通行凭证。
+/**
+ * WriteChallengeResponse 渲染客户端必须求解的 JS 挑战页。
+ *
+ * envCheck 为 true 时在挑战页注入浏览器/环境采集 JS，提交时携带 v1 AES-256-GCM
+ * 加密的 __waf_env_fp；服务端使用挑战令牌的原始 32 字节值校验该密文。
+ *
+ * tokenClaims 把挑战 token 绑定到发起请求的客户端（IP/UA/Host/站点），
+ * 其他客户端拿到页面里的 rid/ts/token 三元组也无法换取通行凭证。
+ */
 func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, envCheck bool, statusCode int, cfg pageconfig.ChallengePageConfig, tokenClaims challenge.ChallengeTokenClaims) {
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")
@@ -132,7 +135,7 @@ func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.Si
 	c.Data(statusCode, "text/html; charset=utf-8", []byte(html))
 }
 
-// buildChallengeHTML renders the shared JS challenge page template.
+// buildChallengeHTML 渲染共享的 JS 挑战页模板。
 func buildChallengeHTML(reqID, ts, token, envJS, powScript string, powEnvelope, powKeyHex string, cfg pageconfig.ChallengePageConfig) string {
 	defaults := pageconfig.DefaultChallengePageConfig()
 	if cfg.BrandName == "" {
@@ -166,7 +169,7 @@ func buildChallengeHTML(reqID, ts, token, envJS, powScript string, powEnvelope, 
 	return string(page)
 }
 
-// WriteUpstreamErrorResponse renders an error page for upstream failures.
+// WriteUpstreamErrorResponse 渲染上游失败时的错误页。
 func WriteUpstreamErrorResponse(c *app.RequestContext, reqID string, statusCode int) {
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")

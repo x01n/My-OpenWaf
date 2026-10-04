@@ -155,7 +155,7 @@ func TestAdminRequestProtocol(t *testing.T) {
 	}
 }
 
-// ---- SecurityHeaders 基础头 ----
+// SecurityHeaders 基础头
 
 func TestSecurityHeadersAlwaysSetsBaselineHeaders(t *testing.T) {
 	ctx := newMiddlewareCtx("http://example.com/api/v1/sites", nil)
@@ -222,7 +222,7 @@ func TestXSSProtectionHeaderPreservesExistingValue(t *testing.T) {
 	}
 }
 
-// ---- HSTS ----
+// HSTS
 
 // TestHSTSHeaderWrittenOnlyOverSecureProtocols 验证 HSTS 仅在 https/h3 下写入。
 func TestHSTSHeaderWrittenOnlyOverSecureProtocols(t *testing.T) {
@@ -264,7 +264,7 @@ func TestHSTSHeaderSkippedWhenDisabled(t *testing.T) {
 	}
 }
 
-// ---- HPKP ----
+// HPKP
 
 func TestHPKPHeaderWrittenWhenEnabledOverHTTPS(t *testing.T) {
 	ctx := newMiddlewareCtx("https://example.com/api/v1/sites", nil)
@@ -349,7 +349,7 @@ func TestSecurityHeadersAllEnabledOverHTTPS(t *testing.T) {
 	}
 }
 
-// ---- splitRefreshCookie ----
+// splitRefreshCookie
 
 func TestSplitRefreshCookie(t *testing.T) {
 	tests := []struct {
@@ -375,7 +375,7 @@ func TestSplitRefreshCookie(t *testing.T) {
 	}
 }
 
-// ---- recordLoginAttempt ----
+// recordLoginAttempt
 
 // TestRecordLoginAttemptNilDBIsNoop 验证 db 为 nil 时静默返回而非 panic。
 func TestRecordLoginAttemptNilDBIsNoop(t *testing.T) {

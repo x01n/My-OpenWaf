@@ -64,7 +64,7 @@ func (r *ApplicationRouteRuleRepo) Delete(id uint) error {
 	return r.db.Delete(&store.ApplicationRouteRule{}, id).Error
 }
 
-// RecordedResourceRepo persists aggregated site resource rows and their historical rule metadata.
+// RecordedResourceRepo 持久化聚合后的站点资源行及其历史规则元数据。
 type RecordedResourceRepo struct{ db *gorm.DB }
 
 func NewRecordedResourceRepo(db *gorm.DB) *RecordedResourceRepo {
@@ -107,7 +107,7 @@ func (r *RecordedResourceRepo) ClearSite(siteID uint) error {
 	return r.db.Where("site_id = ?", siteID).Delete(&store.RecordedResource{}).Error
 }
 
-// Upsert increments hit_count and refreshes metadata when the same resource key appears again.
+// Upsert 在同一资源键再次出现时递增 hit_count 并刷新元数据。
 func (r *RecordedResourceRepo) Upsert(rec *store.RecordedResource) error {
 	if rec == nil {
 		return nil

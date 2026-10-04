@@ -9,7 +9,7 @@ import (
 	"My-OpenWaf/internal/admin/auth"
 )
 
-// ListSessionsHandler returns active sessions for the current user (or all for admin).
+// ListSessionsHandler 返回当前用户的活跃会话（管理员可请求全部）。
 func ListSessionsHandler(d *AuthDeps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		setAuthNoStore(c)
@@ -34,7 +34,7 @@ func ListSessionsHandler(d *AuthDeps) app.HandlerFunc {
 	}
 }
 
-// ForceLogoutSessionHandler forcibly terminates a specific session by JTI.
+// ForceLogoutSessionHandler 按 JTI 强制终止指定会话。
 func ForceLogoutSessionHandler(d *AuthDeps) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		setAuthNoStore(c)

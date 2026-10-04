@@ -83,8 +83,8 @@ func TestHTTP3ResponseStreamUnwrapsCancelAware(t *testing.T) {
 	})
 }
 
-// h3ResetStreamMock implements the anonymous h3StreamResetter capability
-// (CancelWrite) that ResetFn builds its closure against.
+// h3ResetStreamMock 实现匿名能力接口 h3StreamResetter（CancelWrite），
+// ResetFn 构造的闭包正是针对它。
 type h3ResetStreamMock struct {
 	called bool
 	code   quic.StreamErrorCode
@@ -95,9 +95,9 @@ func (m *h3ResetStreamMock) CancelWrite(code quic.StreamErrorCode) {
 	m.code = code
 }
 
-// TestH3LoopbackStateResetFn verifies the drop-side reset closure wiring:
-// the closure must cancel the quota-owned stream with
-// H3_REQUEST_CANCELED without touching the state's cancel chain.
+// TestH3LoopbackStateResetFn 验证 drop 侧复位闭包的接线：
+// 闭包必须对配额所拥有的那条流执行 CancelWrite(H3_REQUEST_CANCELED)，
+// 且不得触碰 state 自身的 cancel 链。
 func TestH3LoopbackStateResetFn(t *testing.T) {
 	t.Run("captured stream is reset with request-canceled", func(t *testing.T) {
 		state := &http3LoopbackRequestState{}

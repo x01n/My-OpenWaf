@@ -39,12 +39,14 @@ const (
 	aggregatorRedisHashTTL = 10 * time.Minute
 )
 
-// recordedResourceAggregator 在内存中按资源唯一键聚合 AppRoute 命中，周期性批量
-// 落库，替代“每命中请求 spawn goroutine + 同步 Upsert”的高频写放大。
-//
-// 内存上界由 aggregatorMaxKeys 保证：达到上限后新键的写入降级为同步单条 Upsert，
-// 避免 map 无界增长导致 OOM。落库依赖 RecordedResourceRepo.Upsert 的
-// hit_count 累加语义，因此窗口内累计的 HitCount 会被正确合入既有行。
+/**
+ * recordedResourceAggregator 在内存中按资源唯一键聚合 AppRoute 命中，周期性批量
+ * 落库，替代“每命中请求 spawn goroutine + 同步 Upsert”的高频写放大。
+ *
+ * 内存上界由 aggregatorMaxKeys 保证：达到上限后新键的写入降级为同步单条 Upsert，
+ * 避免 map 无界增长导致 OOM。落库依赖 RecordedResourceRepo.Upsert 的
+ * hit_count 累加语义，因此窗口内累计的 HitCount 会被正确合入既有行。
+ */
 type recordedResourceAggregator struct {
 	repo *repository.RecordedResourceRepo
 	log  *slog.Logger
@@ -66,8 +68,10 @@ type recordedResourceAggregator struct {
 	closeOnce sync.Once
 }
 
-// NewRecordedResourceAggregator 构造聚合器并启动后台 flush 循环。repo 为 nil 时
-// 返回 nil，调用方据此回退为“不记录”。
+/**
+ * NewRecordedResourceAggregator 构造聚合器并启动后台 flush 循环。repo 为 nil 时
+ * 返回 nil，调用方据此回退为“不记录”。
+ */
 func NewRecordedResourceAggregator(repo *repository.RecordedResourceRepo, log *slog.Logger) *recordedResourceAggregator {
 	if repo == nil {
 		return nil
@@ -87,8 +91,10 @@ func NewRecordedResourceAggregator(repo *repository.RecordedResourceRepo, log *s
 	return a
 }
 
-// SetRedis 注入可选的 RedisKV。传入非 nil 后，flush 在 Redis 可用时走跨节点
-// hash 累加，由 sink 循环回写 DB；Redis 不可用时自动回退纯内存 + 本地 DB。
+/**
+ * SetRedis 注入可选的 RedisKV。传入非 nil 后，flush 在 Redis 可用时走跨节点
+ * hash 累加，由 sink 循环回写 DB；Redis 不可用时自动回退纯内存 + 本地 DB。
+ */
 func (a *recordedResourceAggregator) SetRedis(kv *cache.RedisKV) {
 	if a == nil {
 		return
@@ -117,8 +123,10 @@ func aggregatorKey(rec *store.RecordedResource) string {
 	return b.String()
 }
 
-// Record 聚合一次命中。已存在的键累加 hit_count 并刷新最新元数据；新键在未达上限
-// 时纳入内存，达上限时降级为同步单条 Upsert 以保证内存封顶。
+/**
+ * Record 聚合一次命中。已存在的键累加 hit_count 并刷新最新元数据；新键在未达上限
+ * 时纳入内存，达上限时降级为同步单条 Upsert 以保证内存封顶。
+ */
 func (a *recordedResourceAggregator) Record(siteID uint, ids []uint, m *appresource.Material) {
 	if a == nil {
 		return
@@ -149,8 +157,10 @@ func (a *recordedResourceAggregator) Record(siteID uint, ids []uint, m *appresou
 	a.mu.Unlock()
 }
 
-// mergeRecordedMetadata 用最新一次命中的元数据覆盖累积条目，使落库行反映最近状态。
-// hit_count 已在调用处累加，此处只刷新可变元数据字段。
+/**
+ * mergeRecordedMetadata 用最新一次命中的元数据覆盖累积条目，使落库行反映最近状态。
+ * hit_count 已在调用处累加，此处只刷新可变元数据字段。
+ */
 func mergeRecordedMetadata(dst, src *store.RecordedResource) {
 	dst.ClientIP = src.ClientIP
 	dst.StatusCode = src.StatusCode
@@ -188,8 +198,10 @@ func (a *recordedResourceAggregator) loop() {
 	}
 }
 
-// flush 原子换出待写映射；Redis 可用时累加进跨节点 hash（由 sink 回写 DB），
-// 否则逐条本地 Upsert。换出后释放锁，IO 不阻塞 Record 热路径。
+/**
+ * flush 原子换出待写映射；Redis 可用时累加进跨节点 hash（由 sink 回写 DB），
+ * 否则逐条本地 Upsert。换出后释放锁，IO 不阻塞 Record 热路径。
+ */
 func (a *recordedResourceAggregator) flush() {
 	a.mu.Lock()
 	if len(a.pending) == 0 {
@@ -213,8 +225,10 @@ func (a *recordedResourceAggregator) flush() {
 	}
 }
 
-// flushToRedis 把本批聚合送入 Redis：计数走 HINCRBY 跨节点累加，元数据以资源
-// 唯一键为 field 存 JSON。成功返回 true。field 名直接复用内存聚合键。
+/**
+ * flushToRedis 把本批聚合送入 Redis：计数走 HINCRBY 跨节点累加，元数据以资源
+ * 唯一键为 field 存 JSON。成功返回 true。field 名直接复用内存聚合键。
+ */
 func (a *recordedResourceAggregator) flushToRedis(batch map[string]*store.RecordedResource) bool {
 	counts := make(map[string]int64, len(batch))
 	metas := make(map[string][]byte, len(batch))
@@ -241,8 +255,10 @@ func (a *recordedResourceAggregator) flushToRedis(batch map[string]*store.Record
 	return true
 }
 
-// sinkLoop 是跨节点回写循环：周期争抢分布式锁，仅持锁者从 Redis 原子取出并清空
-// 聚合 hash，再逐条 Upsert 回 DB。Redis 不可用时该循环空转（无锁可得）。
+/**
+ * sinkLoop 是跨节点回写循环：周期争抢分布式锁，仅持锁者从 Redis 原子取出并清空
+ * 聚合 hash，再逐条 Upsert 回 DB。Redis 不可用时该循环空转（无锁可得）。
+ */
 func (a *recordedResourceAggregator) sinkLoop() {
 	defer a.wg.Done()
 	ticker := time.NewTicker(aggregatorSinkInterval)
@@ -259,8 +275,10 @@ func (a *recordedResourceAggregator) sinkLoop() {
 	}
 }
 
-// sinkOnce 争锁成功后把 Redis 聚合回写 DB。锁保证集群内同一时刻仅一个节点回写，
-// Drain 的原子取出即清空保证同一批数据不被重复 Upsert。
+/**
+ * sinkOnce 争锁成功后把 Redis 聚合回写 DB。锁保证集群内同一时刻仅一个节点回写，
+ * Drain 的原子取出即清空保证同一批数据不被重复 Upsert。
+ */
 func (a *recordedResourceAggregator) sinkOnce() {
 	if !a.redis.Available() {
 		return

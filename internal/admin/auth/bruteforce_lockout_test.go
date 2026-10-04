@@ -58,7 +58,7 @@ func TestReconfigureAppliesDefaults(t *testing.T) {
 	}
 }
 
-// ---------- 锁定触发 ----------
+// 锁定触发
 
 // TestLockoutTriggersAtThreshold 失败次数达到阈值的那一次才应锁定，之前不锁。
 func TestLockoutTriggersAtThreshold(t *testing.T) {
@@ -180,7 +180,7 @@ func TestExpiredRecordCanLockAgainAfterFullBudget(t *testing.T) {
 	}
 }
 
-// ---------- RecordSuccess ----------
+// RecordSuccess
 
 // TestRecordSuccessClearsUserCounter 成功登录应清空该 IP+用户名 的失败计数。
 func TestRecordSuccessClearsUserCounter(t *testing.T) {
@@ -216,7 +216,7 @@ func TestRecordSuccessDoesNotClearIPCounter(t *testing.T) {
 	}
 }
 
-// ---------- RemainingAttempts ----------
+// RemainingAttempts
 
 func TestRemainingAttemptsUnknownKey(t *testing.T) {
 	bf := newTestDetector(4, time.Minute)
@@ -244,7 +244,7 @@ func TestRemainingAttemptsDecrementsAndFloorsAtZero(t *testing.T) {
 	}
 }
 
-// ---------- LockoutRemaining ----------
+// LockoutRemaining
 
 func TestLockoutRemainingZeroWhenNotLocked(t *testing.T) {
 	bf := newTestDetector(3, time.Minute)
@@ -309,7 +309,7 @@ func TestIPLevelLockReportsZeroRetryAfter(t *testing.T) {
 	}
 }
 
-// ---------- Reconfigure ----------
+// Reconfigure
 
 // TestReconfigureMarksAlreadyExceededRecordsLocked 调低阈值后，既有超限记录应被补盖锁定时间戳。
 func TestReconfigureMarksAlreadyExceededRecordsLocked(t *testing.T) {

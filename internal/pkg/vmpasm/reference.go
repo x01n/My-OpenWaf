@@ -52,9 +52,11 @@ const (
 	refFlagGt
 )
 
-// NewRefMachine 解码字节码容器并分配线性内存。
-//
-// 解码失败（含一切结构缺陷）在此返回错误，与 `Verify` 同一条解码路径。
+/**
+ * NewRefMachine 解码字节码容器并分配线性内存。
+ *
+ * 解码失败（含一切结构缺陷）在此返回错误，与 `Verify` 同一条解码路径。
+ */
 func NewRefMachine(program []byte) (*RefMachine, error) {
 	dec, layout, err := decodeContainer(program)
 	if err != nil {
@@ -89,8 +91,10 @@ func (m *RefMachine) ReadOutput(n int) ([]byte, error) {
 	return out, nil
 }
 
-// Reg 返回寄存器的当前值（越界索引按 `% RegCount` 折叠，与 Rust 侧一致：
-// `panic = "abort"` 下越界 panic 会杀实例，宁可折叠不可崩）。
+/**
+ * Reg 返回寄存器的当前值（越界索引按 `% RegCount` 折叠，与 Rust 侧一致：
+ * `panic = "abort"` 下越界 panic 会杀实例，宁可折叠不可崩）。
+ */
 func (m *RefMachine) Reg(r Reg) uint64 { return m.regs[uint(r)%RegCount] }
 
 // Steps 返回已消耗的步数。
@@ -115,10 +119,12 @@ func (m *RefMachine) FlagName() string {
 	}
 }
 
-// Run 执行到停机。返回 R0 的值（程序的返回码）。
-//
-// `maxSteps` 为零表示不设预算（仅测试用）；耗尽返回 `vm_budget_exhausted`。
-// 每执行一条指令计 1 步，与 ISA §6.1 的口径一致。
+/**
+ * Run 执行到停机。返回 R0 的值（程序的返回码）。
+ *
+ * `maxSteps` 为零表示不设预算（仅测试用）；耗尽返回 `vm_budget_exhausted`。
+ * 每执行一条指令计 1 步，与 ISA §6.1 的口径一致。
+ */
 func (m *RefMachine) Run(maxSteps uint64) (uint64, error) {
 	total := len(m.prog)
 	for {
@@ -368,8 +374,10 @@ func (m *RefMachine) ea(base Reg, off int32) (int, error) {
 	return int(addr), nil
 }
 
-// checkedRange 是 `checked_range` 的包内别名，供参考解释器的原语使用。
-// 语义与 Rust `isa::checked_range` 一致：溢出与越界都报 `vm_out_of_bounds`。
+/**
+ * checkedRange 是 `checked_range` 的包内别名，供参考解释器的原语使用。
+ * 语义与 Rust `isa::checked_range` 一致：溢出与越界都报 `vm_out_of_bounds`。
+ */
 func checkedRange(addr, width, memLen uint64) (int, error) {
 	end := addr + width
 	if end < addr || end > memLen {

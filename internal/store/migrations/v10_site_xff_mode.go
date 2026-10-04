@@ -7,7 +7,7 @@ const (
 	xffModeTrustOuter = "trust_outer_waf_cidr_then_take_leftmost"
 )
 
-// V10MigrateSiteXFFModes normalizes legacy XFF mode values to the current contract.
+// V10MigrateSiteXFFModes 把 legacy 的 XFF 模式取值归一化到当前契约。
 func V10MigrateSiteXFFModes(db *gorm.DB) error {
 	if !db.Migrator().HasTable(&siteTable{}) || !db.Migrator().HasColumn(&siteTable{}, "xff_mode") {
 		return nil

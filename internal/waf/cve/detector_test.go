@@ -1082,7 +1082,7 @@ func TestCVEDetector_GraphQLIntrospectionStillDetected(t *testing.T) {
 func TestCVEDetector_NoFalsePositive(t *testing.T) {
 	d := NewCVEDetector()
 
-	// Normal requests should not trigger CVE detection
+	// 正常请求不应触发 CVE 检测
 	normalRequests := []struct {
 		name  string
 		path  string

@@ -18,15 +18,15 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// Options are DB connection parameters (kept here to avoid import cycles with [core]).
+// Options 是数据库连接参数（放在这里是为了避免与 [core] 形成导入环）。
 type Options struct {
 	Driver  string // sqlite | mysql | postgres
 	DSN     string
-	DataDir string // used when sqlite DSN is empty
+	DataDir string // sqlite 的 DSN 为空时使用
 	LogDB   bool
 }
 
-// Open returns a GORM handle for the configured SQL dialect with tuned connection pool.
+// Open 为配置的 SQL 方言返回一个带连接池调优的 GORM 句柄。
 func Open(opt Options) (*gorm.DB, error) {
 	gcfg := &gorm.Config{
 		Logger: logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{
@@ -35,8 +35,8 @@ func Open(opt Options) (*gorm.DB, error) {
 			IgnoreRecordNotFoundError: true,
 			Colorful:                  true,
 		}),
-		SkipDefaultTransaction: true, // avoid wrapping every single INSERT in a transaction
-		PrepareStmt:            true, // cache prepared statements for repeated queries
+		SkipDefaultTransaction: true, // 避免把每一条 INSERT 都包进事务
+		PrepareStmt:            true, // 缓存预处理语句，供重复查询复用
 	}
 
 	var db *gorm.DB
@@ -56,7 +56,7 @@ func Open(opt Options) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// Tune connection pool for non-SQLite databases.
+	// 非 SQLite 数据库的连接池调优。
 	if opt.Driver != "sqlite" && opt.Driver != "" {
 		sqlDB, err := db.DB()
 		if err == nil {
@@ -79,13 +79,13 @@ func openSQLite(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 		return nil, fmt.Errorf("mkdir sqlite dir: %w", err)
 	}
 
-	// SQLite pragmas for performance:
-	//   journal_mode=WAL       — concurrent reads during writes
-	//   busy_timeout=10000     — wait up to 10s on lock contention instead of immediate SQLITE_BUSY
-	//   synchronous=NORMAL     — balanced durability vs speed (safe with WAL)
-	//   cache_size=-64000      — 64MB page cache
-	//   foreign_keys=ON        — enforce FK constraints
-	//   wal_autocheckpoint=1000 — checkpoint every 1000 pages to avoid long WAL stalls
+	// SQLite 性能相关 pragma：
+	//   journal_mode=WAL       — 写入期间仍可并发读取
+	//   busy_timeout=10000     — 锁竞争时最多等待 10s，而不是立刻返回 SQLITE_BUSY
+	//   synchronous=NORMAL     — 在持久性与速度之间折中（WAL 下安全）
+	//   cache_size=-64000      — 64MB 页缓存
+	//   foreign_keys=ON        — 强制外键约束
+	//   wal_autocheckpoint=1000 — 每 1000 页做一次检查点，避免 WAL 长时间堆积
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)"
 	if opt.LogDB {
 		// 日志库 append-only 且无长事务，自动 checkpoint 窗口取 2000 页（≈8MB），
@@ -148,10 +148,12 @@ func openPostgres(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 	return db, nil
 }
 
-// preferSimpleProtocolFromDSN 在 DSN 里出现 pgbouncer=true 时改用简单协议。
-//
-// PgBouncer 的 transaction/statement 池化模式不保证同一连接，服务端 prepared
-// statement 会失效并报 "prepared statement does not exist"。此时必须退回简单协议。
+/**
+ * preferSimpleProtocolFromDSN 在 DSN 里出现 pgbouncer=true 时改用简单协议。
+ *
+ * PgBouncer 的 transaction/statement 池化模式不保证同一连接，服务端 prepared
+ * statement 会失效并报 "prepared statement does not exist"。此时必须退回简单协议。
+ */
 func preferSimpleProtocolFromDSN(dsn string) bool {
 	return strings.Contains(strings.ToLower(dsn), "pgbouncer=true")
 }

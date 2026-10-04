@@ -40,10 +40,12 @@ const (
 	h2cUpstreamRecvRefill    = 1 << 20
 )
 
-// h2cExtConnectStream 是到 h2c 上游一条扩展 CONNECT 流的全双工通道。
-//
-// readLoop 单协程解析上游帧并维护状态；Write 用 mutex 序列化并受上游
-// 窗口约束。首响应头到达前 Write 阻塞（此时 DATA 不能被对端受理）。
+/**
+ * h2cExtConnectStream 是到 h2c 上游一条扩展 CONNECT 流的全双工通道。
+ *
+ * readLoop 单协程解析上游帧并维护状态；Write 用 mutex 序列化并受上游
+ * 窗口约束。首响应头到达前 Write 阻塞（此时 DATA 不能被对端受理）。
+ */
 type h2cExtConnectStream struct {
 	conn net.Conn
 	br   *bufio.Reader
@@ -82,9 +84,11 @@ type h2cExtConnectStream struct {
 	hdrStarted  bool
 }
 
-// dialH2CExtendedConnect 拨号到 h2c 上游（prior knowledge）并发出扩展
-// CONNECT 请求头。握手结果经 HandshakeDone/ResponseStatus 暴露；写入
-// 在响应头到达前阻塞。
+/**
+ * dialH2CExtendedConnect 拨号到 h2c 上游（prior knowledge）并发出扩展
+ * CONNECT 请求头。握手结果经 HandshakeDone/ResponseStatus 暴露；写入
+ * 在响应头到达前阻塞。
+ */
 func dialH2CExtendedConnect(ctx context.Context, dialAddr string, target string, protocol string, passHeaders [][2]string) (*h2cExtConnectStream, error) {
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", dialAddr)
@@ -152,8 +156,10 @@ func (s *h2cExtConnectStream) Read(p []byte) (int, error) {
 	}
 }
 
-// Write 发送 DATA 帧净荷；在首响应头与 SETTINGS 到达前阻塞，随后受
-// 上游窗口约束。引用语义与 net.Conn 相同。
+/**
+ * Write 发送 DATA 帧净荷；在首响应头与 SETTINGS 到达前阻塞，随后受
+ * 上游窗口约束。引用语义与 net.Conn 相同。
+ */
 func (s *h2cExtConnectStream) Write(p []byte) (int, error) {
 	select {
 	case <-s.closed:

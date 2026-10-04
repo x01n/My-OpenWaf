@@ -40,7 +40,7 @@ func invokeWithSiteAndSubID(
 	return ctx
 }
 
-// ---- PathRule CRUD ----
+// PathRule CRUD
 
 func createPathRule(t *testing.T, siteID string, path, action string) *app.RequestContext {
 	t.Helper()
@@ -72,7 +72,7 @@ func TestListPathRulesReturnsSeededRules(t *testing.T) {
 		ctx.Params = param.Params{{Key: "id", Value: "1"}}
 		CreatePathRule(repo, func() error { return nil })(context.Background(), ctx)
 	}
-	// List
+	// 列表
 	var req protocol.Request
 	req.SetMethod("GET")
 	req.SetRequestURI("/api/v1/sites/1/access/path-rules")
@@ -253,7 +253,7 @@ func TestDeletePathRuleCrossSiteReturns404(t *testing.T) {
 	}
 }
 
-// ---- User CRUD ----
+// User CRUD
 
 func seedUser(t *testing.T, repo interface {
 	CreateAccessUser(*store.AccessUser) error

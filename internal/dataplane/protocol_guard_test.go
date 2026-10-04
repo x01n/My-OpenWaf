@@ -22,9 +22,11 @@ func dropReasonForTest(source string) drop.DropReason {
 	return drop.DropReason{Source: source, RuleID: "test-rule", Timestamp: time.Now()}
 }
 
-// testRawTCPConn 建立一对回环 TCP 连接：server 端模拟 WAF 服务端持有的
-// 连接（即 drop 要 RST 的一侧），client 端模拟浏览器侧，用于观察对端
-// 是否收到 RST/关闭。t.Cleanup 负责回收。
+/**
+ * testRawTCPConn 建立一对回环 TCP 连接：server 端模拟 WAF 服务端持有的
+ * 连接（即 drop 要 RST 的一侧），client 端模拟浏览器侧，用于观察对端
+ * 是否收到 RST/关闭。t.Cleanup 负责回收。
+ */
 func testRawTCPConn(t *testing.T) (server *net.TCPConn, client *net.TCPConn, ln net.Listener) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -53,9 +55,11 @@ func testRawTCPConn(t *testing.T) (server *net.TCPConn, client *net.TCPConn, ln 
 	return server, client, ln
 }
 
-// fakeTCPConn 是 *net.TCPConn 的测试替身，Close 可观察，不占用内核资源。
-// 用于「形状不符即拒绝」类断言：包裹链末端的非 *net.TCPConn 叶子必须
-// 让解析器返回 nil。
+/**
+ * fakeTCPConn 是 *net.TCPConn 的测试替身，Close 可观察，不占用内核资源。
+ * 用于「形状不符即拒绝」类断言：包裹链末端的非 *net.TCPConn 叶子必须
+ * 让解析器返回 nil。
+ */
 type fakeTCPConn struct{ closed bool }
 
 func (f *fakeTCPConn) Read(b []byte) (int, error)  { return 0, nil }
@@ -74,10 +78,11 @@ func (f *fakeTCPConn) SetWriteDeadline(t time.Time) error { return nil }
 // fakeTCPConn 必须满足 net.Conn，否则形状断言失真。
 var _ net.Conn = (*fakeTCPConn)(nil)
 
-// h2ServerConnShape mirrors x01n/http2's h2ServerConn field layout: embedded
-// exported net.Conn first, unwalkable unexported pointer after. The resolver
-// is allowed to find the embedded conn (same as upstream's NetConn), but the
-// guard's protocol check must still forbid an RST on this shape.
+/**
+ * h2ServerConnShape 镜像 x01n/http2 的 h2ServerConn 字段布局：嵌入的导出
+ * net.Conn 在前，无法遍历的未导出指针在后。解析器允许找到那个嵌入连接
+ * （与上游的 NetConn 相同），但 guard 的协议检查仍必须禁止在这种形状上发 RST。
+ */
 type h2ServerConnShape struct {
 	net.Conn
 	rw any
@@ -100,8 +105,10 @@ func TestRawTCPConnForRSTDisallowsOpaqueLeaf(t *testing.T) {
 	}
 }
 
-// TestProtocolGuardOnlyTCPLeafDropsWithExecutor 恶意 h1 请求命中 drop 时，
-// 守卫必须解析到真实 TCP 连接并关闭它（对端观察到连接关闭）。
+/**
+ * TestProtocolGuardOnlyTCPLeafDropsWithExecutor 恶意 h1 请求命中 drop 时，
+ * 守卫必须解析到真实 TCP 连接并关闭它（对端观察到连接关闭）。
+ */
 func TestProtocolGuardOnlyTCPLeafDropsWithExecutor(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
 	_ = client
@@ -126,8 +133,10 @@ func TestProtocolGuardOnlyTCPLeafDropsWithExecutor(t *testing.T) {
 	}
 }
 
-// TestProtocolGuardH2NoConnectionRST 是「错误 reset」的核心回归：h2 请求
-// 命中 drop 时绝不整连 RST，连接保持可写（无辜流不受影响）。
+/**
+ * TestProtocolGuardH2NoConnectionRST 是「错误 reset」的核心回归：h2 请求
+ * 命中 drop 时绝不整连 RST，连接保持可写（无辜流不受影响）。
+ */
 func TestProtocolGuardH2NoConnectionRST(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
 	_ = client
@@ -149,8 +158,10 @@ func TestProtocolGuardH2NoConnectionRST(t *testing.T) {
 	}
 }
 
-// TestProtocolGuardH3NoConnectionRST 镜像 h3 场景（无 TCP 连接可 RST）：
-// 守卫拒绝执行，连接不受影响。
+/**
+ * TestProtocolGuardH3NoConnectionRST 镜像 h3 场景（无 TCP 连接可 RST）：
+ * 守卫拒绝执行，连接不受影响。
+ */
 func TestProtocolGuardH3NoConnectionRST(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
 	_ = client
@@ -179,8 +190,10 @@ func TestProtocolGuardH2CNoConnectionRST(t *testing.T) {
 	}
 }
 
-// TestProtocolGuardNilContextNeverRSTs 覆盖 NewInboundProtocolGuard(nil) 与
-// 空守卫：绝不产生连接级副作用。
+/**
+ * TestProtocolGuardNilContextNeverRSTs 覆盖 NewInboundProtocolGuard(nil) 与
+ * 空守卫：绝不产生连接级副作用。
+ */
 func TestProtocolGuardNilContextNeverRSTs(t *testing.T) {
 	g := NewInboundProtocolGuard(nil)
 	if g.ProtocolName() != "" {
@@ -191,8 +204,10 @@ func TestProtocolGuardNilContextNeverRSTs(t *testing.T) {
 	}
 }
 
-// TestProtocolGuardUnknownProtocolNeverRSTs 覆盖未知/缺失协议值：宁可放弃
-// RST，也不闭错连接。
+/**
+ * TestProtocolGuardUnknownProtocolNeverRSTs 覆盖未知/缺失协议值：宁可放弃
+ * RST，也不闭错连接。
+ */
 func TestProtocolGuardUnknownProtocolNeverRSTs(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
 	_ = client
@@ -205,10 +220,12 @@ func TestProtocolGuardUnknownProtocolNeverRSTs(t *testing.T) {
 	}
 }
 
-// TestRawTCPConnForRSTUnwrapsStandardConn 验证 hertz standard.Conn 的
-// 未导出 c 字段形态（单 net.Conn 字段 + 缓冲字段）能被 reflect 兜底解析。
-// standardConnShape 必须像生产 standard.Conn 一样整个满足 net.Conn
-// （方法转发到 c），才能让解析器走到字段扫描路径。
+/**
+ * TestRawTCPConnForRSTUnwrapsStandardConn 验证 hertz standard.Conn 的
+ * 未导出 c 字段形态（单 net.Conn 字段 + 缓冲字段）能被 reflect 兜底解析。
+ * standardConnShape 必须像生产 standard.Conn 一样整个满足 net.Conn
+ * （方法转发到 c），才能让解析器走到字段扫描路径。
+ */
 type standardConnShape struct {
 	c       net.Conn
 	buf     [8]byte
@@ -242,8 +259,10 @@ func TestRawTCPConnForRSTUnwrapsStandardConn(t *testing.T) {
 	}
 }
 
-// TestRawTCPConnForRSTWalksFixURIChain 覆盖 h1 生产包裹链的完整展开：
-// fixURIHertzConn → tls.Conn → TCP。
+/**
+ * TestRawTCPConnForRSTWalksFixURIChain 覆盖 h1 生产包裹链的完整展开：
+ * fixURIHertzConn → tls.Conn → TCP。
+ */
 func TestRawTCPConnForRSTWalksFixURIChain(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
 	_ = client
@@ -257,16 +276,20 @@ func TestRawTCPConnForRSTWalksFixURIChain(t *testing.T) {
 	}
 }
 
-// TestProtocolGuardH2ShapeHasNoExportablePatterns 固化 h2 形状契约：
-// h2ServerConnShape 必须与 x01n 原型一致（嵌入 net.Conn + 一个不可导出字段）。
+/**
+ * TestProtocolGuardH2ShapeHasNoExportablePatterns 固化 h2 形状契约：
+ * h2ServerConnShape 必须与 x01n 原型一致（嵌入 net.Conn + 一个不可导出字段）。
+ */
 func TestProtocolGuardH2ShapeHasNoExportablePatterns(t *testing.T) {
 	if n := reflect.TypeOf(h2ServerConnShape{}).NumField(); n != 2 {
 		t.Fatalf("h2ServerConnShape fields = %d, want 2 (embedded net.Conn + rw)", n)
 	}
 }
 
-// TestProtocolGuardDisabledExecutorStillRSTs 对应 handler 的 else 分支：
-// drop 策略禁用时守卫仍直接关闭 h1 连接（维持旧 conn.Close 语义）。
+/**
+ * TestProtocolGuardDisabledExecutorStillRSTs 对应 handler 的 else 分支：
+ * drop 策略禁用时守卫仍直接关闭 h1 连接（维持旧 conn.Close 语义）。
+ */
 func TestProtocolGuardDisabledExecutorStillRSTs(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
 	_ = client

@@ -13,29 +13,34 @@ import (
 	"time"
 )
 
-// ResponseEntry is a cached upstream response.
+// ResponseEntry 表示一条已缓存的上游响应。
 type ResponseEntry struct {
 	StatusCode  int
 	ContentType string
 	Body        []byte
-	// Header holds hop-by-hop-sanitized upstream headers (e.g. Content-Encoding: br) so
-	// cached hits match live fetches. Nil means legacy entries with Content-Type only.
+	/**
+	 * Header 保存经过逐跳清理的上游响应头（例如 Content-Encoding: br），
+	 * 使缓存命中与实时抓取保持一致。
+	 *
+	 * nil 表示仅含 Content-Type 的历史条目。
+	 */
 	Header     http.Header
 	CachedAt   int64
-	TTL        int64 // seconds
+	TTL        int64 // 秒
 	SiteID     uint
 	TargetURI  string
 	sizeBytes  int64
-	lastAccess int64 // unix nano, updated atomically on cache hit
+	lastAccess int64 // Unix 纳秒时间戳，缓存命中时以原子方式更新
 }
 
-// IsExpired returns true if the entry has passed its TTL.
+// IsExpired 报告条目是否已超过自身 TTL。
 func (e *ResponseEntry) IsExpired() bool {
 	return e == nil || time.Now().Unix()-e.CachedAt > e.TTL
 }
 
-// IsStaleWithin reports whether an expired entry is still inside the configured
-// stale-if-error window.
+/**
+ * IsStaleWithin 报告一个已过期条目是否仍位于调用方给定的 stale-if-error 窗口内。
+ */
 func (e *ResponseEntry) IsStaleWithin(maxStaleSeconds int64) bool {
 	if e == nil || maxStaleSeconds <= 0 {
 		return false
@@ -44,8 +49,11 @@ func (e *ResponseEntry) IsStaleWithin(maxStaleSeconds int64) bool {
 	return age > e.TTL && age-e.TTL <= maxStaleSeconds
 }
 
-// ResponseCache is an in-memory LRU-like response cache for safe (GET) requests.
-// Uses sharded mutexes to reduce lock contention on the hot path.
+/**
+ * ResponseCache 是面向安全方法（GET）请求的内存 LRU 式响应缓存。
+ *
+ * 采用分片互斥锁，降低热路径上的锁竞争。
+ */
 type ResponseCache struct {
 	shards       [64]shard
 	maxSize      int64
@@ -61,9 +69,8 @@ type ResponseCache struct {
 	accountingMu sync.Mutex
 	fillMu       sync.Mutex
 	fills        map[string]chan struct{}
-	// targetIndex maps a site/path pair to the cache keys that represent it.
-	// Unsafe requests can then invalidate only affected entries instead of
-	// scanning every shard.
+	// targetIndex 把「站点 + 路径」映射到代表它的缓存键。
+	// 这样不安全方法只需失效受影响的条目，而不必扫描所有分片。
 	targetIndex map[string]map[string]struct{}
 
 	// hits/misses 记录读取命中与未命中次数，供 /metrics 暴露命中率。
@@ -71,6 +78,7 @@ type ResponseCache struct {
 	misses atomic.Int64
 }
 
+// shard 是 ResponseCache 的一个分片。
 type shard struct {
 	mu    sync.RWMutex
 	items map[string]*ResponseEntry
@@ -81,12 +89,11 @@ const (
 	defaultResponseCacheTTLSec = 60
 )
 
-// NewResponseCache creates a cache with the given max size in bytes and default TTL.
+// NewResponseCache 创建缓存，参数为最大容量（字节）与默认 TTL。
 func NewResponseCache(maxSizeMB int, defaultTTLSec int) *ResponseCache {
-	// Config.LoadConfigFromEnv already supplies these defaults, but constructors
-	// are also used by tests and embedded callers. Treat zero/negative values as
-	// the documented defaults instead of silently creating a zero-capacity cache
-	// whose entries expire immediately.
+	// Config.LoadConfigFromEnv 已提供这些默认值，但构造函数同样被测试和
+	// 嵌入式调用方使用。这里把零值/负值按文档默认值处理，而不是静默地
+	// 建出一个容量为零、条目立即过期的缓存。
 	if maxSizeMB <= 0 {
 		maxSizeMB = defaultResponseCacheMB
 	}
@@ -114,7 +121,7 @@ func NewResponseCache(maxSizeMB int, defaultTTLSec int) *ResponseCache {
 	return rc
 }
 
-// MaxEntryBodySize returns the largest body size accepted by Set.
+// MaxEntryBodySize 返回 Set 可接受的最大响应体字节数。
 func (rc *ResponseCache) MaxEntryBodySize() int64 {
 	if rc == nil || rc.maxSize <= 0 {
 		return 0
@@ -122,7 +129,7 @@ func (rc *ResponseCache) MaxEntryBodySize() int64 {
 	return rc.maxSize / 10
 }
 
-// CacheKey generates a deterministic key from method + host + path + query.
+// CacheKey 由 method + host + path + query 生成确定性缓存键。
 func CacheKey(method, host, path, query string) string {
 	var stack [512]byte
 	need := len(method) + len(host) + len(path) + len(query) + 3
@@ -143,7 +150,7 @@ func CacheKey(method, host, path, query string) string {
 	return string(encoded[:])
 }
 
-// CacheKeyBytes generates a deterministic key from method + host + path + query without forcing byte inputs through strings.
+// CacheKeyBytes 由 method + host + path + query 生成确定性缓存键，且不强制把字节输入转成 string。
 func CacheKeyBytes(method string, host []byte, path string, query []byte) string {
 	var stack [512]byte
 	need := len(method) + len(host) + len(path) + len(query) + 3
@@ -164,7 +171,7 @@ func CacheKeyBytes(method string, host []byte, path string, query []byte) string
 	return string(encoded[:])
 }
 
-// CacheKeyWithHostParts generates a cache key while building the host component inside the hash input.
+// CacheKeyWithHostParts 生成缓存键，并在哈希输入内部拼装 host 部分。
 func CacheKeyWithHostParts(method, bind string, siteID uint64, normalizedHost []byte, path string, query []byte) string {
 	var stack [512]byte
 	need := len(method) + len(bind) + 1 + 20 + 1 + len(normalizedHost) + len(path) + len(query) + 3
@@ -189,7 +196,7 @@ func CacheKeyWithHostParts(method, bind string, siteID uint64, normalizedHost []
 	return string(encoded[:])
 }
 
-// CacheKeyWithHostPartsBytesPath generates a cache key without forcing Hertz path bytes through a string.
+// CacheKeyWithHostPartsBytesPath 生成缓存键，且不把 Hertz 的路径字节转成 string。
 func CacheKeyWithHostPartsBytesPath(method, bind string, siteID uint64, normalizedHost []byte, path []byte, query []byte) string {
 	var stack [512]byte
 	need := len(method) + len(bind) + 1 + 20 + 1 + len(normalizedHost) + len(path) + len(query) + 3
@@ -215,7 +222,7 @@ func CacheKeyWithHostPartsBytesPath(method, bind string, siteID uint64, normaliz
 }
 
 func (rc *ResponseCache) shardFor(key string) *shard {
-	// Simple hash-based shard selection.
+	// 简单的哈希分片选择。
 	var h uint64
 	for _, b := range key {
 		h = h*31 + uint64(b)
@@ -223,8 +230,11 @@ func (rc *ResponseCache) shardFor(key string) *shard {
 	return &rc.shards[h%64]
 }
 
-// Lookup returns a cached entry when present, including entries past TTL.
-// It does not delete expired entries; use for stale fallback after upstream errors.
+/**
+ * Lookup 在条目存在时返回它，包含已超过 TTL 的条目。
+ *
+ * 它不会删除过期条目，用于上游报错后的陈旧数据兜底。
+ */
 func (rc *ResponseCache) Lookup(key string) *ResponseEntry {
 	if rc == nil || !rc.enabled.Load() {
 		return nil
@@ -242,9 +252,11 @@ func (rc *ResponseCache) Lookup(key string) *ResponseEntry {
 	return entry
 }
 
-// LookupIfGeneration returns a cached entry only when the supplied generation
-// is still current. It is used by stale fallback paths that may finish after
-// another request clears the cache.
+/**
+ * LookupIfGeneration 仅在传入的代际号仍为当前代际时返回缓存条目。
+ *
+ * 供陈旧兜底路径使用：这类路径完成时，另一个请求可能已经清空了缓存。
+ */
 func (rc *ResponseCache) LookupIfGeneration(generation uint64, key string) *ResponseEntry {
 	if rc == nil || !rc.enabled.Load() {
 		return nil
@@ -265,10 +277,12 @@ func (rc *ResponseCache) LookupIfGeneration(generation uint64, key string) *Resp
 	return entry
 }
 
-// LookupFreshIfGeneration returns a non-expired entry without deleting an
-// expired backup. It is used by followers that have waited for a fill: calling
-// Get in that situation could remove the stale-if-error entry that the leader
-// still needs for a safe fallback.
+/**
+ * LookupFreshIfGeneration 返回未过期的条目，且不删除已过期的备份条目。
+ *
+ * 供已等待过一次回填的跟随者使用：此情此景下调用 Get 会删掉领导者
+ * 仍需要用作安全兜底的 stale-if-error 条目。
+ */
 func (rc *ResponseCache) LookupFreshIfGeneration(generation uint64, key string) *ResponseEntry {
 	entry := rc.LookupIfGeneration(generation, key)
 	if entry == nil || entry.IsExpired() {
@@ -283,8 +297,10 @@ func (rc *ResponseCache) LookupFreshIfGeneration(generation uint64, key string) 
 	return entry
 }
 
-// LookupStaleIfGeneration returns an expired entry only while it is inside the
-// caller's explicit stale-if-error window and the cache generation is unchanged.
+/**
+ * LookupStaleIfGeneration 仅在过期条目仍处于调用方给定的 stale-if-error
+ * 窗口内、且缓存代际未变时返回它。
+ */
 func (rc *ResponseCache) LookupStaleIfGeneration(generation uint64, key string, maxStaleSeconds int64) *ResponseEntry {
 	entry := rc.LookupIfGeneration(generation, key)
 	if !entry.IsStaleWithin(maxStaleSeconds) {
@@ -336,8 +352,11 @@ func (rc *ResponseCache) HitStats() (hits, misses int64) {
 	return rc.hits.Load(), rc.misses.Load()
 }
 
-// Generation returns the current cache generation. Callers that may complete
-// an in-flight fetch after Clear should pass this value to SetIfGeneration.
+/**
+ * Generation 返回当前缓存代际号。
+ *
+ * 可能在 Clear 之后才完成的在途抓取，应把该值传给 SetIfGeneration。
+ */
 func (rc *ResponseCache) Generation() uint64 {
 	if rc == nil {
 		return 0
@@ -345,8 +364,12 @@ func (rc *ResponseCache) Generation() uint64 {
 	return rc.generation.Load()
 }
 
-// Set stores a response in the cache. header is optional hop-by-hop-sanitized upstream
-// headers (clone is stored); nil stores only Content-Type/body semantics.
+/**
+ * Set 把一条响应写入缓存。
+ *
+ * header 为可选的、经过逐跳清理的上游响应头（会存入其克隆）；传 nil
+ * 表示只保留 Content-Type 与响应体语义。
+ */
 func (rc *ResponseCache) Set(key string, statusCode int, contentType string, body []byte, ttl int64, headers ...http.Header) {
 	if rc == nil {
 		return
@@ -361,9 +384,11 @@ func (rc *ResponseCache) Set(key string, statusCode int, contentType string, bod
 	rc.clearMu.RUnlock()
 }
 
-// SetIfGeneration stores a response only when generation still matches the
-// current cache generation. It prevents an in-flight fetch started before
-// Clear from repopulating the cache after the clear has completed.
+/**
+ * SetIfGeneration 仅在代际号仍与当前缓存代际一致时写入响应。
+ *
+ * 它防止 Clear 之前启动的在途抓取，在清空完成后又把缓存填回去。
+ */
 func (rc *ResponseCache) SetIfGeneration(generation uint64, key string, statusCode int, contentType string, body []byte, ttl int64, headers ...http.Header) bool {
 	if rc == nil {
 		return false
@@ -377,8 +402,10 @@ func (rc *ResponseCache) SetIfGeneration(generation uint64, key string, statusCo
 	return rc.setIfGenerationLocked(generation, 0, "", key, statusCode, contentType, body, ttl, header)
 }
 
-// SetForSiteIfGeneration stores an immutable response with site and target URI
-// metadata so unsafe methods can invalidate only the affected site resource.
+/**
+ * SetForSiteIfGeneration 写入一条不可变响应，并带上站点与目标 URI 元数据，
+ * 使不安全方法只需失效受影响的站点资源。
+ */
 func (rc *ResponseCache) SetForSiteIfGeneration(generation uint64, siteID uint, targetURI, key string, statusCode int, contentType string, body []byte, ttl int64, headers ...http.Header) bool {
 	if rc == nil {
 		return false
@@ -451,8 +478,8 @@ func (rc *ResponseCache) setIfGenerationLocked(generation uint64, siteID uint, t
 }
 
 func estimateResponseEntrySize(key, targetURI, contentType string, body []byte, header http.Header) int64 {
-	// The fixed allowance covers the entry object, map slot, string/slice headers,
-	// pointers, and allocator metadata. Variable data is counted exactly.
+	// 固定开销用于覆盖条目对象本身、map 槽位、string/slice 头部、
+	// 指针以及分配器元数据；可变数据则按实际字节精确计入。
 	const fixedOverhead = int64(256)
 	size := fixedOverhead + int64(len(key)+len(targetURI)+len(contentType)+len(body))
 	for name, values := range header {
@@ -489,8 +516,7 @@ func (rc *ResponseCache) evictToMaxSizeLocked() {
 		s := &rc.shards[i]
 		s.mu.Lock()
 		for k, v := range s.items {
-			// Use the subtraction-based expiry check to avoid overflowing when a
-			// caller supplies a very large TTL.
+			// 采用减法形式的过期判定，避免调用方传入极大 TTL 时溢出。
 			if v.IsExpired() {
 				delete(s.items, k)
 				rc.curSize.Add(-v.sizeBytes)
@@ -543,9 +569,12 @@ func (rc *ResponseCache) evictToMaxSizeLocked() {
 	evictCandidatePool.Put(cp)
 }
 
-// BeginFill elects one leader for a cache key. Followers wait for that fill,
-// recheck the cache, and may fetch independently when the leader's response was
-// not cacheable. The returned release function must be called by the leader.
+/**
+ * BeginFill 为某个缓存键选举唯一的领导者。
+ *
+ * 跟随者等待该次回填，之后重新检查缓存；若领导者的响应不可缓存，
+ * 跟随者可以自行发起抓取。返回的 release 函数必须由领导者调用。
+ */
 func (rc *ResponseCache) BeginFill(ctx context.Context, key string) (leader bool, release func(), err error) {
 	if rc == nil {
 		return true, func() {}, nil
@@ -579,9 +608,12 @@ func (rc *ResponseCache) BeginFill(ctx context.Context, key string) (leader bool
 	}, nil
 }
 
-// PurgeSiteTarget removes cached GET responses for the same site and path. All
-// query variants are removed because an unsafe request can mutate shared state
-// represented by any query form of that resource.
+/**
+ * PurgeSiteTarget 清除同一站点、同一路径下已缓存的 GET 响应。
+ *
+ * 所有查询参数变体都会被删除，因为一个不安全请求可能改变该资源
+ * 任意查询形式所代表的共享状态。
+ */
 func (rc *ResponseCache) PurgeSiteTarget(siteID uint, targetURI string) {
 	if rc == nil || siteID == 0 {
 		return
@@ -589,7 +621,7 @@ func (rc *ResponseCache) PurgeSiteTarget(siteID uint, targetURI string) {
 	targetPath := cacheTargetPath(targetURI)
 	rc.clearMu.Lock()
 	defer rc.clearMu.Unlock()
-	// Reject cache fills that started before this invalidation.
+	// 拒绝在本次失效之前启动的缓存回填。
 	rc.generation.Add(1)
 	rc.accountingMu.Lock()
 	defer rc.accountingMu.Unlock()
@@ -651,7 +683,7 @@ func cacheTargetPath(targetURI string) string {
 	return targetURI
 }
 
-// SetEnabled toggles the cache on/off.
+// SetEnabled 打开或关闭缓存。
 func (rc *ResponseCache) SetEnabled(v bool) {
 	if rc == nil {
 		return
@@ -683,7 +715,7 @@ func (rc *ResponseCache) Clear() {
 	rc.entryCount.Store(0)
 }
 
-// Stats returns current cache statistics.
+// Stats 返回当前缓存统计：条目数与占用字节数。
 func (rc *ResponseCache) Stats() (entries int, sizeBytes int64) {
 	if rc == nil {
 		return 0, 0
@@ -695,7 +727,7 @@ func (rc *ResponseCache) Stats() (entries int, sizeBytes int64) {
 	return int(rc.entryCount.Load()), rc.curSize.Load()
 }
 
-// Close stops the background cleaner.
+// Close 停止后台清理协程。
 func (rc *ResponseCache) Close() {
 	if rc == nil {
 		return
@@ -718,9 +750,12 @@ func (rc *ResponseCache) cleaner() {
 	}
 }
 
-// cleanExpiredEntries removes expired entries and keeps the reverse target
-// index in sync. It is split from cleaner so expiry cleanup can be tested
-// deterministically without waiting for the background ticker.
+/**
+ * cleanExpiredEntries 删除过期条目，并保持反向目标索引同步。
+ *
+ * 它与 cleaner 分开，是为了让过期清理可以在不等待后台 ticker 的情况下
+ * 被确定性地测试。
+ */
 func (rc *ResponseCache) cleanExpiredEntries() {
 	if rc == nil {
 		return

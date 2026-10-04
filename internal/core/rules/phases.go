@@ -28,7 +28,7 @@ import (
 	"My-OpenWaf/internal/waf/ratelimit"
 )
 
-// MatchCtx is the subset of request data matchers need.
+// MatchCtx 是匹配器所需的请求数据子集。
 type MatchCtx struct {
 	ClientIP         net.IP
 	Method           string
@@ -115,7 +115,7 @@ func NewACLPhase(rules []Compiled) pipeline.Phase {
 	return &aclPhase{rules: filtered, needsDerivedHeaders: compiledRulesNeedDerivedHeaders(filtered)}
 }
 
-// NewACLPhasePrecompiled creates an ACL phase from already-partitioned rules (no filtering needed).
+// NewACLPhasePrecompiled 由已分区的规则创建 ACL 阶段（无需再过滤）。
 func NewACLPhasePrecompiled(rules []Compiled) pipeline.Phase {
 	return &aclPhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
 }
@@ -136,7 +136,7 @@ func NewSignaturePhase(rules []Compiled) pipeline.Phase {
 	return &signaturePhase{rules: filtered, needsDerivedHeaders: compiledRulesNeedDerivedHeaders(filtered)}
 }
 
-// NewSignaturePhasePrecompiled creates a signature phase from already-partitioned rules.
+// NewSignaturePhasePrecompiled 由已分区的规则创建 signature 阶段。
 func NewSignaturePhasePrecompiled(rules []Compiled) pipeline.Phase {
 	return &signaturePhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
 }
@@ -157,7 +157,7 @@ func NewCustomPhase(rules []Compiled) pipeline.Phase {
 	return &customPhase{rules: filtered, needsDerivedHeaders: compiledRulesNeedDerivedHeaders(filtered)}
 }
 
-// NewCustomPhasePrecompiled creates a custom phase from already-partitioned rules.
+// NewCustomPhasePrecompiled 由已分区的规则创建 custom 阶段。
 func NewCustomPhasePrecompiled(rules []Compiled) pipeline.Phase {
 	return &customPhase{rules: ensureCompiledMetadata(rules), needsDerivedHeaders: compiledRulesNeedDerivedHeaders(rules)}
 }
@@ -414,21 +414,21 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 }
 
 type botPhase struct {
-	rep       *iprep.IPReputation          // optional, for recording violations
-	geo       *geoip.MaxMindResolver       // optional, for GeoIP scoring
-	threshold int                          // score threshold for blocking
-	limiter   ratelimit.RateLimiterBackend // optional, for behaviour (request rate) scoring
+	rep       *iprep.IPReputation          // 可选，用于记录违规
+	geo       *geoip.MaxMindResolver       // 可选，用于 GeoIP 评分
+	threshold int                          // 拦截所用的评分阈值
+	limiter   ratelimit.RateLimiterBackend // 可选，用于行为（请求速率）评分
 	rateMax   int                          // 限流窗口阈值，行为分换算基准
 }
 
-// NewBotPhase creates a bot-detection pipeline phase without GeoIP weighting.
-// Kept for callers that only need the two-module (UA + fingerprint) path.
+// NewBotPhase 创建不带 GeoIP 加权的 bot 检测管道阶段。
+// 保留给只需要两模块（UA + 指纹）路径的调用方。
 func NewBotPhase(rep *iprep.IPReputation) pipeline.Phase {
 	return &botPhase{rep: rep, threshold: 80}
 }
 
-// NewBotPhaseWithGeo creates a bot-detection pipeline phase that uses the
-// two-phase PreScreen → DeepScore flow with GeoIP weighting.
+// NewBotPhaseWithGeo 创建带 GeoIP 加权的 bot 检测管道阶段，
+// 采用 PreScreen → DeepScore 两阶段流程。
 func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *geoip.MaxMindResolver, threshold int) pipeline.Phase {
 	return NewBotPhaseWithGeoAndLimiter(rep, geo, threshold, nil, 0)
 }
@@ -455,8 +455,8 @@ func NewBotPhaseWithGeoAndLimiter(rep *iprep.IPReputation, geo *geoip.MaxMindRes
 }
 
 /**
- * challengePassIdentity returns the immutable pre-plugin identity when the
- * dataplane captured it, while preserving direct RequestCtx callers.
+ * challengePassIdentity 在数据面已捕获改写前身份时返回该不可变身份，
+ * 同时兼容直接构造 RequestCtx 的调用方。
  */
 func challengePassIdentity(ctx *pipeline.RequestCtx) (string, string) {
 	if ctx.ChallengeIdentityCaptured {
@@ -497,7 +497,7 @@ func (p *botPhase) behaviorScore(ctx *pipeline.RequestCtx) int {
 const botBehaviorKeySuffix = "|bot"
 
 func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
-	// Skip challenge for requests that already passed a signed verification cookie.
+	// 已通过签名验证 cookie 的请求跳过挑战。
 	cookie, userAgent := challengePassIdentity(ctx)
 	if cookie != "" && challenge.VerifyChallengePassCookieWithClaims(cookie, challenge.ChallengePassClaims{Host: ctx.Host, ClientIP: ctx.ClientIP, UserAgent: userAgent, SiteID: ctx.SiteID, Bind: ctx.Bind}, time.Now()) {
 		return action.Pass(), false
@@ -518,7 +518,7 @@ func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 
 func (p *botPhase) storeBotScore(ctx *pipeline.RequestCtx, v bot.BotVerdict, bs bot.BotScore) {
 	if v.Category == "human" || v.Category == "good" {
-		return // Don't log benign traffic to save DB writes
+		return // 良性流量不写库，省下 DB 写入
 	}
 	// 档位→动作的唯一映射：与 verdictToResult 共用 BotTier，避免双写。
 	actionStr := v.Tier.LogAction()
@@ -621,8 +621,8 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 				return result, result.IsTerminal()
 			}
 		}
-		// Fallback: scan raw body for filenames that Go's multipart parser
-		// may miss (path traversal stripped by filepath.Base, space-extension bypass).
+		// 兜底：扫描原始请求体，找出 Go 的 multipart 解析器可能漏掉的文件名
+		// （被 filepath.Base 剥掉的路径穿越、空格扩展名绕过）。
 		if uploadHit, ok := owasp.CheckRawMultipartFilenames(ctx.Body); ok {
 			if !owasp.ShouldSkipRule(uploadHit.RuleID, ctx.Path, overrides) {
 				result := owaspHitResult(uploadHit, p.cfg, overrides)
@@ -637,7 +637,7 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	}
 	bodyTargets := ctx.BodyTargets
 
-	// Check HTTP method for unusual/dangerous methods before full OWASP scan.
+	// 在完整 OWASP 扫描之前先检查 HTTP 方法是否异常/危险。
 	if protoEnabled {
 		if methodHit, ok := owasp.CheckMethodViolation(ctx.Method, ctx.Headers); ok {
 			if !owasp.ShouldSkipRule(methodHit.RuleID, ctx.Path, overrides) {
@@ -705,7 +705,7 @@ func newCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) *cvePha
 	return phase
 }
 
-// NewCVEPhase creates a pipeline phase that runs CVE-specific detection.
+// NewCVEPhase 创建运行 CVE 专项检测的管道阶段。
 func NewCVEPhase(cfg *store.ProtectionConfig, detector *cve.CVEDetector) pipeline.Phase {
 	return newCVEPhase(cfg, detector)
 }
@@ -757,7 +757,7 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		return action.Pass(), false
 	}
 
-	// Default: use configured CVE action, then rule-level action, then auto-drop.
+	// 默认顺序：先用配置的 CVE 动作，再用规则级动作，最后才自动 drop。
 	cveAction := p.cfg.CVEAction
 	if cveAction == "" {
 		cveAction = "intercept"
@@ -795,7 +795,7 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		}
 	}
 
-	// Auto-escalate to Drop for critical/high severity CVEs when enabled and the rule did not choose an action.
+	// 严重/高危 CVE 在开关打开且规则未指定动作时，自动升级为 Drop。
 	if !explicitAction {
 		switch best.Severity {
 		case "critical":
@@ -841,7 +841,7 @@ func (p *cvePhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return result, result.IsTerminal()
 }
 
-// looksLikeJSON returns true if the first non-whitespace byte is { or [.
+// looksLikeJSON 判断首个非空白字节是否为 { 或 [。
 func looksLikeJSON(body []byte) bool {
 	for _, b := range body {
 		switch b {
@@ -856,7 +856,7 @@ func looksLikeJSON(body []byte) bool {
 	return false
 }
 
-// looksLikeFormEncoded returns true if the body contains key=value&... patterns.
+// looksLikeFormEncoded 判断请求体是否含 key=value&... 形态。
 func looksLikeFormEncoded(body []byte) bool {
 	if len(body) == 0 || len(body) > 65536 {
 		return false
@@ -911,10 +911,13 @@ func shouldScanOpaqueBodyTarget(body []byte) bool {
 		containsFoldASCIIBytes(body, "deserializ")
 }
 
-// extractBodyTargets parses the request body based on content type and returns
-// individual values to scan for attack payloads.
-// When Content-Type is missing or misleading, the body is also sniffed to detect
-// the actual format and prevent evasion via header manipulation.
+/**
+ * extractBodyTargets 依据 Content-Type 解析请求体，返回可逐一扫描攻击载荷的
+ * 独立取值。
+ *
+ * Content-Type 缺失或有误导性时还会对请求体做嗅探，判定其真实格式，
+ * 防止通过篡改头部绕过检测。
+ */
 func extractBodyTargets(body []byte, contentType string) []string {
 	if len(body) == 0 {
 		return nil
@@ -970,9 +973,9 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		}
 	}
 
-	// Fallback: if the declared Content-Type parser returned nothing (e.g. body
-	// is base64-wrapped but Content-Type says application/json), always scan the
-	// raw body so normalizeWithDecode can peel the base64 layer.
+	// 兜底：声明的 Content-Type 解析器没抽到任何东西时（例如请求体是 base64
+	// 包裹但 Content-Type 写着 application/json），始终再扫一遍原始请求体，
+	// 让 normalizeWithDecode 有机会剥掉 base64 层。
 	if !parsedOK && !skipRawFallback && len(body) > 0 {
 		limit := snapshot.WAFBodyScanLimit
 		if len(body) < limit {
@@ -981,8 +984,8 @@ func extractBodyTargets(body []byte, contentType string) []string {
 		primary = []string{string(body[:limit])}
 	}
 
-	// Content-Type-independent sniffing: also try alternate parsers to prevent
-	// evasion via wrong Content-Type header.
+	// 与 Content-Type 无关的嗅探：同时尝试其他解析器，防止用错误的
+	// Content-Type 请求头规避检测。
 	if !containsFoldASCII(ct, "application/json") && looksLikeJSON(body) {
 		if extra := extractJSONValues(body); len(extra) > 0 {
 			primary = append(primary, extra...)
@@ -1014,13 +1017,13 @@ func dedupeBodyTargets(targets []string) []string {
 	return out
 }
 
-// extractFormValues splits form-urlencoded body into individual decoded values.
-// Both parameter names (keys) and values are scanned — attackers may inject
-// payloads via key names (e.g. `1 UNION SELECT--=x`).
+// extractFormValues 把 form-urlencoded 请求体拆成逐个解码后的值。
+// 参数名（键）与值都会被扫描——攻击者可能通过键名注入载荷
+// （例如 `1 UNION SELECT--=x`）。
 func extractFormValues(body string) []string {
 	vals := make([]string, 0, (strings.Count(body, "&")+1)*2)
 	// 整串也作为一个目标保留：按 & 拆分会切断 `&&`、`||` 这类命令链
-	// （cmd=127.0.0.1 && ls /etc → "127.0.0.1 " / "cmd" / " ls /etc"），
+	// （例：cmd=127.0.0.1 && ls /etc 会被切成 "127.0.0.1 "、"cmd"、" ls /etc"），
 	// 拆后各段都不再是完整载荷。逐段扫描与整串扫描并存，命中归因不受影响。
 	if strings.Contains(body, "&&") || strings.Contains(body, "||") {
 		vals = append(vals, body)
@@ -1047,7 +1050,7 @@ func extractFormValues(body string) []string {
 				vals = append(vals, dv)
 			}
 		}
-		// Also scan the parameter name for injected payloads.
+		// 参数名同样要扫描，攻击者可在其中注入载荷。
 		dk := paramKey
 		if strings.IndexByte(paramKey, '%') >= 0 || strings.IndexByte(paramKey, '+') >= 0 {
 			if decoded, err := url.QueryUnescape(paramKey); err == nil {
@@ -1061,7 +1064,7 @@ func extractFormValues(body string) []string {
 	return vals
 }
 
-// extractJSONValues recursively collects all string values from a JSON object.
+// extractJSONValues 递归收集 JSON 对象中的全部字符串值。
 func extractJSONValues(body []byte) []string {
 	var raw any
 	if json.Unmarshal(body, &raw) != nil {
@@ -1072,12 +1075,16 @@ func extractJSONValues(body []byte) []string {
 	return vals
 }
 
-// walkJSON 递归收集 JSON 中的键与字符串值。
-// 对象键按字典序遍历：Go 的 map 迭代顺序随机，若按 range 顺序产出，
-// BodyTargets 的顺序会随请求变化；而 OWASP 归因取「首个跨阈 target」，
-// 顺序即决定安全事件记录的 RuleID，同一请求会被记成不同规则。
-// 副作用：depth > 10 / len(vals) > 100 的剪枝点由「随机丢弃」变为「确定丢弃」，
-// 即超限时保留排序靠前的键，而非每次不同的子集。
+/**
+ * walkJSON 递归收集 JSON 中的键与字符串值。
+ *
+ * 对象键按字典序遍历：Go 的 map 迭代顺序随机，若按 range 顺序产出，
+ * BodyTargets 的顺序会随请求变化；而 OWASP 归因取「首个跨阈 target」，
+ * 顺序即决定安全事件记录的 RuleID，同一请求会被记成不同规则。
+ *
+ * 副作用：depth > 10 / len(vals) > 100 的剪枝点由「随机丢弃」变为「确定丢弃」，
+ * 即超限时保留排序靠前的键，而非每次不同的子集。
+ */
 func walkJSON(v any, vals *[]string, depth int) {
 	if depth > 10 || len(*vals) > 100 {
 		return
@@ -1094,7 +1101,7 @@ func walkJSON(v any, vals *[]string, depth int) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			// Also scan keys: attackers may inject payloads via JSON key names.
+			// 键名同样要扫描：攻击者可通过 JSON 键名注入载荷。
 			if k != "" {
 				*vals = append(*vals, k)
 			}
@@ -1107,7 +1114,7 @@ func walkJSON(v any, vals *[]string, depth int) {
 	}
 }
 
-// extractMultipartFilenames parses multipart form data to extract filenames.
+// extractMultipartFilenames 解析 multipart 表单数据，提取文件名。
 func extractMultipartFilenames(body []byte, contentType string) (filenames []string, contentTypes []string) {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -1132,9 +1139,12 @@ func extractMultipartFilenames(body []byte, contentType string) (filenames []str
 	return filenames, contentTypes
 }
 
-// extractMultipartFieldValues parses multipart form data and returns the text
-// content of non-file fields for OWASP payload scanning. File parts are skipped
-// because their filenames are already checked by the file upload scanner.
+/**
+ * extractMultipartFieldValues 解析 multipart 表单数据，返回非文件字段的文本
+ * 内容，供 OWASP 载荷扫描。
+ *
+ * 文件 part 会被跳过，因为其文件名已由文件上传扫描器检查过。
+ */
 func extractMultipartFieldValues(body []byte, contentType string) []string {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -1151,7 +1161,7 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 		if err != nil {
 			break
 		}
-		// For file upload parts, scan the first bytes of content for embedded code.
+		// 文件上传 part：扫描内容开头若干字节，查找内嵌代码。
 		if part.FileName() != "" {
 			buf, _ := io.ReadAll(io.LimitReader(part, 4096))
 			part.Close()
@@ -1160,7 +1170,7 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 			}
 			continue
 		}
-		// Read field value, limited to 4096 bytes to bound regex scan time.
+		// 读取字段值，上限 4096 字节以限定正则扫描耗时。
 		buf, _ := io.ReadAll(io.LimitReader(part, 4096))
 		part.Close()
 		if len(buf) > 0 {
@@ -1176,12 +1186,15 @@ func extractMultipartFieldValues(body []byte, contentType string) []string {
 	return vals
 }
 
-// reDispositionRawName 从 Content-Disposition 头部原文中取 name 值。
-// part.FormName() 走 mime 解析并对 quoted-string 做反转义（\\ → \、\" → "），
-// 反转义后的值与攻击者提交的原始字节不同：UNC 前缀 \\host 会被吞成一个
-// 反斜杠，使依赖双反斜杠形态的规则（如 path_traversal:019）失配。头部原文
-// 保留原始字节，因此额外以原文值作为扫描目标。filename 位的同类处理已由
-// CheckRawMultipartFilenames 的原文正则承担。
+/**
+ * reDispositionRawName 从 Content-Disposition 头部原文中取 name 值。
+ *
+ * part.FormName() 走 mime 解析并对 quoted-string 做反转义（\\ → \、\" → "），
+ * 反转义后的值与攻击者提交的原始字节不同：UNC 前缀 \\host 会被吞成一个
+ * 反斜杠，使依赖双反斜杠形态的规则（如 path_traversal:019）失配。头部原文
+ * 保留原始字节，因此额外以原文值作为扫描目标。filename 位的同类处理已由
+ * CheckRawMultipartFilenames 的原文正则承担。
+ */
 var reDispositionRawName = regexp.MustCompile(`(?i)\bname="([^"]{0,512})"`)
 
 func rawDispositionNameValues(header string) []string {
@@ -1212,15 +1225,15 @@ func (p *antiReplayPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool
 	if p.mgr == nil {
 		return action.Pass(), false
 	}
-	// Extract nonce from X-Nonce header.
+	// 从 X-Nonce 请求头提取 nonce。
 	nonce, _ := lookupHeaderValue(ctx.Headers, "x-nonce")
 	if nonce == "" {
-		// No nonce provided — skip replay check.
+		// 未提供 nonce——跳过重放检查。
 		return action.Pass(), false
 	}
 	if ctx.AntiReplayConsumedNonce != "" && nonce == ctx.AntiReplayConsumedNonce {
-		// The handler already consumed this exact Cookie nonce. A different X-Nonce
-		// still reaches ValidateAndRotate below and cannot bypass replay validation.
+		// 处理器已消费过这个确切的 Cookie nonce。值不同的 X-Nonce 仍会走到
+		// 下面的 ValidateAndRotate，无法绕过重放校验。
 		return action.Pass(), false
 	}
 	clientIP := ""

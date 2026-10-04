@@ -96,14 +96,14 @@ func (r *RedisKV) noteCommandResult(client rueidis.Client, err error) {
 	r.mu.RUnlock()
 }
 
-// Set stores a byte value with TTL.
+// Set 按 TTL 写入一个字节值。
 func (r *RedisKV) Set(key string, value []byte, ttl time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	return r.SetContext(ctx, key, value, ttl)
 }
 
-// SetContext stores a byte value with TTL using the caller's context.
+// SetContext 使用调用方的 context，按 TTL 写入一个字节值。
 func (r *RedisKV) SetContext(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	client := r.clientValue()
 	if client == nil {
@@ -116,14 +116,14 @@ func (r *RedisKV) SetContext(ctx context.Context, key string, value []byte, ttl 
 	return err
 }
 
-// Get retrieves a byte value. Returns nil, false on miss.
+// Get 取出一个字节值；未命中返回 nil, false。
 func (r *RedisKV) Get(key string) ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	return r.GetContext(ctx, key)
 }
 
-// GetContext retrieves a byte value using the caller's context. It returns nil, false on miss.
+// GetContext 使用调用方的 context 取出字节值；未命中返回 nil, false。
 func (r *RedisKV) GetContext(ctx context.Context, key string) ([]byte, bool) {
 	client := r.clientValue()
 	if client == nil {
@@ -139,14 +139,14 @@ func (r *RedisKV) GetContext(ctx context.Context, key string) ([]byte, bool) {
 	return val, true
 }
 
-// Delete removes a key.
+// Delete 删除一个 key。
 func (r *RedisKV) Delete(key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	r.DeleteContext(ctx, key)
 }
 
-// DeleteContext removes a key using the caller's context.
+// DeleteContext 使用调用方的 context 删除一个 key。
 func (r *RedisKV) DeleteContext(ctx context.Context, key string) {
 	client := r.clientValue()
 	if client == nil {
@@ -157,7 +157,7 @@ func (r *RedisKV) DeleteContext(ctx context.Context, key string) {
 	r.noteCommandResult(client, client.Do(ctx, client.B().Del().Key(redisPrefix+key).Build()).Error())
 }
 
-// SetJSON marshals v to JSON and stores it with TTL.
+// SetJSON 把 v 序列化为 JSON 并按 TTL 写入。
 func (r *RedisKV) SetJSON(key string, v any, ttl time.Duration) error {
 	if r == nil {
 		return nil
@@ -169,7 +169,7 @@ func (r *RedisKV) SetJSON(key string, v any, ttl time.Duration) error {
 	return r.Set(key, data, ttl)
 }
 
-// GetJSON retrieves and unmarshals a JSON value.
+// GetJSON 取出 JSON 值并反序列化。
 func (r *RedisKV) GetJSON(key string, dest any) bool {
 	data, ok := r.Get(key)
 	if !ok {
@@ -178,7 +178,7 @@ func (r *RedisKV) GetJSON(key string, dest any) bool {
 	return json.Unmarshal(data, dest) == nil
 }
 
-// Incr atomically increments a counter and returns the new value.
+// Incr 原子递增计数器并返回新值。
 func (r *RedisKV) Incr(key string, ttl time.Duration) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -203,7 +203,7 @@ func (r *RedisKV) IncrContext(ctx context.Context, key string, ttl time.Duration
 	return value, nil
 }
 
-// Exists checks if a key exists.
+// Exists 判断某个 key 是否存在。
 func (r *RedisKV) Exists(key string) bool {
 	client := r.clientValue()
 	if client == nil {

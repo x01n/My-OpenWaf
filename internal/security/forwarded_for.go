@@ -2,7 +2,7 @@ package security
 
 import "strings"
 
-// ForwardedForHeaderValue normalizes repeated X-Forwarded-For values into a single chain.
+// ForwardedForHeaderValue 把重复出现的 X-Forwarded-For 取值归一为单条链。
 func ForwardedForHeaderValue(values []string) string {
 	switch len(values) {
 	case 0:
@@ -24,7 +24,7 @@ func ForwardedForHeaderValue(values []string) string {
 	return b.String()
 }
 
-// ForwardedForHeaderValueBytes normalizes repeated Hertz X-Forwarded-For values into a single chain.
+// ForwardedForHeaderValueBytes 把 Hertz 重复出现的 X-Forwarded-For 取值归一为单条链。
 func ForwardedForHeaderValueBytes(values [][]byte) string {
 	switch len(values) {
 	case 0:

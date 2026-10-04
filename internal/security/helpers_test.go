@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// --- ForwardedForHeaderValue ---
+// ForwardedForHeaderValue 相关测试
 
 func TestForwardedForHeaderValue(t *testing.T) {
 	cases := []struct {
@@ -29,7 +29,7 @@ func TestForwardedForHeaderValue(t *testing.T) {
 	}
 }
 
-// --- ForwardedForHeaderValueBytes ---
+// ForwardedForHeaderValueBytes 相关测试
 
 func TestForwardedForHeaderValueBytes(t *testing.T) {
 	cases := []struct {
@@ -52,7 +52,7 @@ func TestForwardedForHeaderValueBytes(t *testing.T) {
 	}
 }
 
-// --- NormalizeHostHeaderValue ---
+// NormalizeHostHeaderValue 相关测试
 
 func TestNormalizeHostHeaderValue(t *testing.T) {
 	t.Run("empty string returns empty", func(t *testing.T) {

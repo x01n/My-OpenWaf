@@ -7,9 +7,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// V5MigrateSiteTLSInheritanceDefaults removes schema defaults where the
-// current SQL dialect supports dropping them, so site-level TLS inheritance
-// can continue to be represented as an empty string.
+// V5MigrateSiteTLSInheritanceDefaults 在当前 SQL 方言支持的情况下删除表结构默认值，
+// 使站点级 TLS 继承仍能以空字符串表示。
 func V5MigrateSiteTLSInheritanceDefaults(db *gorm.DB) error {
 	if !db.Migrator().HasTable(&siteTLSInheritanceTable{}) {
 		return nil

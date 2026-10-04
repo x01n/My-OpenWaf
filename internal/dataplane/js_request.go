@@ -15,7 +15,7 @@ import (
 	"My-OpenWaf/internal/waf/jsplugin"
 )
 
-// jsRequestState is the mutable request view shared by sequential request-stage scripts.
+// jsRequestState 是依次执行的请求阶段脚本共享的可变请求视图。
 type jsRequestState struct {
 	method      string
 	path        string
@@ -46,9 +46,11 @@ func ensureLuaQueryParams(reqCtx *pipeline.RequestCtx) {
 	}
 }
 
-// executeJSRequestStage executes request-stage scripts in snapshot order. A fail-open
-// script is skipped on execution or mutation failure; fail-closed returns the script
-// and error so the caller can terminate the request without exposing internals.
+/**
+ * executeJSRequestStage 按快照顺序执行请求阶段脚本。fail-open
+ * 脚本在执行或改写失败时被跳过；fail-closed 则把脚本与错误一并
+ * 返回，让调用方终止请求且不泄露内部细节。
+ */
 func executeJSRequestStage(
 	ctx context.Context,
 	c *app.RequestContext,
@@ -129,11 +131,13 @@ func executeJSRequestStage(
 	return state, nil, nil
 }
 
-// jsMutationVerdict 把脚本的裁决字段转成 action.Result。
-//
-// 动作字符串在这里再经一次 action.Normalize：校验层已保证它可识别，这里做
-// 归一化是为了把 legacy 写法（block/log_only）解析成规范动作，与内置规则
-// 和 Lua 插件走同一条路。
+/**
+ * jsMutationVerdict 把脚本的裁决字段转成 action.Result。
+ *
+ * 动作字符串在这里再经一次 action.Normalize：校验层已保证它可识别，这里做
+ * 归一化是为了把 legacy 写法（block/log_only）解析成规范动作，与内置规则
+ * 和 Lua 插件走同一条路。
+ */
 func jsMutationVerdict(script *jsplugin.Script, plan jsplugin.MutationPlan) (action.Result, bool) {
 	if plan.Action == nil {
 		return action.Result{}, false
@@ -243,8 +247,8 @@ func applyJSMutationPlan(
 		if closer, ok := previousSnapshot.original.(io.Closer); ok {
 			_ = closer.Close()
 		}
-		// SetBodyString replaces the stream with a replayable buffer. Prevent the
-		// outer request-body cleanup from restoring the pre-mutation stream.
+		// SetBodyString 用可重放的缓冲替换了流。要阻止外层的
+		// 请求体清理逻辑把流还原成改写前的那一个。
 		c.Set(requestBodySnapshotContextKey, requestBodySnapshot{
 			prefetched: []byte(next.body),
 			size:       int64(len(next.body)),
@@ -274,11 +278,13 @@ func applyJSMutationPlan(
 	return next, nil
 }
 
-// pipelineMutationToJSPlan 把管道上下文里的 Lua 请求改写意图转成相同形状的
-// JS 变更计划。
-//
-// 两者字段一一对应，转换只做搬运：数据面对两阶段的写回必须走同一条路径
-// （applyJSMutationPlan），否则校验与头处理会出现第二套实现。
+/**
+ * pipelineMutationToJSPlan 把管道上下文里的 Lua 请求改写意图转成相同形状的
+ * JS 变更计划。
+ *
+ * 两者字段一一对应，转换只做搬运：数据面对两阶段的写回必须走同一条路径
+ * （applyJSMutationPlan），否则校验与头处理会出现第二套实现。
+ */
 func pipelineMutationToJSPlan(mutation pipeline.RequestMutator) jsplugin.MutationPlan {
 	plan := jsplugin.MutationPlan{
 		Method:        mutation.Method,
@@ -309,9 +315,11 @@ func clientIPString(reqCtx *pipeline.RequestCtx) string {
 	return reqCtx.ClientIP.String()
 }
 
-// luaResponseRuntimeKey 保存本次请求的 Lua post 响应改写，由 proxy 的响应
-// 变换链按站点读取。数据面与 proxy 的依赖方向是 dataplane → proxy，改写
-// 意图因此经请求上下文传递，而不是让 proxy 反向依赖 luaplugin。
+/**
+ * luaResponseRuntimeKey 保存本次请求的 Lua post 响应改写，由 proxy 的响应
+ * 变换链按站点读取。数据面与 proxy 的依赖方向是 dataplane → proxy，改写
+ * 意图因此经请求上下文传递，而不是让 proxy 反向依赖 luaplugin。
+ */
 const luaResponseRuntimeKey = "dataplane_lua_response_mutations"
 
 // ContextWithLuaResponseMutations 把 Lua post 的响应改写挂到请求上下文。
@@ -352,9 +360,11 @@ func LuaResponseMutationsFromRequestContext(c *app.RequestContext, siteID uint) 
 
 const dataplaneJSResponseRuntimeKey = "dataplane_js_response_runtime"
 
-// ContextWithJSResponseRuntime 把响应阶段执行器与脚本挂到 hertz 请求上下文，
-// 供 internal/proxy 的响应变换链读取。executor 为 nil 等价于运行时不可用，
-// 变换链按 fail-open 跳过。
+/**
+ * ContextWithJSResponseRuntime 把响应阶段执行器与脚本挂到 hertz 请求上下文，
+ * 供 internal/proxy 的响应变换链读取。executor 为 nil 等价于运行时不可用，
+ * 变换链按 fail-open 跳过。
+ */
 func ContextWithJSResponseRuntime(c *app.RequestContext, executor jsplugin.ResponseExecutor, scripts []*jsplugin.Script) {
 	if c == nil {
 		return
@@ -381,10 +391,12 @@ func JSResponseRuntimeFromRequestContext(c *app.RequestContext) (jsplugin.Respon
 	return runtimeValue.Executor, runtimeValue.Scripts
 }
 
-// jspluginEngineAsResponseExecutor 把请求执行器转为响应执行器视图。
-//
-// jsplugin.Engine 同时实现 Executor 与 ResponseExecutor；此处仅做类型断言，
-// 避免在 handler 中重复。executor 为 nil 或未实现 ResponseExecutor 时返回 nil。
+/**
+ * jspluginEngineAsResponseExecutor 把请求执行器转为响应执行器视图。
+ *
+ * jsplugin.Engine 同时实现 Executor 与 ResponseExecutor；此处仅做类型断言，
+ * 避免在 handler 中重复。executor 为 nil 或未实现 ResponseExecutor 时返回 nil。
+ */
 func jspluginEngineAsResponseExecutor(executor jsplugin.Executor) jsplugin.ResponseExecutor {
 	responseExecutor, _ := executor.(jsplugin.ResponseExecutor)
 	return responseExecutor

@@ -10,13 +10,13 @@ type SiteListenerRepo struct{ db *gorm.DB }
 
 func NewSiteListenerRepo(db *gorm.DB) *SiteListenerRepo { return &SiteListenerRepo{db: db} }
 
-// All returns every listener (including disabled) ordered by site/bind.
+// All 返回全部监听器（含已停用），按 site/bind 排序。
 func (r *SiteListenerRepo) All() ([]store.SiteListener, error) {
 	var items []store.SiteListener
 	return items, r.db.Order("site_id ASC, bind ASC").Find(&items).Error
 }
 
-// AllEnabled returns only listeners marked enabled.
+// AllEnabled 只返回标记为启用的监听器。
 func (r *SiteListenerRepo) AllEnabled() ([]store.SiteListener, error) {
 	var items []store.SiteListener
 	return items, r.db.Where("enabled = ?", true).Order("site_id ASC, bind ASC").Find(&items).Error
@@ -32,7 +32,7 @@ func (r *SiteListenerRepo) ListEnabledBySites(siteIDs []uint) ([]store.SiteListe
 		Order("site_id ASC, bind ASC").Find(&items).Error
 }
 
-// ListBySite returns listeners for a specific site ordered by bind.
+// ListBySite 返回某个站点的监听器，按 bind 排序。
 func (r *SiteListenerRepo) ListBySite(siteID uint) ([]store.SiteListener, error) {
 	var items []store.SiteListener
 	return items, r.db.Where("site_id = ?", siteID).Order("bind ASC").Find(&items).Error

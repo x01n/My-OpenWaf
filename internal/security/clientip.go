@@ -13,7 +13,7 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// ResolveClientIP applies XFF semantics for WAF decisions.
+// ResolveClientIP 按 XFF 语义为 WAF 决策解析客户端 IP。
 func ResolveClientIP(c *app.RequestContext, xffMode, trustedCIDR string, headerOrder []string) net.IP {
 	direct := remoteIPFromAddr(c.RemoteAddr())
 	if direct == nil {
@@ -194,7 +194,7 @@ func remoteInTrustedCIDR(ip net.IP, raw string) bool {
 	return matched
 }
 
-// ValidateTrustedCIDR validates the site trusted proxy list using the same token syntax as runtime resolution.
+// ValidateTrustedCIDR 校验站点可信代理列表，token 语法与运行时解析保持一致。
 func ValidateTrustedCIDR(raw string) bool {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -221,7 +221,7 @@ func validTrustedCIDRToken(token string) bool {
 	return err == nil
 }
 
-// ValidateClientIPHeaderOrder validates the persisted JSON header-priority list.
+// ValidateClientIPHeaderOrder 校验持久化的 JSON 头优先级列表。
 func ValidateClientIPHeaderOrder(raw string) bool {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

@@ -50,17 +50,17 @@ func TestACMatcherMatchMask(t *testing.T) {
 	hit := m.MatchMask(target)
 
 	var mask0 ac.Mask
-	mask0.Set(indices[0]) // "abc"
+	mask0.Set(indices[0]) // 匹配字面 "abc"
 	if !hit.Intersects(&mask0) {
 		t.Fatal("应命中 abc")
 	}
 	var mask1 ac.Mask
-	mask1.Set(indices[1]) // "bcd"
+	mask1.Set(indices[1]) // 匹配字面 "bcd"
 	if !hit.Intersects(&mask1) {
 		t.Fatal("应命中 bcd(abc 的后续)")
 	}
 	var mask2 ac.Mask
-	mask2.Set(indices[2]) // "xyz"
+	mask2.Set(indices[2]) // 匹配字面 "xyz"
 	if !hit.Intersects(&mask2) {
 		t.Fatal("应命中 xyz")
 	}

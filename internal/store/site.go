@@ -25,8 +25,7 @@ const (
 	SiteProtectionModeObserve = "observe"
 )
 
-// Site holds a virtual host configuration: listener, TLS, protection, forwarding.
-// IsClientIPHeader reports whether header is supported for trusted client IP extraction.
+// IsClientIPHeader 报告 header 是否可用于可信客户端 IP 提取。
 func IsClientIPHeader(header string) bool {
 	switch header {
 	case ClientIPHeaderXForwardedFor, ClientIPHeaderXRealIP, ClientIPHeaderForwarded:
@@ -141,13 +140,13 @@ type Site struct {
 	CCUseCustom *bool  `gorm:"column:cc_use_custom" json:"cc_use_custom,omitempty"`
 	CCRules     string `gorm:"column:cc_rules;type:text" json:"cc_rules,omitempty"`
 
-	// Legacy fields (deprecated, kept for migration compatibility)
+	// Legacy 字段（已废弃，仅为迁移兼容保留）
 	ListenerID          uint  `gorm:"index" json:"listener_id,omitempty"`
 	ForwardingProfileID *uint `json:"forwarding_profile_id,omitempty"`
 	InheritListenerCert bool  `gorm:"default:false" json:"inherit_listener_cert,omitempty"`
 }
 
-// ApplyProtectionModeOverrides syncs the compact site mode into runtime protection fields.
+// ApplyProtectionModeOverrides 把站点上的紧凑模式同步进运行时防护字段。
 func (s *Site) ApplyProtectionModeOverrides() {
 	switch s.AttackProtectionLevel {
 	case SiteProtectionModeObserve:
@@ -231,7 +230,7 @@ func (s *Site) GetCustomErrorPages() map[int]interface{} {
 	return m
 }
 
-// SetCustomErrorPages serialises the map into the CustomErrorPages JSON field.
+// SetCustomErrorPages 把 map 序列化进 CustomErrorPages JSON 字段。
 func (s *Site) SetCustomErrorPages(pages map[int]interface{}) {
 	if len(pages) == 0 {
 		s.CustomErrorPages = "{}"
@@ -245,7 +244,7 @@ func (s *Site) SetCustomErrorPages(pages map[int]interface{}) {
 	s.CustomErrorPages = string(b)
 }
 
-// SiteListener represents one network endpoint of a Site.
+// SiteListener 表示站点的一个网络端点。
 type SiteListener struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -261,7 +260,7 @@ type SiteListener struct {
 	Note       string `gorm:"size:255" json:"note,omitempty"`
 }
 
-// SiteCacheRule defines a path cache rule stored in Site.CacheRules.
+// SiteCacheRule 定义存放在 Site.CacheRules 中的一条路径缓存规则。
 type SiteCacheRule struct {
 	Type            string `json:"type"` // prefix, exact, suffix, contains, regex
 	Value           string `json:"value"`
@@ -272,12 +271,12 @@ type SiteCacheRule struct {
 	Disabled        bool   `json:"disabled,omitempty"`
 	Note            string `json:"note,omitempty"`
 	StaleIfError    int    `json:"stale_if_error_seconds,omitempty"`
-	// Regex is compiled at snapshot build for type "regex" only; not persisted or exposed in JSON.
+	// Regex 仅在 type 为 "regex" 时于快照构建阶段编译；不持久化、也不出现在 JSON 中。
 	Regex *regexp.Regexp `json:"-" gorm:"-"`
 }
 
-// SiteForwardingRule represents a path-prefix routing rule that maps a sub-path
-// to dedicated upstream targets. Stored as JSON in Site.ForwardingRules.
+// SiteForwardingRule 表示把某个子路径映射到专用上游的路径前缀路由规则。
+// 以 JSON 形式存放在 Site.ForwardingRules 中。
 type SiteForwardingRule struct {
 	ID         string   `json:"id,omitempty"`
 	Note       string   `json:"note,omitempty"`
@@ -286,8 +285,8 @@ type SiteForwardingRule struct {
 	Enabled    bool     `json:"enabled"`
 }
 
-// SiteHeaderOp represents a single Header operation applied to upstream requests
-// or downstream responses. Stored as JSON in Site.HeaderOps.
+// SiteHeaderOp 表示施加在上游请求或下游响应上的单次 Header 操作。
+// 以 JSON 形式存放在 Site.HeaderOps 中。
 type SiteHeaderOp struct {
 	ID     string `json:"id,omitempty"`
 	Phase  string `json:"phase"`  // "request" | "response"

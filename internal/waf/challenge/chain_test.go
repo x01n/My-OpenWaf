@@ -336,23 +336,25 @@ func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
 	}
 }
 
-// TestGeneratedPoWScriptEmbedsValidVMProgram 锁住「脚本里嵌的程序是合法 ISA 字节码」。
-//
-// # 为什么用 vmpasm.Verify 而不是手工数 opcode
-//
-// 旧实现是「固定 5 步状态机 + 随机 NOP 填充」，旧断言逐字节数 5 个 opcode
-// 与 2..5 个 NOP。新 ISA 下程序是**真实计算**（含分支与循环），
-// 「非 NOP opcode 恰好是某 5 个」这个断言不再有任何意义。
-//
-// 现在锁的机制是：**嵌入的程序必须能通过 ISA 校验器**——容器魔数/版本正确、
-// 指令编码合法、控制流可达且可终止、无恒真比较。这才是「脚本嵌的是可执行
-// 程序」的直接证据，且与 ISA 版本解耦（ISA 增删指令时本用例自动跟随）。
-//
-// # 为什么必须用位置断言而非存在性断言
-//
-// `TestPoWScriptInjectsPerAssetVersions` 的教训：`strings.Contains(script, X)`
-// 锁的是「出现过」不是「落在正确槽位」。这里同样逐位置提取：程序必须落在
-// `self.__p=` 与 `;self.__off=` 之间，且**必须是合法十六进制**。
+/**
+ * TestGeneratedPoWScriptEmbedsValidVMProgram 锁住「脚本里嵌的程序是合法 ISA 字节码」。
+ *
+ * # 为什么用 vmpasm.Verify 而不是手工数 opcode
+ *
+ * 旧实现是「固定 5 步状态机 + 随机 NOP 填充」，旧断言逐字节数 5 个 opcode
+ * 与 2..5 个 NOP。新 ISA 下程序是**真实计算**（含分支与循环），
+ * 「非 NOP opcode 恰好是某 5 个」这个断言不再有任何意义。
+ *
+ * 现在锁的机制是：**嵌入的程序必须能通过 ISA 校验器**——容器魔数/版本正确、
+ * 指令编码合法、控制流可达且可终止、无恒真比较。这才是「脚本嵌的是可执行
+ * 程序」的直接证据，且与 ISA 版本解耦（ISA 增删指令时本用例自动跟随）。
+ *
+ * # 为什么必须用位置断言而非存在性断言
+ *
+ * `TestPoWScriptInjectsPerAssetVersions` 的教训：`strings.Contains(script, X)`
+ * 锁的是「出现过」不是「落在正确槽位」。这里同样逐位置提取：程序必须落在
+ * `self.__p=` 与 `;self.__off=` 之间，且**必须是合法十六进制**。
+ */
 func TestGeneratedPoWScriptEmbedsValidVMProgram(t *testing.T) {
 	const (
 		programMarker = "self.__p="

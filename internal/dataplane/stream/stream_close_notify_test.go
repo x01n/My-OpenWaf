@@ -174,8 +174,10 @@ func TestCallCloseNotifyRejectsInvalidMethodPrototype(t *testing.T) {
 	}
 }
 
-// TestCloseNotifyMethodIndexCacheConsistent 断言 method-index 缓存对
-// 有/无 CloseNotify 的类型给出与原名探测一致的存在性结论。
+/**
+ * TestCloseNotifyMethodIndexCacheConsistent 断言 method-index 缓存对
+ * 有/无 CloseNotify 的类型给出与原名探测一致的存在性结论。
+ */
 func TestCloseNotifyMethodIndexCacheConsistent(t *testing.T) {
 	type withoutCN struct {
 		ch chan bool

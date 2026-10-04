@@ -1,13 +1,15 @@
-// Package luaplugin 提供基于 Lua 的自定义策略插件运行时。
-//
-// 设计约束：
-//   - 沙箱优先：默认只开放必要的标准库，禁用 io/os/debug/package 等一切能触达
-//     文件系统、子进程与运行时内部的能力。脚本无法越出 WAF 进程。
-//   - 有界执行：每次调用受 wall-clock 超时与指令数双重限制，防止 while true 卡死
-//     数据面。超时按「放行」处理——自定义策略出问题不应导致站点整体不可用。
-//   - 池化复用：Lua 状态机创建成本高（约几十微秒），每请求新建会直接压垮吞吐。
-//     用 sync.Pool 复用，并在归还前清理脚本可能留下的全局状态。
-//   - panic 隔离：脚本触发的 panic 一律 recover，绝不允许打崩数据面。
+/**
+ * Package luaplugin 提供基于 Lua 的自定义策略插件运行时。
+ *
+ * 设计约束：
+ *   - 沙箱优先：默认只开放必要的标准库，禁用 io/os/debug/package 等一切能触达
+ *     文件系统、子进程与运行时内部的能力。脚本无法越出 WAF 进程。
+ *   - 有界执行：每次调用受 wall-clock 超时与指令数双重限制，防止 while true 卡死
+ *     数据面。超时按「放行」处理——自定义策略出问题不应导致站点整体不可用。
+ *   - 池化复用：Lua 状态机创建成本高（约几十微秒），每请求新建会直接压垮吞吐。
+ *     用 sync.Pool 复用，并在归还前清理脚本可能留下的全局状态。
+ *   - panic 隔离：脚本触发的 panic 一律 recover，绝不允许打崩数据面。
+ */
 package luaplugin
 
 import (
@@ -48,12 +50,11 @@ const (
 	maxScriptBytes = 256 * 1024
 
 	// 运行时 API 的资源上限，避免脚本通过大量表项或回调放大请求开销。
-	// 运行时 API 的资源上限，避免脚本通过大量表项或回调放大请求开销。
-	maxAPICalls       = 128
-	maxAPIMapEntries  = 256
-	maxAPIStringBytes = 16 * 1024
-	maxHeaderValue    = 4 * 1024
-	maxResponseBody   = 16 * 1024
+	maxAPICalls              = 128
+	maxAPIMapEntries         = 256
+	maxAPIStringBytes        = 16 * 1024
+	maxHeaderValue           = 4 * 1024
+	maxResponseBody          = 16 * 1024
 	maxScriptLogMessageBytes = 2 * 1024
 
 	// decisionFromTable 的返回值会继续流入日志、响应与后续请求处理，
@@ -106,11 +107,13 @@ type Decision struct {
 	ResponseMutation *ResponseMutation
 }
 
-// RequestMutation 是脚本对上游请求的改写意图。
-//
-// 指针字段为 nil 表示不改；非 nil（包括指向空字符串）表示显式替换。
-// SetHeaders/DeleteHeaders 是请求头的增删。所有字段都由宿主在管道内写回
-// Hertz 请求，脚本本身拿不到请求对象。
+/**
+ * RequestMutation 是脚本对上游请求的改写意图。
+ *
+ * 指针字段为 nil 表示不改；非 nil（包括指向空字符串）表示显式替换。
+ * SetHeaders/DeleteHeaders 是请求头的增删。所有字段都由宿主在管道内写回
+ * Hertz 请求，脚本本身拿不到请求对象。
+ */
 type RequestMutation struct {
 	Method        *string
 	Path          *string
@@ -120,9 +123,11 @@ type RequestMutation struct {
 	DeleteHeaders []string
 }
 
-// ResponseMutation 是脚本对上游响应的改写意图，由 proxy 的响应变换链消费。
-//
-// StatusCode 为 0 表示不改状态码；Body 为 nil 表示不改响应体。
+/**
+ * ResponseMutation 是脚本对上游响应的改写意图，由 proxy 的响应变换链消费。
+ *
+ * StatusCode 为 0 表示不改状态码；Body 为 nil 表示不改响应体。
+ */
 type ResponseMutation struct {
 	StatusCode int
 	Body       *string
@@ -134,10 +139,12 @@ type ResponseMutation struct {
 // HasAction 报告脚本是否给出了判定。
 func (d Decision) HasAction() bool { return d.Action != "" }
 
-// KVBackend 是脚本可用的跨请求存储。由调用方注入，通常复用 Redis/本地缓存。
-//
-// 所有方法都必须能安全并发调用；Available 为 false 时脚本侧的 kv.* 调用
-// 会返回 nil/false 而非报错，使 Redis 不可用时策略降级而非站点不可用。
+/**
+ * KVBackend 是脚本可用的跨请求存储。由调用方注入，通常复用 Redis/本地缓存。
+ *
+ * 所有方法都必须能安全并发调用；Available 为 false 时脚本侧的 kv.* 调用
+ * 会返回 nil/false 而非报错，使 Redis 不可用时策略降级而非站点不可用。
+ */
 type KVBackend interface {
 	Available() bool
 	Get(key string) ([]byte, bool)
@@ -146,9 +153,12 @@ type KVBackend interface {
 	Incr(key string, ttl time.Duration) (int64, error)
 }
 
-// ContextKVBackend 是支持请求取消的 KVBackend 扩展。实现该接口的后端会收到脚本执行的
-// runCtx，使调用方取消、脚本超时和请求作用域值传递到 KV I/O；未实现时按不可用处理，
-// 防止无法响应取消的同步 I/O 阻塞数据面请求。
+/**
+ * ContextKVBackend 是支持请求取消的 KVBackend 扩展。
+ *
+ * 实现该接口的后端会收到脚本执行的 runCtx，使调用方取消、脚本超时和请求作用域值传递到 KV I/O；
+ * 未实现时按不可用处理，防止无法响应取消的同步 I/O 阻塞数据面请求。
+ */
 type ContextKVBackend interface {
 	KVBackend
 	AvailableContext(ctx context.Context) bool
@@ -158,9 +168,11 @@ type ContextKVBackend interface {
 	IncrContext(ctx context.Context, key string, ttl time.Duration) (int64, error)
 }
 
-// Script 是一段已编译的插件脚本。
-//
-// 编译产物（*lua.FunctionProto）在多个 Lua 状态机间共享，故只编译一次。
+/**
+ * Script 是一段已编译的插件脚本。
+ *
+ * 编译产物（*lua.FunctionProto）在多个 Lua 状态机间共享，故只编译一次。
+ */
 type Script struct {
 	id    uint
 	name  string
@@ -249,14 +261,16 @@ func (s *Script) Stats() (runs, failures, timeouts int64, avg time.Duration) {
 	return
 }
 
-// Compile 编译脚本源码。
-//
-// 编译期即拒绝超限脚本与语法错误，使配置错误在保存时暴露而非运行时才发现。
-//
-// @param name   脚本名，用于日志与统计。
-// @param stage  执行时机。
-// @param source Lua 源码，必须定义全局函数 handle(ctx)。
-// @return 已编译脚本；语法错误或超限时返回错误。
+/**
+ * Compile 编译脚本源码。
+ *
+ * 编译期即拒绝超限脚本与语法错误，使配置错误在保存时暴露而非运行时才发现。
+ *
+ * @param name   脚本名，用于日志与统计。
+ * @param stage  执行时机。
+ * @param source Lua 源码，必须定义全局函数 handle(ctx)。
+ * @return 已编译脚本；语法错误或超限时返回错误。
+ */
 func Compile(name string, stage Stage, source string) (*Script, error) {
 	if !stage.Valid() {
 		return nil, fmt.Errorf("luaplugin: invalid stage %q (want pre or post)", stage)
@@ -278,9 +292,11 @@ func Compile(name string, stage Stage, source string) (*Script, error) {
 	}, nil
 }
 
-// SetRuntimeHooks 设置该脚本的观测回调，由引擎在装载时调用。
-//
-// 两个回调都为 nil 时恢复为空操作，因此试运行与测试可以随时关掉日志。
+/**
+ * SetRuntimeHooks 设置该脚本的观测回调，由引擎在装载时调用。
+ *
+ * 两个回调都为 nil 时恢复为空操作，因此试运行与测试可以随时关掉日志。
+ */
 func (s *Script) SetRuntimeHooks(logFn func(string, string), debugFn func(string)) {
 	if s == nil {
 		return

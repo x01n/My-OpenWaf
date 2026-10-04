@@ -550,7 +550,7 @@ func TestPutProtectionSettingsRejectsInvalidChainCaptchaType(t *testing.T) {
 	}
 }
 
-// TestPutProtectionSettingsRejectsInvalidGlobalCaptchaType ensures the generic protection endpoint validates CAPTCHA mode.
+// TestPutProtectionSettingsRejectsInvalidGlobalCaptchaType 确保通用 protection 端点会校验 CAPTCHA 模式。
 func TestPutProtectionSettingsRejectsInvalidGlobalCaptchaType(t *testing.T) {
 	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {

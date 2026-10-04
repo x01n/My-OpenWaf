@@ -18,7 +18,7 @@ var validRoles = map[string]bool{
 	auth.RoleReadonly: true,
 }
 
-// ListAdminUsers returns all admin accounts (password hash excluded via json:"-").
+// ListAdminUsers 返回全部管理员账号（口令哈希经 json:"-" 排除）。
 func ListAdminUsers(repo *repository.AdminAccountRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		accounts, err := repo.List()
@@ -36,7 +36,7 @@ type createAdminUserReq struct {
 	Role     string `json:"role"`
 }
 
-// CreateAdminUser creates a new admin account.
+// CreateAdminUser 新建一个管理员账号。
 func CreateAdminUser(repo *repository.AdminAccountRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var body createAdminUserReq
@@ -91,7 +91,7 @@ type updateRoleReq struct {
 	Role string `json:"role"`
 }
 
-// UpdateAdminRole updates the role of an admin account.
+// UpdateAdminRole 更新某个管理员账号的角色。
 func UpdateAdminRole(repo *repository.AdminAccountRepo, revoker ...func(string, string) error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
@@ -145,7 +145,7 @@ type updatePasswordReq struct {
 	Password string `json:"password"`
 }
 
-// UpdateAdminPassword updates the password of an admin account.
+// UpdateAdminPassword 更新某个管理员账号的口令。
 func UpdateAdminPassword(repo *repository.AdminAccountRepo, revoker ...func(string, string) error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")
@@ -197,7 +197,7 @@ func UpdateAdminPassword(repo *repository.AdminAccountRepo, revoker ...func(stri
 	}
 }
 
-// DeleteAdminUser deletes an admin account.
+// DeleteAdminUser 删除一个管理员账号。
 func DeleteAdminUser(repo *repository.AdminAccountRepo, revoker ...func(string, string) error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, err := shared.ParseUintParam(c, "id")

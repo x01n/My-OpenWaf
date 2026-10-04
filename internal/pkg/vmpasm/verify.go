@@ -33,9 +33,11 @@ func (f Finding) String() string {
 	return fmt.Sprintf("%s at pc=%d: %s", f.Code, f.PC, f.Detail)
 }
 
-// Report 是一次程序校验的结果。
-//
-// Errors 非空意味着字节码非法；Findings 非空意味着程序虽然合法但存在可疑形态。
+/**
+ * Report 是一次程序校验的结果。
+ *
+ * Errors 非空意味着字节码非法；Findings 非空意味着程序虽然合法但存在可疑形态。
+ */
 type Report struct {
 	Layout   Layout
 	CodeLen  int
@@ -57,10 +59,12 @@ type decoded struct {
 	dest int // 目标指令下标，仅跳转指令有效；-1 表示"下一条"
 }
 
-// successors 返回指令的后继下标。
-//
-// `HALT` 没有后继 —— 它不是"落到下一条"，这是终止性分析的基石：
-// 若把 HALT 当成有顺序后继，紧跟其后的死指令会被误判为可达。
+/**
+ * successors 返回指令的后继下标。
+ *
+ * `HALT` 没有后继 —— 它不是"落到下一条"，这是终止性分析的基石：
+ * 若把 HALT 当成有顺序后继，紧跟其后的死指令会被误判为可达。
+ */
 func (d decoded) successors(idx, total int) []int {
 	if d.in.Op == OpHalt {
 		return nil
@@ -80,20 +84,22 @@ func (d decoded) successors(idx, total int) []int {
 	return []int{d.dest}
 }
 
-// Verify 在 Go 侧对字节码做完整静态校验，不依赖 WASM 解释器。
-//
-// 检查项：
-//   - 容器头部（魔数、版本、flags、长度、页数、blob 长度）
-//   - 指令编码（保留 opcode、未用 nibble、截断）
-//   - 跳转目标落在指令起始位置
-//   - 控制流：入口可达性与到达 HALT 的能力（结构性错误）
-//   - 语义：内存操作数的可疑偏移、恒真比较（advisory findings）
-//
-// # 为什么内存检查是 finding 而不是 error
-//
-// 基址是运行期寄存器值，可以是任意 u64。`base + offset` 在什么语义下回绕
-// 由解释器定义，静态不可知，因此除「偏移本身超过内存长度」这类极端情形外，
-// 都不能断言程序必然越界。把它们报成 error 会让校验器拒绝合法程序。
+/**
+ * Verify 在 Go 侧对字节码做完整静态校验，不依赖 WASM 解释器。
+ *
+ * 检查项：
+ *   - 容器头部（魔数、版本、flags、长度、页数、blob 长度）
+ *   - 指令编码（保留 opcode、未用 nibble、截断）
+ *   - 跳转目标落在指令起始位置
+ *   - 控制流：入口可达性与到达 HALT 的能力（结构性错误）
+ *   - 语义：内存操作数的可疑偏移、恒真比较（advisory findings）
+ *
+ * # 为什么内存检查是 finding 而不是 error
+ *
+ * 基址是运行期寄存器值，可以是任意 u64。`base + offset` 在什么语义下回绕
+ * 由解释器定义，静态不可知，因此除「偏移本身超过内存长度」这类极端情形外，
+ * 都不能断言程序必然越界。把它们报成 error 会让校验器拒绝合法程序。
+ */
 func Verify(program []byte) (*Report, error) {
 	dec, layout, err := decodeContainer(program)
 	if err != nil {
@@ -313,11 +319,13 @@ func checkControlFlow(dec []decoded) []Finding {
 	return out
 }
 
-// checkMemoryOperands 报告可疑的内存操作数。
-//
-// 判定口径见 Verify 的注释：基址是任意 u64，静态不可知，因此这里只报告
-// 「偏移本身就超出内存上界」这一种无论基址取何值都至少在一个方向上可疑的情形，
-// 且一律降为 finding。
+/**
+ * checkMemoryOperands 报告可疑的内存操作数。
+ *
+ * 判定口径见 Verify 的注释：基址是任意 u64，静态不可知，因此这里只报告
+ * 「偏移本身就超出内存上界」这一种无论基址取何值都至少在一个方向上可疑的情形，
+ * 且一律降为 finding。
+ */
 func checkMemoryOperands(dec []decoded, layout Layout) []Finding {
 	memLen := layout.MemoryLen()
 	var out []Finding
@@ -357,21 +365,23 @@ func checkMemoryOperands(dec []decoded, layout Layout) []Finding {
 	return out
 }
 
-// checkZeroConstantCompares 是「多态性缺陷」检查。
-//
-// 背景：字节码的多态价值在于**分支结构依赖运行期输入**。若某条 `CMP` 的两个
-// 操作数在该点都能被证明恒为零，这条比较的结果恒为相等，它所在的分支在程序
-// 结构上就是固定的一条路径 —— 这样的程序段是填充物，不是真实计算。
-//
-// # 为什么必须做 CFG 数据流而不是线性扫描
-//
-// 线性扫描在分支合流处会把「某个分支写入了 0」误当成「所有路径都是 0」，
-// 从而对合法程序报假阳性。这里做的是标准的前向 must-analysis：
-// 抽象状态是 16 个寄存器的「可证为零」位，入口全 false（未知），
-// `in[s] = AND over preds p of out[p]`，迭代到最小不动点。
-//
-// 每条转移规则都取保守方向（宁可判为未知）：静态不可知的写一律置 false。
-// 因此**报出的每一处都是真正的恒零比较**，不存在假阳性。
+/**
+ * checkZeroConstantCompares 是「多态性缺陷」检查。
+ *
+ * 背景：字节码的多态价值在于**分支结构依赖运行期输入**。若某条 `CMP` 的两个
+ * 操作数在该点都能被证明恒为零，这条比较的结果恒为相等，它所在的分支在程序
+ * 结构上就是固定的一条路径 —— 这样的程序段是填充物，不是真实计算。
+ *
+ * # 为什么必须做 CFG 数据流而不是线性扫描
+ *
+ * 线性扫描在分支合流处会把「某个分支写入了 0」误当成「所有路径都是 0」，
+ * 从而对合法程序报假阳性。这里做的是标准的前向 must-analysis：
+ * 抽象状态是 16 个寄存器的「可证为零」位，入口全 false（未知），
+ * `in[s] = AND over preds p of out[p]`，迭代到最小不动点。
+ *
+ * 每条转移规则都取保守方向（宁可判为未知）：静态不可知的写一律置 false。
+ * 因此**报出的每一处都是真正的恒零比较**，不存在假阳性。
+ */
 func checkZeroConstantCompares(dec []decoded) []Finding {
 	n := len(dec)
 	if n == 0 {

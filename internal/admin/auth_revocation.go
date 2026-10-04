@@ -1,6 +1,6 @@
 package admin
 
-// revokeUserCredentials invalidates every refresh and active access credential for one account.
+// revokeUserCredentials 让某个账号的全部 refresh 与活跃 access 凭据立即失效。
 func revokeUserCredentials(d *AuthDeps, username, reason string) error {
 	if d == nil {
 		return nil

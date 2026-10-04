@@ -370,8 +370,8 @@ func TestAccessLogRepoListCachesSmallSearchPageAndPreservesFilters(t *testing.T)
 		t.Fatalf("cached search executed %d SQL statements, want 0", got)
 	}
 
-	// The page key contains the complete filter and pagination tuple. A different
-	// leading-wildcard filter must not reuse the previous result.
+	// 页键包含完整的过滤条件与分页元组。
+	// 不同的前导通配符过滤条件不得复用上一次的结果。
 	items, total, err = repo.List(0, 20, AccessLogFilter{Host: "other.example.test"})
 	if err != nil || total != 0 || len(items) != 0 {
 		t.Fatalf("different host search = items:%#v total:%d err:%v", items, total, err)

@@ -2,8 +2,8 @@ package ratelimit
 
 import "sync"
 
-// DynamicRateLimiter wraps a mutable backend so Redis/local implementations can
-// be swapped at runtime without rebuilding the engine.
+// DynamicRateLimiter 包装一个可变后端，使 Redis 与本地实现能在运行时互换，
+// 无需重建引擎。
 type DynamicRateLimiter struct {
 	mu      sync.RWMutex
 	backend RateLimiterBackend

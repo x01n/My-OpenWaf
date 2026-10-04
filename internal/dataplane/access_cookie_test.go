@@ -8,16 +8,20 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
-// 站点访问控制的会话 cookie 此前零测试覆盖。
-//
-// 这类 cookie 承载的是「已通过站点登录」的凭据，属性写错的后果都是安静的：
-// 丢了 HttpOnly，XSS 就能读走会话；丢了 SameSite，跨站请求会带上它；
-// 站点启用 TLS 却漏了 Secure，凭据会在明文信道上发出去。三者都不会报错，
-// 也不会影响功能自测，只有被利用时才暴露。
+/**
+ * 站点访问控制的会话 cookie 此前零测试覆盖。
+ *
+ * 这类 cookie 承载的是「已通过站点登录」的凭据，属性写错的后果都是安静的：
+ * 丢了 HttpOnly，XSS 就能读走会话；丢了 SameSite，跨站请求会带上它；
+ * 站点启用 TLS 却漏了 Secure，凭据会在明文信道上发出去。三者都不会报错，
+ * 也不会影响功能自测，只有被利用时才暴露。
+ */
 
-// parseSetCookie 把响应里的 Set-Cookie 拆成「cookie 值 + 属性集合」。
-//
-// 属性名统一转小写便于断言；带值的属性（如 max-age=60）按 name=value 存。
+/**
+ * parseSetCookie 把响应里的 Set-Cookie 拆成「cookie 值 + 属性集合」。
+ *
+ * 属性名统一转小写便于断言；带值的属性（如 max-age=60）按 name=value 存。
+ */
 func parseSetCookie(t *testing.T, raw string) (value string, attrs map[string]string) {
 	t.Helper()
 	parts := strings.Split(raw, ";")
@@ -91,10 +95,12 @@ func TestSetAccessSessionCookieSecurityAttributes(t *testing.T) {
 	})
 }
 
-// TestSetAccessSessionCookieTTLFallback 验证非正数 TTL 回退到一天。
-//
-// 传 0 通常意味着调用方没配 SessionTTL。若原样写成 Max-Age=0，浏览器会立刻
-// 删除该 cookie——用户刚登录就被登出，且没有任何报错。
+/**
+ * TestSetAccessSessionCookieTTLFallback 验证非正数 TTL 回退到一天。
+ *
+ * 传 0 通常意味着调用方没配 SessionTTL。若原样写成 Max-Age=0，浏览器会立刻
+ * 删除该 cookie——用户刚登录就被登出，且没有任何报错。
+ */
 func TestSetAccessSessionCookieTTLFallback(t *testing.T) {
 	for _, ttl := range []int{0, -1, -86400} {
 		t.Run("ttl="+strconv.Itoa(ttl), func(t *testing.T) {
@@ -110,11 +116,13 @@ func TestSetAccessSessionCookieTTLFallback(t *testing.T) {
 	}
 }
 
-// TestClearAccessSessionCookie 验证登出时的清除语义。
-//
-// 清除靠的是 Max-Age=0 加空值。属性必须与写入时一致（同名、同 Path、同 Secure），
-// 否则浏览器会认为这是另一个 cookie，旧的那个原封不动留着——用户以为登出了，
-// 会话其实还在。
+/**
+ * TestClearAccessSessionCookie 验证登出时的清除语义。
+ *
+ * 清除靠的是 Max-Age=0 加空值。属性必须与写入时一致（同名、同 Path、同 Secure），
+ * 否则浏览器会认为这是另一个 cookie，旧的那个原封不动留着——用户以为登出了，
+ * 会话其实还在。
+ */
 func TestClearAccessSessionCookie(t *testing.T) {
 	const name = "__owaf_access_7"
 
@@ -151,10 +159,12 @@ func TestClearAccessSessionCookie(t *testing.T) {
 	})
 }
 
-// TestAccessSessionCookieRoundTrip 验证写入与清除针对的是同一个 cookie。
-//
-// 两个函数各写各的属性，一旦有人只改其中一个（比如把写入侧的 SameSite 调成
-// Strict），清除就会失效。这里对齐比较，把它们绑在一起。
+/**
+ * TestAccessSessionCookieRoundTrip 验证写入与清除针对的是同一个 cookie。
+ *
+ * 两个函数各写各的属性，一旦有人只改其中一个（比如把写入侧的 SameSite 调成
+ * Strict），清除就会失效。这里对齐比较，把它们绑在一起。
+ */
 func TestAccessSessionCookieRoundTrip(t *testing.T) {
 	const name = "__owaf_access_9"
 
@@ -186,11 +196,13 @@ func TestAccessSessionCookieRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSafeRefererRedirect 覆盖「跳回原页面」的收口逻辑。
-//
-// 挑战与验证流程都用 Referer 把用户送回来处，而 Referer 完全由外部页面决定。
-// 攻击者从自己的页面向验证端点发起提交，Referer 就是攻击者域名——用户完成验证后
-// 被送过去，且那一刻页面还顶着「刚通过站点验证」的上下文，正适合钓凭据。
+/**
+ * TestSafeRefererRedirect 覆盖「跳回原页面」的收口逻辑。
+ *
+ * 挑战与验证流程都用 Referer 把用户送回来处，而 Referer 完全由外部页面决定。
+ * 攻击者从自己的页面向验证端点发起提交，Referer 就是攻击者域名——用户完成验证后
+ * 被送过去，且那一刻页面还顶着「刚通过站点验证」的上下文，正适合钓凭据。
+ */
 func TestSafeRefererRedirect(t *testing.T) {
 	cases := []struct {
 		name    string

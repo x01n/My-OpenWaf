@@ -17,18 +17,16 @@ type v14RuleExecutionParamsTable struct {
 func (v14RuleExecutionParamsTable) TableName() string { return "rules" }
 
 /**
- * V14MigrateRuleExecutionParams adds the rule-level frequency and CAPTCHA
- * validity columns that the rule form has collected since the rule dialog was
- * introduced but that no column ever stored: window_seconds, request_count and
- * captcha_minutes.
+ * V14MigrateRuleExecutionParams 新增规则级频次与 CAPTCHA 有效期列：
+ * window_seconds、request_count 与 captcha_minutes。规则表单自规则对话框
+ * 引入以来就一直在采集这些字段，但从未有列真正存储它们。
  *
- * The columns are non-nullable with a zero default, so historical rows read
- * back as "not configured" (no frequency limiting, inherit the global CAPTCHA
- * pass TTL) and no backfill is required. AutoMigrate already covers these
- * columns through store.Rule; this migration is the idempotent repair path for
- * databases whose migration order or driver skips that step.
+ * 这些列非空且默认值为零，历史行读回即为「未配置」（不做频次限制、
+ * 继承全局 CAPTCHA 通过 TTL），因此无需回填。AutoMigrate 已通过
+ * store.Rule 覆盖这些列；本迁移只是为「迁移顺序或驱动跳过该步骤」的
+ * 数据库提供幂等的修复路径。
  *
- * Called after AutoMigrate so a fresh database has already created rules.
+ * 本函数在 AutoMigrate 之后调用，此时全新数据库已建好 rules。
  */
 func V14MigrateRuleExecutionParams(db *gorm.DB) error {
 	if db == nil || !db.Migrator().HasTable("rules") {

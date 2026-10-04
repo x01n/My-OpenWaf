@@ -71,11 +71,11 @@ func TestGTWFNXSSConfirmLiteral(t *testing.T) {
 
 // TestGTWFNShell 覆盖 shell 族三条载荷。
 func TestGTWFNShell(t *testing.T) {
-	// getent（|getent hosts somehost.burpcollaborator.net.&）
+	// getent 载荷（|getent hosts somehost.burpcollaborator.net.&）
 	if _, ok := checkCmdInjection("|getent hosts somehost.burpcollaborator.net.&", 4); !ok {
 		t.Fatal("shell 未检出 |getent")
 	}
-	// set /a（| set /a 3482*7301）
+	// set /a 载荷（| set /a 3482*7301）
 	if _, ok := checkCmdInjection("| set /a 3482*7301", 4); !ok {
 		t.Fatal("shell 未检出 | set /a")
 	}
@@ -99,7 +99,7 @@ func TestGTWFNSSTI(t *testing.T) {
 	if _, ok := checkTemplateInjection("#{16*8787}", 4); !ok {
 		t.Fatal("ssti 未检出 #{16*8787}")
 	}
-	// FreeMarker ${ex("id")}
+	// FreeMarker 载荷 ${ex("id")}
 	if _, ok := checkTemplateInjection(`<#assign ex = "freemarker.template.utility.Execute"?new()>${ ex("id")}`, 4); !ok {
 		t.Fatal("ssti 未检出 FreeMarker 载荷")
 	}

@@ -11,10 +11,11 @@ import (
 	"testing"
 )
 
-// TestPeekConnALPNRawSurvivesNegotiatedH1 is the end-to-end guard for the
-// mixed-mode ALPN contract on the TCP/TLS listener path: the ClientHello
-// declares "h2,http/1.1", the handshake then negotiates http/1.1, and ALPNRaw
-// must still report h2 afterwards.
+/**
+ * TestPeekConnALPNRawSurvivesNegotiatedH1 是 TCP/TLS 监听路径上混合模式 ALPN
+ * 契约的端到端守门测试：ClientHello 声明 "h2,http/1.1"，握手随后协商出
+ * http/1.1，而 ALPNRaw 之后仍必须报告 h2。
+ */
 func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
 	record := clientHelloRecordForDataplaneTest(t, &tls.Config{
 		ServerName: "example.com",
@@ -41,7 +42,7 @@ func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
 		t.Fatalf("ALPNRaw after parse = %+v, want %+v", fp.ALPNRaw, want)
 	}
 
-	// Server negotiates http/1.1 (e.g. max TLS version below 1.2 strips h2).
+	// 服务端协商出 http/1.1（例如最高 TLS 版本低于 1.2 会剥掉 h2）。
 	setTLSHandshakeInfoOnConn(wrapped, "TLS13", "example.com", "http/1.1")
 
 	after, ok := tlsfp.TLSFingerprintFromConn(wrapped)
@@ -62,9 +63,10 @@ func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
 	}
 }
 
-// TestFixURIConnALPNRawSurvivesNegotiation covers the exemption wrapper that
-// never sees a ClientHello: SetTLSHandshakeInfo still must not destroy the
-// pre-existing declaration list.
+/**
+ * TestFixURIConnALPNRawSurvivesNegotiation 覆盖那个永远看不到 ClientHello 的
+ * 豁免包装器：SetTLSHandshakeInfo 仍不得破坏已存在的声明列表。
+ */
 func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
 	inner := &bytesConnForBenchmark{}
 	conn := NewFixURIConn(inner).(*FixURIConn)
@@ -92,9 +94,10 @@ func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
 	}
 }
 
-// TestFixURIConnALPNRawBackfilledWhenAbsent covers the ordering where only the
-// negotiated value is known before any ClientHello parse: the overwrite must
-// preserve it into ALPNRaw rather than dropping it.
+/**
+ * TestFixURIConnALPNRawBackfilledWhenAbsent 覆盖这样的顺序：在任何 ClientHello
+ * 解析之前，只有协商值已知；此时覆写必须把它保留进 ALPNRaw，而不是丢弃。
+ */
 func TestFixURIConnALPNRawBackfilledWhenAbsent(t *testing.T) {
 	inner := &bytesConnForBenchmark{}
 	conn := NewFixURIConn(inner).(*FixURIConn)
@@ -108,9 +111,10 @@ func TestFixURIConnALPNRawBackfilledWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestContextWithTLSHandshakeInfoKeepsALPNRaw covers the handler-side override
-// point: the context-carried fingerprint must keep the declared list when the
-// handshake reports a different negotiated protocol.
+/**
+ * TestContextWithTLSHandshakeInfoKeepsALPNRaw 覆盖 handler 侧的覆写点：
+ * 当握手报告了不同的协商协议时，上下文携带的指纹必须保留原声明列表。
+ */
 func TestContextWithTLSHandshakeInfoKeepsALPNRaw(t *testing.T) {
 	base := tlsfp.TLSClientFingerprint{
 		JA3Hash: "a1f6c4ad2b63a0149a2e61e4bcc30c8c",
@@ -137,5 +141,5 @@ func TestContextWithTLSHandshakeInfoKeepsALPNRaw(t *testing.T) {
 	}
 }
 
-// fakeBytesConnForALPNTest keeps the helper list readable.
+// fakeBytesConnForALPNTest 让辅助声明保持可读。
 var _ net.Conn = (*bytesConnForBenchmark)(nil)

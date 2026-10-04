@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Match targets: which part of the HTTP exchange to run the operator against.
+// 匹配目标：对 HTTP 交换的哪一部分运行 operator。
 const (
 	AppRouteTargetRequestHeader       = "request_header"
 	AppRouteTargetRequestBody         = "request_body"
@@ -22,7 +22,7 @@ const (
 	AppRouteTargetFingerprint         = "fingerprint"
 )
 
-// Match operators.
+// 匹配 operator。
 const (
 	AppRouteOpEq          = "eq"
 	AppRouteOpNe          = "ne"
@@ -31,11 +31,11 @@ const (
 	AppRouteOpPrefix      = "prefix"
 	AppRouteOpSuffix      = "suffix"
 	AppRouteOpRegex       = "regex"
-	AppRouteOpFuzzy       = "fuzzy" // case-insensitive substring
+	AppRouteOpFuzzy       = "fuzzy" // 不区分大小写的子串匹配
 )
 
-// ApplicationRouteRule defines how observed site resources attach historical rule metadata.
-// RecordedResource itself is written for observed site traffic; matched rules only enrich the row.
+// ApplicationRouteRule 定义被观测到的站点资源如何挂载历史规则元数据。
+// RecordedResource 本身由被观测的站点流量写入；命中的规则只负责充实该行。
 type ApplicationRouteRule struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -54,7 +54,7 @@ type ApplicationRouteRule struct {
 
 func (ApplicationRouteRule) TableName() string { return "application_route_rules" }
 
-// RecordedResource aggregates observed HTTP resources per site.
+// RecordedResource 按站点聚合被观测到的 HTTP 资源。
 type RecordedResource struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time `json:"created_at"`

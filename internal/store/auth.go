@@ -6,7 +6,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// AdminAPIKey is a static API token used to call the admin API without JWT.
+// AdminAPIKey 是无需 JWT 即可调用管理 API 的静态 API 令牌。
 type AdminAPIKey struct {
 	ID         uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt  time.Time      `json:"created_at"`
@@ -18,7 +18,7 @@ type AdminAPIKey struct {
 	LastUsedAt *time.Time     `json:"last_used_at,omitempty"`
 }
 
-// AdminAccount represents a username/password admin user.
+// AdminAccount 表示一个用户名/口令形式的管理员账号。
 type AdminAccount struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	Username     string    `gorm:"size:64;uniqueIndex;not null" json:"username"`
@@ -28,7 +28,7 @@ type AdminAccount struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// RefreshToken represents an httpOnly refresh-token session.
+// RefreshToken 表示一个 httpOnly refresh-token 会话。
 type RefreshToken struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`
 	JTI        string    `gorm:"size:128;uniqueIndex;not null" json:"jti"`
@@ -41,7 +41,7 @@ type RefreshToken struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// TokenBlacklist holds blacklisted JTIs (revoked / forced logout / rotated).
+// TokenBlacklist 保存已拉黑的 JTI（吊销 / 强制下线 / 轮换）。
 type TokenBlacklist struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	JTI       string    `gorm:"uniqueIndex;size:64" json:"jti"`
@@ -50,7 +50,7 @@ type TokenBlacklist struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// LoginAttempt records a single admin login attempt.
+// LoginAttempt 记录单次管理员登录尝试。
 type LoginAttempt struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	Username  string    `gorm:"index;size:64" json:"username"`
@@ -60,7 +60,7 @@ type LoginAttempt struct {
 	CreatedAt time.Time `gorm:"index" json:"created_at"`
 }
 
-// ActiveSession records an active admin session by JTI.
+// ActiveSession 按 JTI 记录一个活跃的管理员会话。
 type ActiveSession struct {
 	ID       uint   `gorm:"primarykey" json:"id"`
 	Username string `gorm:"index;size:64" json:"username"`
@@ -75,7 +75,7 @@ type ActiveSession struct {
 	ExpiresAt    time.Time `gorm:"index" json:"expires_at"`
 }
 
-// RBAC roles.
+// RBAC 角色。
 const (
 	RoleAdmin    = "admin"
 	RoleOperator = "operator"

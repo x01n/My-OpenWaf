@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	// 45 seconds spans the next 30-second frontend poll while keeping staleness bounded.
+	// 45 秒可跨过前端下一次 30 秒轮询，同时把陈旧度控制在有界范围内。
 	securityEventAggregateCacheTTL                  = 45 * time.Second
 	securityEventAggregateCacheMaxEntries           = 128
 	securityEventAggregateCacheMaxGenerationRetries = 1
@@ -117,9 +117,8 @@ func (c *securityEventAggregateCache) setIfGeneration(key securityEventAggregate
 	}
 }
 
-// invalidate clears completed aggregate values and advances the generation.
-// A loader that started before the invalidation cannot publish its old result
-// after a write has committed.
+// invalidate 清除已完成的聚合值并推进代际。
+// 在本次失效之前就已开始的加载器，无法在写入提交之后发布它的旧结果。
 func (c *securityEventAggregateCache) invalidate() {
 	if c == nil {
 		return
@@ -162,13 +161,12 @@ func (c *securityEventAggregateCache) getOrLoad(
 			return value, nil
 		}
 	}
-	// Continuous writes can prevent a stable generation. Return one direct
-	// load without populating the cache rather than spinning indefinitely.
+	// 持续写入可能让代际始终无法稳定。此时直接回源加载一次且不填充缓存，
+	// 而不是无限自旋。
 	return loader()
 }
 
-// SecurityEventStatsSnapshot is the complete response payload shared by global
-// and site-level security event statistics handlers.
+// SecurityEventStatsSnapshot 是全局与站点级安全事件统计 handler 共用的完整响应载荷。
 type SecurityEventStatsSnapshot struct {
 	Total        int64          `json:"total"`
 	Hours        int            `json:"hours"`
@@ -183,12 +181,12 @@ type SecurityEventStatsSnapshot struct {
 	Challenges   int64          `json:"challenges"`
 }
 
-// StatsSnapshot returns the global aggregate for the requested rolling window.
+// StatsSnapshot 返回所请求滚动窗口的全局聚合。
 func (r *SecurityEventRepo) StatsSnapshot(hours int) (SecurityEventStatsSnapshot, error) {
 	return r.statsSnapshot(false, 0, hours)
 }
 
-// StatsSnapshotBySite returns the site-scoped aggregate for the requested rolling window.
+// StatsSnapshotBySite 返回所请求滚动窗口的站点级聚合。
 func (r *SecurityEventRepo) StatsSnapshotBySite(siteID uint, hours int) (SecurityEventStatsSnapshot, error) {
 	return r.statsSnapshot(true, siteID, hours)
 }
@@ -298,12 +296,12 @@ func applySecurityEventStatsCounts(snapshot *SecurityEventStatsSnapshot, counts 
 	snapshot.Challenges = counts.Challenges
 }
 
-// TimelineSnapshot returns the global terminal-event timeline for a rolling window.
+// TimelineSnapshot 返回某个滚动窗口的全局终止事件时间线。
 func (r *SecurityEventRepo) TimelineSnapshot(hours int) ([]TimelineBucket, error) {
 	return r.timelineSnapshot(false, 0, hours)
 }
 
-// TimelineSnapshotBySite returns a site-scoped terminal-event timeline for a rolling window.
+// TimelineSnapshotBySite 返回某个滚动窗口的站点级终止事件时间线。
 func (r *SecurityEventRepo) TimelineSnapshotBySite(siteID uint, hours int) ([]TimelineBucket, error) {
 	return r.timelineSnapshot(true, siteID, hours)
 }

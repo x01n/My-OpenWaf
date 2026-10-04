@@ -262,11 +262,13 @@ type redisOAuthState struct {
 	ExpiresAt    int64   `json:"expires_at"` // Unix 毫秒
 }
 
-// RedisOAuthStateStore 基于 Redis 的 OAuth state 存储，一次性状态带 TTL。
-//
-// 失败降级语义与 RedisSessionStore 一致；与 MemoryOAuthStateStore 等价：
-// Save 覆盖同名 state（uid 层保证全局唯一），Get 惰性过期，Consume 一次性，
-// Delete/CleanExpired 幂等。
+/**
+ * RedisOAuthStateStore 基于 Redis 的 OAuth state 存储，一次性状态带 TTL。
+ *
+ * 失败降级语义与 RedisSessionStore 一致；与 MemoryOAuthStateStore 等价：
+ * Save 覆盖同名 state（uid 层保证全局唯一），Get 惰性过期，Consume 一次性，
+ * Delete/CleanExpired 幂等。
+ */
 type RedisOAuthStateStore struct {
 	mu    sync.RWMutex
 	redis rueidis.Client

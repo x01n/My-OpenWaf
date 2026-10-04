@@ -125,7 +125,7 @@ func TestVerifySlideAnswerRejectsInvalidStoredAnswer(t *testing.T) {
  */
 func TestVerifySlideAnswerRejectsInvalidUserPoints(t *testing.T) {
 	const tolerance = 5
-	// stored: target=(100,100), initial=(10,5) => correct offset=(90,95)
+	// 存储值：target=(100,100), initial=(10,5) => correct offset=(90,95)
 	stored := `{"x":100,"y":100,"dx":10,"dy":5}`
 	cases := []struct {
 		name string

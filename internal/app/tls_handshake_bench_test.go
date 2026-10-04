@@ -13,9 +13,8 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// benchListenerTLSFixture builds the per-listener TLS config used by the
-// handshake-path benchmarks. The config itself is built once per benchmark so
-// that only the per-handshake callbacks are measured.
+// benchListenerTLSFixture 构建握手路径基准测试所用的单监听 TLS 配置。
+// 配置本身每个基准只构建一次，这样被测量的就只有每次握手的回调开销。
 func benchListenerTLSFixture(b *testing.B) *tls.Config {
 	b.Helper()
 	certPEM, keyPEM, err := acmepkg.GenerateSelfSignedPEM("bench.example.test", []string{"bench.example.test"}, nil, time.Hour)
@@ -58,8 +57,8 @@ func benchListenerTLSFixture(b *testing.B) *tls.Config {
 	return cfg
 }
 
-// benchClientHello mirrors a modern browser ClientHello: TLS 1.3 capable,
-// h2/http-1.1 ALPN, SNI present.
+// benchClientHello 模拟现代浏览器的 ClientHello：支持 TLS 1.3、
+// ALPN 为 h2/http-1.1、带 SNI。
 func benchClientHello(serverName string) *tls.ClientHelloInfo {
 	return &tls.ClientHelloInfo{
 		ServerName:        serverName,
@@ -126,11 +125,9 @@ func BenchmarkListenerGetConfigForClient(b *testing.B) {
 	}
 }
 
-// emitUnguardedHandshakeDebugLog reproduces the pre-optimization logging call in
-// buildListenerTLS's GetCertificate callback: slog attributes were constructed
-// on every handshake regardless of the active log level. The paired benchmarks
-// below isolate that single difference in one benchmark run so the comparison is
-// not polluted by machine load drift between separate runs.
+// emitUnguardedHandshakeDebugLog 复现优化前 buildListenerTLS 的 GetCertificate
+// 回调里那次日志调用：无论当前日志级别如何，每次握手都会构造 slog 属性。
+// 下面的配对基准在同一次运行里隔离这一处差异，避免分次运行被机器负载漂移污染。
 func emitUnguardedHandshakeDebugLog(bind string, hello *tls.ClientHelloInfo) {
 	sni := strings.ToLower(strings.TrimSpace(hello.ServerName))
 	clientTLSMin := uint16(0)
@@ -159,9 +156,9 @@ func BenchmarkListenerGetCertificateSNIMatchUnguardedDebugLog(b *testing.B) {
 	}
 }
 
-// benchUnknownSNISnapshot builds the snapshot shape the unknown-SNI path walks:
-// one known site on the bind, so the lookup misses exact, wildcard, and
-// catch-all keys before returning not-found.
+// benchUnknownSNISnapshot 构建陌生 SNI 路径要走的快照形态：
+// 该 bind 上只有一个已知站点，因此查找会依次错过精确、通配符与 catch-all
+// 三类键，最后返回未命中。
 func benchUnknownSNISnapshot() *snapshotpkg.Snapshot {
 	rt := snapshotpkg.SiteRuntime{
 		Bind: "127.0.0.1:8443",
@@ -174,9 +171,9 @@ func benchUnknownSNISnapshot() *snapshotpkg.Snapshot {
 	}
 }
 
-// The next two benchmarks isolate the cost of MatchSite's by-value SiteRuntime
-// return (1472 bytes) against the pointer variant now used by the handshake
-// callback. Paired in one run so load drift cannot skew the comparison.
+// 下列两个基准对比 MatchSite 按值返回 SiteRuntime（1472 字节）
+// 与握手回调现用的指针版本之间的开销差异。
+// 放在同一次运行里配对测量，避免负载漂移影响对比结论。
 func BenchmarkUnknownSNIMatchSiteByValue(b *testing.B) {
 	sn := benchUnknownSNISnapshot()
 	b.ReportAllocs()
@@ -199,8 +196,8 @@ func BenchmarkUnknownSNIMatchSitePtr(b *testing.B) {
 	}
 }
 
-// BenchmarkHandshakeDebugLogGuardOnly measures the guard itself, so the report
-// can state what the retained level check costs per handshake.
+// BenchmarkHandshakeDebugLogGuardOnly 只测那层守卫本身，
+// 便于报告里说明保留的日志级别检查每次握手要花多少。
 func BenchmarkHandshakeDebugLogGuardOnly(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()

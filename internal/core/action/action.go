@@ -2,30 +2,30 @@ package action
 
 import "strings"
 
-// Type represents the WAF decision for a matched rule.
+// Type 表示规则命中后 WAF 给出的判定动作。
 type Type string
 
 const (
 	Allow     Type = "allow"
 	Intercept Type = "intercept"
 	Observe   Type = "observe"
-	Drop      Type = "drop"       // Highest priority: close TCP immediately, no response
-	Challenge Type = "challenge"  // JS challenge or CAPTCHA verification
-	Redirect  Type = "redirect"   // HTTP redirect to specified URL
-	RateLimit Type = "rate_limit" // Per-rule rate limiting
-	Tag       Type = "tag"        // Tag request for downstream processing (non-terminal)
+	Drop      Type = "drop"       // 最高优先级：立即关闭 TCP，不发送响应
+	Challenge Type = "challenge"  // JS 挑战或 CAPTCHA 验证
+	Redirect  Type = "redirect"   // 重定向到指定 URL
+	RateLimit Type = "rate_limit" // 规则级速率限制
+	Tag       Type = "tag"        // 为下游处理打标签（非终止）
 
-	// Advanced challenge types
-	CaptchaChallenge Type = "captcha_challenge" // CAPTCHA image verification (click/slide/rotate/drag)
-	ShieldChallenge  Type = "shield_challenge"  // 5-second shield: CAPTCHA + PoW + env fingerprint
-	ChainChallenge   Type = "chain_challenge"   // Multi-step chain challenge with state machine
+	// 进阶挑战类型
+	CaptchaChallenge Type = "captcha_challenge" // CAPTCHA 图形验证（点击/滑动/旋转/拖拽）
+	ShieldChallenge  Type = "shield_challenge"  // 5 秒盾：CAPTCHA + PoW + 环境指纹
+	ChainChallenge   Type = "chain_challenge"   // 带状态机的多步链式挑战
 
-	// Legacy aliases for backward compatibility with existing DB data.
+	// 遗留别名，用于兼容库中已有的历史数据。
 	Block   Type = "block"
 	LogOnly Type = "log_only"
 )
 
-// Normalize maps legacy action names to their canonical form.
+// Normalize 把遗留动作名映射为规范形式。
 func Normalize(t Type) Type {
 	switch t {
 	case Allow, Intercept, Observe, Drop, Challenge, Redirect, RateLimit, Tag, CaptchaChallenge, ShieldChallenge, ChainChallenge:
@@ -69,7 +69,7 @@ func normalizeActionToken(raw string) string {
 	return string(buf)
 }
 
-// IsValid returns true when the action is supported for runtime decisions.
+// IsValid 报告该动作是否可用于运行时判定。
 func IsValid(t Type) bool {
 	switch t {
 	case Allow, Intercept, Observe, Drop, Challenge, Redirect, RateLimit, Tag, CaptchaChallenge, ShieldChallenge, ChainChallenge:
@@ -83,8 +83,8 @@ func IsValid(t Type) bool {
 	}
 }
 
-// TerminalPriority returns the action severity used when two terminal results
-// are produced by concurrent detectors. Higher values are more severe.
+// TerminalPriority 返回并发检测器同时给出两个终止结果时的动作严重度。
+// 数值越大越严重。
 func TerminalPriority(t Type) int {
 	switch t {
 	case Drop:
@@ -118,16 +118,16 @@ func TerminalPriority(t Type) int {
 	}
 }
 
-// MoreSevere reports whether a should win over b when both actions matched.
+// MoreSevere 报告两个动作同时命中时 a 是否应当胜过 b。
 func MoreSevere(a, b Type) bool {
 	return TerminalPriority(a) > TerminalPriority(b)
 }
 
-// Result is the outcome of rule evaluation for a single request.
+// Result 是单个请求的规则评估结果。
 type Result struct {
 	Type      Type   `json:"type"`
 	RuleID    uint   `json:"rule_id,omitempty"`
-	RuleIDStr string `json:"rule_id_str,omitempty"` // builtin rules like "owasp:sqli:001"
+	RuleIDStr string `json:"rule_id_str,omitempty"` // 内置规则形如 "owasp:sqli:001"
 	// RuleName 是内置检测规则的名称（如 "SQL UNION 联合查询注入"）。
 	// 自定义规则无注册表条目时为空。
 	RuleName string `json:"rule_name,omitempty"`
@@ -154,18 +154,17 @@ type Result struct {
 	MatchDesc   string `json:"match_desc,omitempty"`
 	Matched     bool   `json:"matched"`
 	Category    string `json:"category,omitempty"`
-	StatusCode  int    `json:"status_code,omitempty"`  // custom HTTP status code (0 = use default)
-	RedirectTo  string `json:"redirect_to,omitempty"`  // URL for redirect action
-	CaptchaType string `json:"captcha_type,omitempty"` // Rule-level CAPTCHA type; empty inherits global config.
+	StatusCode  int    `json:"status_code,omitempty"`  // 自定义 HTTP 状态码（0 = 使用默认值）
+	RedirectTo  string `json:"redirect_to,omitempty"`  // redirect 动作的跳转 URL
+	CaptchaType string `json:"captcha_type,omitempty"` // 规则级 CAPTCHA 类型；空值继承全局配置。
 	// CaptchaMinutes 是规则级验证码通过有效期（分钟）；0 表示继承全局 captcha_pass_ttl。
 	CaptchaMinutes int                `json:"captcha_minutes,omitempty"`
-	SetHeaders     *map[string]string `json:"set_headers,omitempty"`   // Controlled response headers from Lua
-	ResponseBody   *string            `json:"response_body,omitempty"` // Controlled response body from Lua
-	Tags           *[]string          `json:"tags,omitempty"`          // Labels for observability
+	SetHeaders     *map[string]string `json:"set_headers,omitempty"`   // Lua 可控的响应头
+	ResponseBody   *string            `json:"response_body,omitempty"` // Lua 可控的响应体
+	Tags           *[]string          `json:"tags,omitempty"`          // 可观测性标签
 }
 
-// IsTerminal returns true when this action must short-circuit
-// the pipeline - no upstream, no further phases.
+// IsTerminal 报告该动作是否必须短路管道——既不访问上游，也不再执行后续阶段。
 func (r Result) IsTerminal() bool {
 	if !r.Matched {
 		return false
@@ -179,8 +178,7 @@ func (r Result) IsTerminal() bool {
 		t == CaptchaChallenge || t == ShieldChallenge || t == ChainChallenge)
 }
 
-// IsDrop returns true when this action requires an immediate TCP connection close
-// without sending any HTTP response.
+// IsDrop 报告该动作是否要求立即关闭 TCP 连接且不发送任何 HTTP 响应。
 func (r Result) IsDrop() bool {
 	if !r.Matched {
 		return false
@@ -191,7 +189,7 @@ func (r Result) IsDrop() bool {
 	return Normalize(r.Type) == Drop
 }
 
-// IsChallenge returns true when the request should be served a challenge page.
+// IsChallenge 报告该请求是否应当返回验证挑战页。
 func (r Result) IsChallenge() bool {
 	if !r.Matched {
 		return false
@@ -204,7 +202,7 @@ func (r Result) IsChallenge() bool {
 	return t == Challenge || t == CaptchaChallenge || t == ShieldChallenge || t == ChainChallenge
 }
 
-// IsCaptchaChallenge returns true when the request requires a CAPTCHA challenge.
+// IsCaptchaChallenge 报告该请求是否需要 CAPTCHA 验证。
 func (r Result) IsCaptchaChallenge() bool {
 	if !r.Matched {
 		return false
@@ -215,7 +213,7 @@ func (r Result) IsCaptchaChallenge() bool {
 	return Normalize(r.Type) == CaptchaChallenge
 }
 
-// IsShieldChallenge returns true when the request requires a 5-second shield challenge.
+// IsShieldChallenge 报告该请求是否需要 5 秒盾验证。
 func (r Result) IsShieldChallenge() bool {
 	if !r.Matched {
 		return false
@@ -226,7 +224,7 @@ func (r Result) IsShieldChallenge() bool {
 	return Normalize(r.Type) == ShieldChallenge
 }
 
-// IsChainChallenge returns true when the request requires a multi-step chain challenge.
+// IsChainChallenge 报告该请求是否需要多步链式验证。
 func (r Result) IsChainChallenge() bool {
 	if !r.Matched {
 		return false
@@ -237,7 +235,7 @@ func (r Result) IsChainChallenge() bool {
 	return Normalize(r.Type) == ChainChallenge
 }
 
-// IsRedirect returns true when the request should be redirected.
+// IsRedirect 报告该请求是否应当重定向。
 func (r Result) IsRedirect() bool {
 	if !r.Matched {
 		return false
@@ -248,7 +246,7 @@ func (r Result) IsRedirect() bool {
 	return Normalize(r.Type) == Redirect
 }
 
-// IsRateLimit returns true when this action should return a rate-limit response.
+// IsRateLimit 报告该动作是否应返回限流响应。
 func (r Result) IsRateLimit() bool {
 	if !r.Matched {
 		return false
@@ -259,7 +257,7 @@ func (r Result) IsRateLimit() bool {
 	return Normalize(r.Type) == RateLimit
 }
 
-// ShouldLog returns true when the match warrants a security log entry.
+// ShouldLog 报告该命中是否值得写入一条安全日志。
 func (r Result) ShouldLog() bool {
 	if !r.Matched {
 		return false
@@ -273,8 +271,8 @@ func (r Result) ShouldLog() bool {
 		t == CaptchaChallenge || t == ShieldChallenge || t == ChainChallenge
 }
 
-// EffectiveStatusCode returns the status code to use, falling back to the
-// given default when no custom code is set.
+// EffectiveStatusCode 返回应当使用的状态码；未设置自定义状态码时回退到
+// 传入的默认值。
 func (r Result) EffectiveStatusCode(defaultCode int) int {
 	if r.StatusCode > 0 {
 		return r.StatusCode
@@ -282,7 +280,7 @@ func (r Result) EffectiveStatusCode(defaultCode int) int {
 	return defaultCode
 }
 
-// DefaultStatusCode returns the canonical HTTP status code for actions that send a response.
+// DefaultStatusCode 返回需要发送响应的动作的规范 HTTP 状态码。
 func (r Result) DefaultStatusCode() int {
 	switch r.Type {
 	case RateLimit:
@@ -308,21 +306,20 @@ func (r Result) DefaultStatusCode() int {
 	}
 }
 
-// ResponseStatusCode returns the configured status code or the canonical default.
+// ResponseStatusCode 返回配置的状态码，未配置时返回规范默认值。
 func (r Result) ResponseStatusCode() int {
 	return r.EffectiveStatusCode(r.DefaultStatusCode())
 }
 
-// Pass returns an unmatched allow result (default passthrough).
+// Pass 返回一个未命中的 allow 结果（默认放行）。
 func Pass() Result { return Result{Type: Allow} }
 
-// ---------------------------------------------------------------------------
-// 内部状态码系统 (1xxx)
-// ---------------------------------------------------------------------------
-//
-// 内部状态码用于 WAF 内部日志记录和指标追踪，不会发送给客户端。
-// 1xxx 范围与标准 HTTP 状态码互不冲突，仅供内部可观测性使用。
-
+/**
+ * 内部状态码系统 (1xxx)。
+ *
+ * 内部状态码用于 WAF 内部日志记录和指标追踪，不会发送给客户端。
+ * 1xxx 范围与标准 HTTP 状态码互不冲突，仅供内部可观测性使用。
+ */
 const (
 	InternalCodeDrop             = 1000 // TCP 立即断开，不发送 HTTP 响应
 	InternalCodeIntercept        = 1001 // WAF 拦截/阻断

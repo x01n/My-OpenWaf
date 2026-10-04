@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// --- normalizeProtectionSensitivityLevel ---
+// normalizeProtectionSensitivityLevel
 
 func TestNormalizeProtectionSensitivityLevel(t *testing.T) {
 	cases := []struct {
@@ -43,7 +43,7 @@ func TestNormalizeProtectionSensitivityLevel(t *testing.T) {
 	}
 }
 
-// --- normalizeProtectionSensitivityMap ---
+// normalizeProtectionSensitivityMap
 
 func TestNormalizeProtectionSensitivityMap(t *testing.T) {
 	t.Run("nil map returns nil", func(t *testing.T) {
@@ -84,7 +84,7 @@ func TestNormalizeProtectionSensitivityMap(t *testing.T) {
 	})
 }
 
-// --- GetCategorySensitivity ---
+// GetCategorySensitivity
 
 func TestGetCategorySensitivity(t *testing.T) {
 	t.Run("empty string returns nil", func(t *testing.T) {
@@ -114,7 +114,7 @@ func TestGetCategorySensitivity(t *testing.T) {
 	})
 }
 
-// --- SetCategorySensitivity ---
+// SetCategorySensitivity
 
 func TestSetCategorySensitivity(t *testing.T) {
 	t.Run("nil map sets empty object", func(t *testing.T) {
@@ -141,7 +141,7 @@ func TestSetCategorySensitivity(t *testing.T) {
 	})
 }
 
-// --- GetOWASPModules ---
+// GetOWASPModules
 
 func TestGetOWASPModules(t *testing.T) {
 	t.Run("empty returns nil", func(t *testing.T) {
@@ -159,7 +159,7 @@ func TestGetOWASPModules(t *testing.T) {
 	})
 }
 
-// --- EffectiveCategorySensitivity ---
+// EffectiveCategorySensitivity
 
 func TestEffectiveCategorySensitivity(t *testing.T) {
 	t.Run("both empty returns nil", func(t *testing.T) {
@@ -198,7 +198,7 @@ func TestEffectiveCategorySensitivity(t *testing.T) {
 	})
 }
 
-// --- GetOWASPRulesConfig / SetOWASPRulesConfig ---
+// GetOWASPRulesConfig / SetOWASPRulesConfig
 
 func TestOWASPRulesConfig(t *testing.T) {
 	t.Run("empty string returns nil", func(t *testing.T) {
@@ -237,7 +237,7 @@ func TestOWASPRulesConfig(t *testing.T) {
 	})
 }
 
-// --- GetEscalationSteps / SetEscalationSteps ---
+// GetEscalationSteps / SetEscalationSteps
 
 func TestEscalationSteps(t *testing.T) {
 	t.Run("empty string returns nil", func(t *testing.T) {
@@ -292,7 +292,7 @@ func TestEscalationSteps(t *testing.T) {
 	})
 }
 
-// --- DefaultProtectionConfig ---
+// DefaultProtectionConfig
 
 func TestDefaultProtectionConfig(t *testing.T) {
 	cfg := DefaultProtectionConfig()
@@ -353,7 +353,7 @@ func TestProtectionConfigValidateRateLimitsRejectsZeroQuota(t *testing.T) {
 	}
 }
 
-// --- DefaultBotProtectionConfig ---
+// DefaultBotProtectionConfig
 
 func TestDefaultBotProtectionConfig(t *testing.T) {
 	cfg := DefaultBotProtectionConfig()
@@ -368,7 +368,7 @@ func TestDefaultBotProtectionConfig(t *testing.T) {
 	}
 }
 
-// --- DefaultAttackProtectionConfig ---
+// DefaultAttackProtectionConfig
 
 func TestDefaultAttackProtectionConfig(t *testing.T) {
 	cfg := DefaultAttackProtectionConfig()
@@ -389,7 +389,7 @@ func TestDefaultAttackProtectionConfig(t *testing.T) {
 	}
 }
 
-// --- ChallengeAction / CaptchaType 默认值与校验 ---
+// ChallengeAction / CaptchaType 默认值与校验
 
 func TestDefaultProtectionConfigChallengeAction(t *testing.T) {
 	cfg := DefaultProtectionConfig()

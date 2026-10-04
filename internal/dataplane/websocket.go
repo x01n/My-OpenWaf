@@ -32,15 +32,17 @@ import (
 const wsInspectFrameLimit = 4096
 const websocketUpstreamResponseHeaderLimit = 1 << 20
 
-// IsWebSocketUpgrade checks the request for a WebSocket upgrade handshake.
+// IsWebSocketUpgrade 检查请求是否为 WebSocket 升级握手。
 func IsWebSocketUpgrade(c *app.RequestContext) bool {
 	return strings.EqualFold(string(c.GetHeader("Upgrade")), "websocket") &&
 		headerContainsToken(c.GetHeader("Connection"), []byte("upgrade"))
 }
 
-// IsH2ExtendedWebSocketConnect 报告入站请求是否为 RFC 8441 扩展 CONNECT
-// WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol"
-// 伪头值不为空表示扩展 CONNECT，空串表示非扩展 CONNECT。
+/**
+ * IsH2ExtendedWebSocketConnect 报告入站请求是否为 RFC 8441 扩展 CONNECT
+ * WebSocket 流（CONNECT 方法且携带 ":protocol" 伪头）。":protocol"
+ * 伪头值不为空表示扩展 CONNECT，空串表示非扩展 CONNECT。
+ */
 func IsH2ExtendedWebSocketConnect(c *app.RequestContext) bool {
 	if c == nil || !bytes.Equal(c.Method(), []byte(http.MethodConnect)) {
 		return false
@@ -56,7 +58,7 @@ func h2ProtoHeaderValue(c *app.RequestContext) string {
 	return string(c.GetHeader(":protocol"))
 }
 
-// headerContainsToken checks whether comma-separated header value contains token.
+// headerContainsToken 判断以逗号分隔的请求头值中是否含有指定 token。
 func headerContainsToken(value []byte, token []byte) bool {
 	for len(value) > 0 {
 		part := value
@@ -74,18 +76,19 @@ func headerContainsToken(value []byte, token []byte) bool {
 	return false
 }
 
-// normalizeWebSocketUpstreamTarget rewrites the upstream base scheme to its
-// WebSocket form:
-//
-//   - http     -> ws
-//   - https    -> wss
-//   - h2c      -> ws（明文 h2 prior knowledge，WebSocket 握手仍为 HTTP/1.1 明文）
-//   - tls/grpcs/grpc+tls/grpc+https -> wss（与 https 同语义，走 TLS 拨号）
-//   - grpc     -> ws（与 h2c 同语义）
-//
-// h3 不在此归一：QUIC 使用二进制帧而非 HTTP/1.1 明文握手，无法承载本函数
-// 之后的 WebSocket 握手；h3 upstream 应在调用方被排除出 WS 转发路径，
-// 不做静默重写。
+/**
+ * normalizeWebSocketUpstreamTarget 把上游基础 scheme 改写为其 WebSocket 形式：
+ *
+ *   - http     -> ws
+ *   - https    -> wss
+ *   - h2c      -> ws（明文 h2 prior knowledge，WebSocket 握手仍为 HTTP/1.1 明文）
+ *   - tls/grpcs/grpc+tls/grpc+https -> wss（与 https 同语义，走 TLS 拨号）
+ *   - grpc     -> ws（与 h2c 同语义）
+ *
+ * h3 不在此归一：QUIC 使用二进制帧而非 HTTP/1.1 明文握手，无法承载本函数
+ * 之后的 WebSocket 握手；h3 upstream 应在调用方被排除出 WS 转发路径，
+ * 不做静默重写。
+ */
 func normalizeWebSocketUpstreamTarget(target string) string {
 	// RPC 别名必须优先于通用前缀替换：
 	// grpc+https:// 这类别名包含 "https://" 子串，若先做通用替换会得到
@@ -104,7 +107,7 @@ func normalizeWebSocketUpstreamTarget(target string) string {
 	return target
 }
 
-// asciiEqualFoldBytes compares a byte slice with a string case-insensitively for ASCII.
+// asciiEqualFoldBytes 以 ASCII 大小写不敏感的方式比较字节切片与字符串。
 func asciiEqualFoldBytes(got []byte, want string) bool {
 	if len(got) != len(want) {
 		return false
@@ -120,7 +123,7 @@ func asciiEqualFoldBytes(got []byte, want string) bool {
 	return true
 }
 
-// ForwardWebSocket forwards the WS handshake and inspects text/binary frames.
+// ForwardWebSocket 转发 WS 握手并检视文本/二进制帧。
 func ForwardWebSocket(ctx context.Context, reqID string, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, eng *engine.Engine) error {
 	target := strings.TrimRight(base, "/") + string(c.Path())
 	q := c.URI().QueryString()

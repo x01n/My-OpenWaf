@@ -10,7 +10,7 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// SessionInfo represents an active user session.
+// SessionInfo 描述一个活跃的用户会话。
 type SessionInfo struct {
 	ID           uint   `json:"id"`
 	Username     string `json:"username"`
@@ -24,10 +24,10 @@ type SessionInfo struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
-// SessionManager tracks active sessions in memory and persists to database.
+// SessionManager 在内存中跟踪活跃会话，并同步持久化到数据库。
 type SessionManager struct {
 	mu            sync.RWMutex
-	sessions      map[string]*SessionInfo // jti -> session
+	sessions      map[string]*SessionInfo // jti -> 会话
 	lastPersisted map[string]time.Time
 	db            *gorm.DB
 	stopCh        chan struct{}
@@ -35,7 +35,7 @@ type SessionManager struct {
 	closeOnce     sync.Once
 }
 
-// NewSessionManager creates a new session manager.
+// NewSessionManager 创建一个会话管理器。
 func NewSessionManager(db *gorm.DB) *SessionManager {
 	sm := &SessionManager{
 		sessions:      make(map[string]*SessionInfo),
@@ -49,13 +49,13 @@ func NewSessionManager(db *gorm.DB) *SessionManager {
 	return sm
 }
 
-// CreateSession registers a new active session.
+// CreateSession 登记一个新的活跃会话。
 func (sm *SessionManager) CreateSession(username, jti, ip, userAgent, deviceInfo string, expiresAt time.Time) {
 	sm.CreateSessionWithRefresh(username, jti, "", ip, userAgent, deviceInfo, expiresAt)
 }
 
-// CreateSessionWithRefresh registers an access session and links its rotating
-// refresh JTI. The link remains server-side and is never serialized to clients.
+// CreateSessionWithRefresh 登记一个 access 会话，并关联其轮换中的 refresh JTI。
+// 该关联只保留在服务端，绝不会序列化给客户端。
 func (sm *SessionManager) CreateSessionWithRefresh(username, jti, refreshJTI, ip, userAgent, deviceInfo string, expiresAt time.Time) {
 	now := time.Now()
 	info := &SessionInfo{
@@ -78,7 +78,7 @@ func (sm *SessionManager) CreateSessionWithRefresh(username, jti, refreshJTI, ip
 	sm.lastPersisted[jti] = now
 	sm.mu.Unlock()
 
-	// Persist to DB.
+	// 落库。
 	if sm.db != nil {
 		row := store.ActiveSession{
 			Username:     username,
@@ -101,9 +101,9 @@ func (sm *SessionManager) CreateSessionWithRefresh(username, jti, refreshJTI, ip
 	}
 }
 
-// ReplaceSessionForRefresh rotates an existing access session in place. It
-// prevents a proactive refresh from accumulating one database row per access
-// token while preserving the stable session identity shown in the UI.
+// ReplaceSessionForRefresh 就地把现有 access 会话整体轮换掉。
+// 这样主动刷新令牌时就不会每个 access token 都堆积一行数据库记录，
+// 同时仍保留界面上看到的稳定会话标识。
 func (sm *SessionManager) ReplaceSessionForRefresh(oldRefreshJTI, newJTI, newRefreshJTI, ip, userAgent, deviceInfo string, expiresAt time.Time) bool {
 	if oldRefreshJTI == "" {
 		return false
@@ -155,7 +155,7 @@ func (sm *SessionManager) ReplaceSessionForRefresh(oldRefreshJTI, newJTI, newRef
 	return true
 }
 
-// RemoveSession deletes a session by JTI.
+// RemoveSession 按 JTI 删除会话。
 func (sm *SessionManager) RemoveSession(jti string) {
 	sm.mu.Lock()
 	delete(sm.sessions, jti)
@@ -167,7 +167,7 @@ func (sm *SessionManager) RemoveSession(jti string) {
 	}
 }
 
-// UpdateLastActive updates the last activity timestamp for a session.
+// UpdateLastActive 更新会话的最后活跃时间。
 func (sm *SessionManager) UpdateLastActive(jti string) {
 	now := time.Now()
 	persist := false
@@ -190,7 +190,7 @@ func (sm *SessionManager) UpdateLastActive(jti string) {
 	}
 }
 
-// GetSession returns a session by JTI.
+// GetSession 按 JTI 返回会话。
 func (sm *SessionManager) GetSession(jti string) *SessionInfo {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -202,8 +202,8 @@ func (sm *SessionManager) GetSession(jti string) *SessionInfo {
 	return &cp
 }
 
-// RefreshTokenJTI returns the server-side refresh-token link for an access JTI.
-// It is intentionally not part of SessionInfo's JSON representation.
+// RefreshTokenJTI 返回某个 access JTI 在服务端关联的 refresh token 标识。
+// 它有意不作为 SessionInfo JSON 表示的一部分对外暴露。
 func (sm *SessionManager) RefreshTokenJTI(jti string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -213,7 +213,7 @@ func (sm *SessionManager) RefreshTokenJTI(jti string) string {
 	return ""
 }
 
-// ListUserSessions returns all active sessions for a given username.
+// ListUserSessions 返回指定用户名的全部活跃会话。
 func (sm *SessionManager) ListUserSessions(username string) []SessionInfo {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -229,7 +229,7 @@ func (sm *SessionManager) ListUserSessions(username string) []SessionInfo {
 	return result
 }
 
-// ListAllSessions returns all active sessions (admin only).
+// ListAllSessions 返回全部活跃会话（仅管理员）。
 func (sm *SessionManager) ListAllSessions() []SessionInfo {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -254,7 +254,7 @@ func sortSessionInfos(items []SessionInfo) {
 	})
 }
 
-// ForceLogout removes a session and returns the JTI for blacklisting.
+// ForceLogout 移除会话并返回供拉黑使用的 JTI。
 func (sm *SessionManager) ForceLogout(jti string) bool {
 	sm.mu.Lock()
 	_, existed := sm.sessions[jti]
@@ -268,7 +268,7 @@ func (sm *SessionManager) ForceLogout(jti string) bool {
 	return existed
 }
 
-// RemoveUserSessions removes all sessions for a user and returns their JTIs.
+// RemoveUserSessions 移除某个用户的全部会话，并返回它们的 JTI。
 func (sm *SessionManager) RemoveUserSessions(username string) []string {
 	sm.mu.Lock()
 	var jtis []string
@@ -313,7 +313,7 @@ func (sm *SessionManager) loadFromDB() {
 	}
 }
 
-// Close stops the session cleanup goroutine and is safe to call repeatedly.
+// Close 停止会话清理协程，可安全地重复调用。
 func (sm *SessionManager) Close() {
 	if sm == nil {
 		return
@@ -345,7 +345,7 @@ func (sm *SessionManager) cleanupLoop() {
 			}
 			sm.mu.Unlock()
 
-			// Cleanup expired from DB.
+			// 清理数据库中已过期的会话。
 			if sm.db != nil {
 				sm.db.Where("expires_at < ?", now).Delete(&store.ActiveSession{})
 			}

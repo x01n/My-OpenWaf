@@ -53,7 +53,7 @@ func seedOneCVERule(t *testing.T, repo interface{ Create(*cve.CVERuleModel) erro
 	return rule
 }
 
-// ---- CreateCVERule ----
+// CreateCVERule
 
 func TestCreateCVERulePersists(t *testing.T) {
 	repo := newCVERuleRepoForTest(t)
@@ -135,7 +135,7 @@ func TestCreateCVERuleRejectsUnsupportedTarget(t *testing.T) {
 	}
 }
 
-// ---- UpdateCVERule ----
+// UpdateCVERule
 
 func TestUpdateCVERuleReturnsNotFoundForMissingID(t *testing.T) {
 	repo := newCVERuleRepoForTest(t)
@@ -278,7 +278,7 @@ func TestUpdateCVERuleRejectsInvalidRegex(t *testing.T) {
 	}
 }
 
-// ---- DeleteCVERule ----
+// DeleteCVERule
 
 func TestDeleteCVERuleReturnsNotFoundForMissingID(t *testing.T) {
 	repo := newCVERuleRepoForTest(t)
@@ -325,7 +325,7 @@ func TestDeleteCVERuleSucceeds(t *testing.T) {
 	}
 }
 
-// ---- ToggleCVERule ----
+// ToggleCVERule
 
 func TestToggleCVERuleReturnsNotFoundForMissingID(t *testing.T) {
 	repo := newCVERuleRepoForTest(t)
@@ -386,7 +386,7 @@ func TestToggleCVERuleExplicitEnabledSetsApproved(t *testing.T) {
 	}
 }
 
-// ---- SyncCVERules ----
+// SyncCVERules
 
 func TestSyncCVERulesNilManagerReturns503(t *testing.T) {
 	ctx := invokeCVEHandler(t, SyncCVERules(nil), "POST", "/api/v1/cve-rules/sync", "", nil)
@@ -395,7 +395,7 @@ func TestSyncCVERulesNilManagerReturns503(t *testing.T) {
 	}
 }
 
-// ---- GetCVEFeedStatus ----
+// GetCVEFeedStatus
 
 func TestGetCVEFeedStatusNilManagerReturnsErrorField(t *testing.T) {
 	repo := newCVERuleRepoForTest(t)

@@ -265,7 +265,7 @@ func TestCheckRawMultipartFilenames_NullByteSamples(t *testing.T) {
 	}
 }
 
-// Enhanced SQLi patterns
+// 增强的 SQLi 特征
 func TestCheckOWASP_SQLi_Boolean(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1 or 1=1", nil, nil)
 	if !hasCategory(hits, CatSQLi) {
@@ -280,7 +280,7 @@ func TestCheckOWASP_SQLi_ErrorBased(t *testing.T) {
 	}
 }
 
-// Enhanced XSS patterns
+// 增强的 XSS 特征
 func TestCheckOWASP_XSS_SVG(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "q=<svg onload=alert(1)>", nil, nil)
 	if !hasCategory(hits, CatXSS) {
@@ -295,7 +295,7 @@ func TestCheckOWASP_XSS_DataURL(t *testing.T) {
 	}
 }
 
-// Ensure localhost Host header does not cause SSRF false positive.
+// 确保 localhost 的 Host 请求头不引发 SSRF 误报。
 func TestCheckOWASP_SSRF_LocalhostHostHeader(t *testing.T) {
 	headers := map[string]string{
 		"Host":            "127.0.0.1",
@@ -308,7 +308,7 @@ func TestCheckOWASP_SSRF_LocalhostHostHeader(t *testing.T) {
 	}
 }
 
-// Ensure SSRF still detects localhost in actual payloads (query string).
+// 确保真实载荷（查询串）中的 localhost 仍被 SSRF 检出。
 func TestCheckOWASP_SSRF_LocalhostInPayload(t *testing.T) {
 	hits := CheckOWASP("high", "/", "url=http://127.0.0.1/admin", nil, nil)
 	if !hasCategory(hits, CatSSRF) {
@@ -338,7 +338,7 @@ func TestCheckOWASP_XSS_InBody(t *testing.T) {
 }
 
 func TestCheckOWASP_Base64_TemplateInjection(t *testing.T) {
-	// "e3sgMzMzMSozMzMwIH19" base64 decodes to "{{ 3331*3330 }}"
+	// "e3sgMzMzMSozMzMwIH19" base64 解码为 "{{ 3331*3330 }}"
 	hits := CheckOWASP("mid", "/", "retain=e3sgMzMzMSozMzMwIH19", nil, nil)
 	if !hasCategory(hits, CatTmplInject) {
 		t.Fatal("expected template injection from base64-encoded payload")
@@ -520,7 +520,7 @@ func TestNormalize_Base64Decode(t *testing.T) {
 	}
 }
 
-// SQLi: ORDER BY enumeration with comment
+// SQLi：ORDER BY 枚举后接注释
 func TestCheckOWASP_SQLi_OrderBy(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1 order by 5-- -", nil, nil)
 	if !hasCategory(hits, CatSQLi) {
@@ -528,7 +528,7 @@ func TestCheckOWASP_SQLi_OrderBy(t *testing.T) {
 	}
 }
 
-// SQLi: MySQL inline comment bypass /*!50000union*/
+// SQLi：MySQL 行内注释绕过 /*!50000union*/
 func TestCheckOWASP_SQLi_InlineComment(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1 /*!50000union*/ select * from users", nil, nil)
 	if !hasCategory(hits, CatSQLi) {
@@ -536,7 +536,7 @@ func TestCheckOWASP_SQLi_InlineComment(t *testing.T) {
 	}
 }
 
-// SQLi: Blind extraction with SUBSTR (combined with UNION for realistic payload)
+// SQLi：用 SUBSTR 做盲注提取（与 UNION 组合以贴近真实载荷）
 func TestCheckOWASP_SQLi_SubstrBlind(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=1 and substr((select password from users),1,1)='a'-- ", nil, nil)
 	if !hasCategory(hits, CatSQLi) {
@@ -544,7 +544,7 @@ func TestCheckOWASP_SQLi_SubstrBlind(t *testing.T) {
 	}
 }
 
-// SQLi: Conditional blind IF(select...)
+// SQLi：条件盲注 IF(select...)
 func TestCheckOWASP_SQLi_ConditionalBlind(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "id=if(ascii(substr(user(),1,1))=114,1,0)", nil, nil)
 	if !hasCategory(hits, CatSQLi) {
@@ -552,7 +552,7 @@ func TestCheckOWASP_SQLi_ConditionalBlind(t *testing.T) {
 	}
 }
 
-// XSS: <details> with ontoggle
+// XSS：带 ontoggle 的 <details>
 func TestCheckOWASP_XSS_DetailsOnToggle(t *testing.T) {
 	hits := CheckOWASP("mid", "/", `q=<details open ontoggle=alert(1)>`, nil, nil)
 	if !hasCategory(hits, CatXSS) {
@@ -560,7 +560,7 @@ func TestCheckOWASP_XSS_DetailsOnToggle(t *testing.T) {
 	}
 }
 
-// XSS: <form action=javascript:>
+// XSS：<form action=javascript:>
 func TestCheckOWASP_XSS_FormJavascript(t *testing.T) {
 	hits := CheckOWASP("mid", "/", `q=<form action="javascript:alert(1)">`, nil, nil)
 	if !hasCategory(hits, CatXSS) {
@@ -568,7 +568,7 @@ func TestCheckOWASP_XSS_FormJavascript(t *testing.T) {
 	}
 }
 
-// XSS: String.fromCharCode bypass
+// XSS：String.fromCharCode 绕过
 func TestCheckOWASP_XSS_FromCharCode(t *testing.T) {
 	hits := CheckOWASP("mid", "/", `q=String.fromCharCode(60,115,99,114,105,112,116,62)`, nil, nil)
 	if !hasCategory(hits, CatXSS) {
@@ -576,7 +576,7 @@ func TestCheckOWASP_XSS_FromCharCode(t *testing.T) {
 	}
 }
 
-// XSS: <embed> with src
+// XSS：带 src 的 <embed>
 func TestCheckOWASP_XSS_Embed(t *testing.T) {
 	hits := CheckOWASP("high", "/", `q=<embed src="javascript:alert(1)">`, nil, nil)
 	if !hasCategory(hits, CatXSS) {
@@ -584,7 +584,7 @@ func TestCheckOWASP_XSS_Embed(t *testing.T) {
 	}
 }
 
-// XSS: <base href> injection
+// XSS：<base href> 注入
 func TestCheckOWASP_XSS_BaseHref(t *testing.T) {
 	hits := CheckOWASP("high", "/", `q=<base href="https://evil.com/">`, nil, nil)
 	if !hasCategory(hits, CatXSS) {
@@ -592,7 +592,7 @@ func TestCheckOWASP_XSS_BaseHref(t *testing.T) {
 	}
 }
 
-// CMD injection: ${IFS} space bypass
+// 命令注入：${IFS} 空格绕过
 func TestCheckOWASP_CmdInject_IFS(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "cmd=cat${IFS}/etc/passwd", nil, nil)
 	if !hasCategory(hits, CatCmdInject) && !hasCategory(hits, CatPathTrav) {
@@ -600,7 +600,7 @@ func TestCheckOWASP_CmdInject_IFS(t *testing.T) {
 	}
 }
 
-// CMD injection: chained with &&
+// 命令注入：用 && 串联
 func TestCheckOWASP_CmdInject_DoubleAmpersand(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "input=test&&whoami", nil, nil)
 	if !hasCategory(hits, CatCmdInject) {
@@ -608,7 +608,7 @@ func TestCheckOWASP_CmdInject_DoubleAmpersand(t *testing.T) {
 	}
 }
 
-// CMD injection: jQuery selector must NOT trigger
+// 命令注入：jQuery 选择器不得触发
 func TestCheckOWASP_CmdInject_CleanJQuery(t *testing.T) {
 	hits := CheckOWASP("mid", "/api", "", nil, []string{`$(document).ready(function(){})`})
 	if hasCategory(hits, CatCmdInject) {
@@ -616,7 +616,7 @@ func TestCheckOWASP_CmdInject_CleanJQuery(t *testing.T) {
 	}
 }
 
-// CMD injection: jQuery with class selector must NOT trigger
+// 命令注入：带类选择器的 jQuery 不得触发
 func TestCheckOWASP_CmdInject_CleanJQuerySelector(t *testing.T) {
 	hits := CheckOWASP("mid", "/api", "", nil, []string{`$(".my-class").hide()`})
 	if hasCategory(hits, CatCmdInject) {
@@ -624,7 +624,7 @@ func TestCheckOWASP_CmdInject_CleanJQuerySelector(t *testing.T) {
 	}
 }
 
-// Path traversal: Tomcat ..;/ bypass
+// 路径遍历：Tomcat ..;/ 绕过
 func TestCheckOWASP_PathTrav_TomcatBypass(t *testing.T) {
 	hits := CheckOWASP("mid", "/..;/..;/WEB-INF/web.xml", "", nil, nil)
 	if !hasCategory(hits, CatPathTrav) {
@@ -632,7 +632,7 @@ func TestCheckOWASP_PathTrav_TomcatBypass(t *testing.T) {
 	}
 }
 
-// Path traversal: /proc/self/environ
+// 路径遍历：/proc/self/environ
 func TestCheckOWASP_PathTrav_ProcSelf(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "file=/proc/self/environ", nil, nil)
 	if !hasCategory(hits, CatPathTrav) {
@@ -640,7 +640,7 @@ func TestCheckOWASP_PathTrav_ProcSelf(t *testing.T) {
 	}
 }
 
-// Path traversal: overlong UTF-8 encoded dots
+// 路径遍历：overlong UTF-8 编码的点号
 func TestCheckOWASP_PathTrav_OverlongUTF8(t *testing.T) {
 	hits := CheckOWASP("mid", "/%c0%ae%c0%ae/%c0%ae%c0%ae/etc/passwd", "", nil, nil)
 	if !hasCategory(hits, CatPathTrav) {
@@ -648,7 +648,7 @@ func TestCheckOWASP_PathTrav_OverlongUTF8(t *testing.T) {
 	}
 }
 
-// SSTI: Python __subclasses__ traversal
+// SSTI：Python __subclasses__ 遍历
 func TestCheckOWASP_SSTI_Subclasses(t *testing.T) {
 	hits := CheckOWASP("mid", "/", `name={{''.__class__.__mro__[2].__subclasses__()}}`, nil, nil)
 	if !hasCategory(hits, CatTmplInject) {
@@ -656,27 +656,27 @@ func TestCheckOWASP_SSTI_Subclasses(t *testing.T) {
 	}
 }
 
-// SSTI: Smarty {php} tag
+// SSTI：Smarty {php} 标签
 func TestCheckOWASP_SSTI_SmartyPHP(t *testing.T) {
 	hits := CheckOWASP("mid", "/", `tpl={php}system("id");{/php}`, nil, nil)
 	if !hasCategory(hits, CatTmplInject) || !hasCategory(hits, CatWebshell) {
-		// Should trigger either SSTI or webshell
+		// 应触发 SSTI 或 webshell 其中之一
 		if !hasCategory(hits, CatTmplInject) && !hasCategory(hits, CatWebshell) {
 			t.Fatal("expected SSTI or webshell hit for Smarty {php}")
 		}
 	}
 }
 
-// SSTI: Python __builtins__.__import__
+// SSTI：Python __builtins__.__import__
 func TestCheckOWASP_SSTI_PythonDunder(t *testing.T) {
-	// This payload may trigger webshell (due to popen) or SSTI (due to __builtins__)
+	// 该载荷可能触发 webshell（因 popen）或 SSTI（因 __builtins__）
 	hits := CheckOWASP("mid", "/", `name={{request.__class__.__builtins__.__import__('os').popen('id')}}`, nil, nil)
 	if !hasCategory(hits, CatTmplInject) && !hasCategory(hits, CatWebshell) {
 		t.Fatal("expected SSTI or webshell hit for Python dunder import")
 	}
 }
 
-// SSRF: IPv6-mapped private IP
+// SSRF：IPv6 映射的私网地址
 func TestCheckOWASP_SSRF_IPv6Mapped(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "url=http://[::ffff:127.0.0.1]/admin", nil, nil)
 	if !hasCategory(hits, CatSSRF) {
@@ -684,7 +684,7 @@ func TestCheckOWASP_SSRF_IPv6Mapped(t *testing.T) {
 	}
 }
 
-// SSRF: Decimal IP encoding
+// SSRF：十进制 IP 编码
 func TestCheckOWASP_SSRF_DecimalIP(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "url=http://2130706433/admin", nil, nil)
 	if !hasCategory(hits, CatSSRF) {
@@ -692,7 +692,7 @@ func TestCheckOWASP_SSRF_DecimalIP(t *testing.T) {
 	}
 }
 
-// Deserialization: .NET BinaryFormatter
+// 反序列化：.NET BinaryFormatter
 func TestCheckOWASP_Deser_DotNet(t *testing.T) {
 	hits := CheckOWASP("mid", "/", "", nil, []string{"AAEAAAD//wEAAAA="})
 	if !hasCategory(hits, CatDeserial) {
@@ -726,7 +726,7 @@ func TestHasDeserializationIndicatorKeepsPHPSerializedObject(t *testing.T) {
 	}
 }
 
-// NoSQL: this.password comparison
+// NoSQL：this.password 比较
 func TestCheckOWASP_NoSQLi_ThisPassword(t *testing.T) {
 	hits := CheckOWASP("mid", "/api/login", `filter={"$where": "this.password == 'test'"}`, nil, nil)
 	if !hasCategory(hits, CatNoSQLi) {
@@ -768,7 +768,7 @@ func TestCheckOWASP_SSTI_PythonClass(t *testing.T) {
 	}
 }
 
-// Helper
+// 辅助函数
 
 func TestCheckOWASP_LDAP_AuthBypassVariant(t *testing.T) {
 	hits := CheckOWASP("mid", "/login", "user=*)(|(uid=*)(mail=*))", nil, nil)

@@ -17,14 +17,14 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// RBAC role constants (mirrored from store for convenience).
+// RBAC 角色常量（从 store 镜像一份，方便本包直接引用）。
 const (
 	RoleAdmin    = store.RoleAdmin
 	RoleOperator = store.RoleOperator
 	RoleReadonly = store.RoleReadonly
 )
 
-// Claims carried inside the short-lived access JWT.
+// Claims 是短时效 access JWT 中携带的声明集合。
 type Claims struct {
 	jwt.RegisteredClaims
 	Username   string `json:"username"`
@@ -41,50 +41,50 @@ const (
 	Audience = "my-openwaf-admin"
 )
 
-// TokenManager handles JWT signing, verification, key rotation, and token blacklisting.
+// TokenManager 负责 JWT 的签发、校验、密钥轮换以及令牌吊销。
 type TokenManager struct {
 	mu        sync.RWMutex
-	primary   []byte   // current signing key
-	secondary []byte   // previous key (for rotation transition)
-	db        *gorm.DB // for persistent blacklist
+	primary   []byte   // 当前签名密钥
+	secondary []byte   // 上一个密钥（用于轮换过渡期）
+	db        *gorm.DB // 持久化黑名单所用数据库
 
-	// In-memory blacklist (jti -> expiry)
+	// 内存黑名单（jti -> 过期时间）
 	blacklist sync.Map
 
-	stopCh           chan struct{} // signals cleanupLoop to exit
+	stopCh           chan struct{} // 通知 cleanupLoop 退出
 	closeOnce        sync.Once
 	blacklistReady   atomic.Bool
 	blacklistLoadMu  sync.Mutex
 	blacklistRetryAt atomic.Int64
 }
 
-// ErrTokenBlacklistUnavailable indicates that the persistent blacklist could
-// not be loaded. Authentication must fail closed until the store is healthy.
+// ErrTokenBlacklistUnavailable 表示持久化黑名单未能加载。
+// 在存储恢复健康之前，认证必须保持 fail closed。
 var ErrTokenBlacklistUnavailable = errors.New("token blacklist unavailable")
 
-// Ready reports whether the persistent blacklist has been loaded successfully.
-// A nil database is used by lightweight callers that do not persist revocations.
+// Ready 报告持久化黑名单是否已成功加载。
+// 轻量调用方不持久化吊销记录，此时 db 为 nil，同样视为就绪。
 func (tm *TokenManager) Ready() bool {
 	return tm != nil && (tm.db == nil || tm.blacklistReady.Load())
 }
 
-// NewTokenManager creates a TokenManager with the given primary secret.
+// NewTokenManager 用给定的主密钥构造 TokenManager。
 func NewTokenManager(primarySecret []byte, db *gorm.DB) *TokenManager {
 	tm := &TokenManager{
 		primary: primarySecret,
 		db:      db,
 		stopCh:  make(chan struct{}),
 	}
-	// Load persisted blacklist into memory.
+	// 把已持久化的黑名单载入内存。
 	if err := tm.loadBlacklistFromDB(); err == nil {
 		tm.blacklistReady.Store(true)
 	}
-	// Start cleanup goroutine.
+	// 启动清理协程。
 	go tm.cleanupLoop()
 	return tm
 }
 
-// RotateKey sets a new primary key; the old primary becomes secondary.
+// RotateKey 设置新的主密钥，原主密钥降级为备用密钥。
 func (tm *TokenManager) RotateKey(newSecret []byte) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -92,14 +92,14 @@ func (tm *TokenManager) RotateKey(newSecret []byte) {
 	tm.primary = newSecret
 }
 
-// PrimarySecret returns the current signing key (used by refresh handler).
+// PrimarySecret 返回当前签名密钥（refresh handler 会用到）。
 func (tm *TokenManager) PrimarySecret() []byte {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return tm.primary
 }
 
-// SignAccessToken produces a signed JWT for the given user.
+// SignAccessToken 为指定用户签发一个 JWT。
 func (tm *TokenManager) SignAccessToken(username, role, clientIP, userAgent string) (tokenStr string, jti string, exp time.Time, err error) {
 	jti = generateJTI()
 	exp = time.Now().Add(AccessTTL)
@@ -126,18 +126,18 @@ func (tm *TokenManager) SignAccessToken(username, role, clientIP, userAgent stri
 	return
 }
 
-// VerifyAccessToken validates the JWT and returns claims if valid.
-// It tries the primary key first, then falls back to the secondary key (rotation support).
+// VerifyAccessToken 校验 JWT，合法则返回其中的声明。
+// 先用主密钥验证，失败再回退到备用密钥（支持密钥轮换过渡期）。
 func (tm *TokenManager) VerifyAccessToken(tokenStr string) (*Claims, error) {
 	tm.mu.RLock()
 	primary := tm.primary
 	secondary := tm.secondary
 	tm.mu.RUnlock()
 
-	// Try primary key.
+	// 先试主密钥。
 	claims, err := verifyWithKey(tokenStr, primary)
 	if err != nil && secondary != nil {
-		// Fallback to secondary (rotation transition).
+		// 回退到备用密钥（密钥轮换过渡期）。
 		claims, err = verifyWithKey(tokenStr, secondary)
 	}
 	if err != nil {
@@ -147,7 +147,7 @@ func (tm *TokenManager) VerifyAccessToken(tokenStr string) (*Claims, error) {
 		return nil, err
 	}
 
-	// Check blacklist.
+	// 检查黑名单。
 	if claims.ID != "" && tm.IsBlacklisted(claims.ID) {
 		return nil, fmt.Errorf("token has been revoked")
 	}
@@ -155,9 +155,9 @@ func (tm *TokenManager) VerifyAccessToken(tokenStr string) (*Claims, error) {
 	return claims, nil
 }
 
-// ensureBlacklistReady retries a failed startup load with a short backoff.
-// This keeps startup fail-closed without permanently locking out authentication
-// after a transient database outage.
+// ensureBlacklistReady 以短暂退避重试启动时失败的加载。
+// 这样既能让服务在启动阶段保持 fail closed，又不会因为一次短暂的
+// 数据库故障而永久拒绝所有认证。
 func (tm *TokenManager) ensureBlacklistReady() error {
 	if tm == nil || tm.db == nil || tm.blacklistReady.Load() {
 		return nil
@@ -200,12 +200,12 @@ func verifyWithKey(tokenStr string, secret []byte) (*Claims, error) {
 	return nil, jwt.ErrSignatureInvalid
 }
 
-// SignAccessToken is the backward-compatible package-level function.
+// SignAccessToken 是保持向后兼容的包级函数。
 func SignAccessToken(username string, secret []byte) (string, time.Time, error) {
 	return SignAccessTokenWithRole(username, RoleAdmin, secret)
 }
 
-// SignAccessTokenWithRole signs a compatibility access token with the supplied current role.
+// SignAccessTokenWithRole 用给定的当前角色签发一个兼容格式的 access token。
 func SignAccessTokenWithRole(username, role string, secret []byte) (string, time.Time, error) {
 	jti := generateJTI()
 	exp := time.Now().Add(AccessTTL)
@@ -226,7 +226,7 @@ func SignAccessTokenWithRole(username, role string, secret []byte) (string, time
 	return str, exp, err
 }
 
-// VerifyAccessToken is the backward-compatible package-level function.
+// VerifyAccessToken 是保持向后兼容的包级函数。
 func VerifyAccessToken(tokenStr string, secret []byte) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -243,20 +243,20 @@ func VerifyAccessToken(tokenStr string, secret []byte) (*Claims, error) {
 	return nil, jwt.ErrSignatureInvalid
 }
 
-// BlacklistToken adds a JTI to the blacklist with the given expiry and reason.
+// BlacklistToken 把一个 JTI 连同过期时间和原因加入黑名单。
 func (tm *TokenManager) BlacklistToken(jti string, expiresAt time.Time, reason string) {
 	_ = tm.BlacklistTokenChecked(jti, expiresAt, reason)
 }
 
-// BlacklistTokenChecked blacklists a token and reports persistent-storage failures.
+// BlacklistTokenChecked 吊销一个令牌，并把持久化失败上报给调用方。
 func (tm *TokenManager) BlacklistTokenChecked(jti string, expiresAt time.Time, reason string) error {
 	if jti == "" {
 		return nil
 	}
 	tm.blacklist.Store(jti, expiresAt)
-	// Persist to database. Repeated revocation is intentionally idempotent: a
-	// unique JTI row is updated with the newest expiry/reason so a later restart
-	// cannot resurrect a token using an older, already-expired blacklist row.
+	// 落库。重复吊销是有意设计成幂等的：同一 JTI 只有一行，
+	// 且总是更新为最新的过期时间与原因，这样重启之后旧的黑名单行
+	// 不会把已经过期的令牌重新“复活”。
 	if tm.db != nil {
 		return tm.db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "jti"}},
@@ -271,7 +271,7 @@ func (tm *TokenManager) BlacklistTokenChecked(jti string, expiresAt time.Time, r
 	return nil
 }
 
-// IsBlacklisted checks if a JTI is in the blacklist.
+// IsBlacklisted 检查某个 JTI 是否已被拉黑。
 func (tm *TokenManager) IsBlacklisted(jti string) bool {
 	val, ok := tm.blacklist.Load(jti)
 	if !ok {
@@ -312,7 +312,7 @@ func (tm *TokenManager) cleanupLoop() {
 				}
 				return true
 			})
-			// Cleanup expired entries from DB.
+			// 清理数据库中已过期的条目。
 			if tm.db != nil {
 				tm.db.Where("expires_at < ?", now).Delete(&store.TokenBlacklist{})
 			}
@@ -322,7 +322,7 @@ func (tm *TokenManager) cleanupLoop() {
 	}
 }
 
-// Close stops the background cleanup goroutine.
+// Close 停止后台清理协程。
 func (tm *TokenManager) Close() {
 	if tm == nil {
 		return
@@ -334,7 +334,7 @@ func (tm *TokenManager) Close() {
 	})
 }
 
-// GenerateRefreshToken returns a new JTI, the raw token string, and its SHA-256 hash.
+// GenerateRefreshToken 返回新的 JTI、原始令牌字符串及其 SHA-256 摘要。
 func GenerateRefreshToken() (jti, raw, hash string, err error) {
 	jtiBytes := make([]byte, 16)
 	if _, err := rand.Read(jtiBytes); err != nil {
@@ -351,7 +351,7 @@ func GenerateRefreshToken() (jti, raw, hash string, err error) {
 	return jti, raw, hash, nil
 }
 
-// HashToken produces a hex-encoded SHA-256 of the raw token.
+// HashToken 计算原始令牌的 SHA-256，并以十六进制字符串返回。
 func HashToken(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])

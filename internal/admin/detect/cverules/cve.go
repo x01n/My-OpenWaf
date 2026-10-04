@@ -225,7 +225,7 @@ func UpdateCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, re
 			return
 		}
 
-		// Apply updates
+		// 应用本次更新
 		if req.CVEID != nil {
 			existing.CVEID = strings.TrimSpace(*req.CVEID)
 		}
@@ -293,7 +293,7 @@ func DeleteCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, re
 			return
 		}
 
-		// Only allow deleting custom rules
+		// 只允许删除自定义规则
 		if existing.Source != "custom" {
 			c.JSON(403, map[string]string{"error": "only custom rules can be deleted"})
 			return

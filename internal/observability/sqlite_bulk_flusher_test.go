@@ -250,7 +250,7 @@ func parseLogTime(v any) (time.Time, error) {
 	}
 }
 
-// ---- 四类样例与写入器 ----
+// 四类样例与写入器
 
 func bulkSecurityEventEquivCase() bulkEquivCase {
 	mk := func(prefix string) []any {
@@ -535,7 +535,7 @@ func TestSQLiteBulkFlusherTypeIsolationMatchesGORMPath(t *testing.T) {
 	}
 }
 
-// ---- wave6 多值组路径测试 ----
+// wave6 多值组路径测试
 
 // mkMultiAccessLogRows 生成 n 行含序号的行：request_id 带序号、path 带序号；
 // 第 0 行显式 created_at=time.Now()，其余零值（由 flush 补 now），两时间

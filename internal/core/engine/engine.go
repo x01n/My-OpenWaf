@@ -22,15 +22,15 @@ import (
 	"My-OpenWaf/internal/waf/ratelimit"
 )
 
-// compiledRules holds pre-compiled, pre-partitioned rules for a site.
+// compiledRules 保存某站点预编译、预分区的规则。
 type compiledRules struct {
 	ACL       []rules.Compiled
 	Signature []rules.Compiled
 	Custom    []rules.Compiled
 }
 
-// compiledSnapshot is an immutable snapshot of the compiled rules cache.
-// Accessed via atomic.Pointer for lock-free reads on the hot path.
+// compiledSnapshot 是编译规则缓存的不可变快照。
+// 经 atomic.Pointer 访问，热路径上实现无锁读取。
 type compiledRulesKey struct {
 	siteID   uint
 	policyID uint
@@ -41,11 +41,14 @@ type compiledSnapshot struct {
 	cache    map[compiledRulesKey]*compiledRules
 }
 
-// phasesEntry holds a pre-built phase chain along with the protection-config
-// pointer and Lua script generation it was built from. Because ProtectionConfig
-// is immutable per snapshot, pointer equality is enough for the protection
-// portion; the Lua generation also invalidates a chain when scripts are added,
-// removed, or replaced without a snapshot revision change.
+/**
+ * phasesEntry 保存预构建的阶段链，以及构建它时所依据的防护配置指针与
+ * Lua 脚本代次。
+ *
+ * 之所以用「代次」而不是只比 revision：ProtectionConfig 在单个快照内
+ * 不可变，指针相等即可判定防护配置部分是否仍需重建；但脚本被增删改时
+ * 快照 revision 可能不变，此时必须靠 Lua 代次让缓存的阶段链失效。
+ */
 type phasesEntry struct {
 	prot        *store.ProtectionConfig
 	lua         *luaplugin.Engine
@@ -60,16 +63,15 @@ type phasesCacheKey struct {
 	antiReplayEnabled bool
 }
 
-// phasesSnapshot is an immutable snapshot of the phases cache.
-// Accessed via atomic.Pointer for lock-free reads on the hot path.
+// phasesSnapshot 是阶段链缓存的不可变快照。
+// 经 atomic.Pointer 访问，热路径上实现无锁读取。
 type phasesSnapshot struct {
 	revision uint64
 	cache    map[phasesCacheKey]*phasesEntry
 }
 
-// phaseRuntimeConfig is the immutable bundle of phase-chain dependencies.
-// It is replaced atomically when runtime setters change so request-path reads
-// always see a consistent snapshot.
+// phaseRuntimeConfig 是阶段链依赖的不可变打包体。
+// 运行时 setter 变更时整体原子替换，使请求路径读到的始终是一致快照。
 type phaseRuntimeConfig struct {
 	reqRateLimiter ratelimit.RateLimiterBackend
 	antiReplay     *antireplay.AntiReplayManager
@@ -77,44 +79,40 @@ type phaseRuntimeConfig struct {
 	botThreshold   int
 }
 
-// Engine orchestrates the full WAF processing pipeline for each request.
+// Engine 编排每个请求的完整 WAF 处理管道。
 type Engine struct {
 	resolver       *sites.Resolver
 	errRateLimiter ratelimit.RateLimiterBackend
 	ipRep          *iprep.IPReputation
 
-	// phaseDeps is the immutable bundle of runtime dependencies folded into
-	// phase-chain construction. Setters replace it atomically so request-path
-	// reads observe a consistent snapshot.
+	// phaseDeps 是折叠进阶段链构建的运行时依赖不可变打包体。setter 原子替换它，
+	// 使请求路径读到的始终是一致快照。
 	phaseDeps atomic.Pointer[phaseRuntimeConfig]
 
-	cveDetector  *cve.CVEDetector              // CVE-specific vulnerability detection
-	dropExecutor *drop.DropExecutor            // TCP drop executor
-	escalation   *escalation.EscalationManager // step-up response escalation
+	cveDetector  *cve.CVEDetector              // CVE 专项漏洞检测
+	dropExecutor *drop.DropExecutor            // TCP 丢包执行器
+	escalation   *escalation.EscalationManager // 分级响应升级
 
-	// Lock-free compiled rules cache. Hot-path reads use atomic.Pointer.Load()
-	// (single atomic load, no cache-line bouncing). Writes are serialized by
-	// compiledWriteMu and publish a new immutable snapshot via Store().
+	// 无锁的编译规则缓存。热路径读取只用一次 atomic.Pointer.Load()，不触发
+	// 缓存行争用；写入由 compiledWriteMu 串行化，并通过 Store() 发布新的不可变快照。
 	compiledPtr     atomic.Pointer[compiledSnapshot]
 	compiledWriteMu sync.Mutex
 
-	// Lock-free phase chain cache. Same pattern as compiledPtr.
+	// 无锁的阶段链缓存，模式与 compiledPtr 相同。
 	phasesPtr     atomic.Pointer[phasesSnapshot]
 	phasesWriteMu sync.Mutex
 
 	// luaPlugins 为自定义 Lua 策略引擎，可为 nil（未启用）。
-	//
-	// 请求路径并发读、reload 路径写，故用 atomic.Pointer 而非裸指针：
-	// 后者在此处会构成数据竞争。引擎内部的脚本集合替换有自己的锁。
+	// 请求路径并发读、reload 路径写，故用 atomic.Pointer 而非裸指针：后者在此处
+	// 会构成数据竞争。引擎内部的脚本集合替换有自己的锁。
 	luaPlugins atomic.Pointer[luaplugin.Engine]
 	// jsPlugins 为自定义 JavaScript 策略引擎，可为 nil（未启用）。
-	//
-	// 请求路径并发读、reload 路径写，故用 atomic.Pointer 而非裸指针：
-	// 后者在此处会构成数据竞争。引擎内部的脚本集合替换有自己的锁。
+	// 请求路径并发读、reload 路径写，故用 atomic.Pointer 而非裸指针：后者在此处
+	// 会构成数据竞争。引擎内部的脚本集合替换有自己的锁。
 	jsPlugins atomic.Pointer[jsplugin.Engine]
 }
 
-// New creates a WAF engine backed by the given snapshot holder and rate limiters.
+// New 创建由给定快照 holder 与限流后端支撑的 WAF 引擎。
 func New(holder *snapshot.Holder, reqRL, errRL ratelimit.RateLimiterBackend, ipRep *iprep.IPReputation) *Engine {
 	e := &Engine{
 		resolver:       sites.NewResolver(holder),
@@ -159,7 +157,7 @@ func (e *Engine) updatePhaseDeps(mutator func(*phaseRuntimeConfig)) {
 	}
 }
 
-// SetGeoResolver attaches a MaxMind GeoIP resolver for bot two-phase scoring.
+// SetGeoResolver 挂载 MaxMind GeoIP 解析器，供 bot 两阶段评分使用。
 func (e *Engine) SetGeoResolver(geo *geoip.MaxMindResolver, threshold int) {
 	if e == nil {
 		return
@@ -181,7 +179,7 @@ func (e *Engine) SetBotThreshold(threshold int) {
 	})
 }
 
-// IPReputation returns the underlying IP reputation system.
+// IPReputation 返回底层的 IP 声誉系统。
 func (e *Engine) IPReputation() *iprep.IPReputation { return e.ipRep }
 
 // SetLuaPlugins 设置或热替换自定义 Lua 策略引擎。传 nil 即停用插件。
@@ -335,7 +333,7 @@ func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime
 		return ProcessResult{}
 	}
 
-	// Maintenance gate: global or per-site.
+	// 维护模式闸门：全局或按站点。
 	if sn.Protection.MaintenanceGlobalEnabled || rt.MaintenanceEnabled {
 		return ProcessResult{
 			Action: action.Result{
@@ -349,17 +347,17 @@ func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime
 		}
 	}
 
-	// Use pre-compiled, pre-partitioned rules (compiled once per snapshot revision per policy).
+	// 使用预编译、预分区的规则（每个快照 revision、每个策略只编译一次）。
 	cr := e.getCompiledRules(sn, rt)
 
-	// Use per-site effective protection (merged global + site overrides).
+	// 使用按站点生效的防护配置（全局与站点覆盖合并后的结果）。
 	prot := &sn.Protection
 	if rt.EffectiveProtection != nil {
 		prot = rt.EffectiveProtection
 	}
 
-	// Pre-allocated capacity: up to 11 phases (IPReputation, AntiReplay, ACL,
-	// LuaPre, OWASP, CVE, Bot, BrowserSign, RateLimit, Signature, Custom).
+	// 预分配容量：最多 11 个阶段（IPReputation、AntiReplay、ACL、LuaPre、OWASP、
+	// CVE、Bot、BrowserSign、RateLimit、Signature、Custom，按启用情况入链）。
 	phases := e.getOrBuildPhases(sn, rt, cr, prot)
 
 	runResult := pipeline.Run(phases, reqCtx)
@@ -379,14 +377,17 @@ func (e *Engine) processResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime
 	}
 }
 
-// getCompiledRules returns pre-compiled, pre-partitioned rules for a site,
-// compiling them once per snapshot revision per policy.
-// Hot-path read: single atomic.Pointer.Load() — no lock, no contention.
+/**
+ * getCompiledRules 返回某站点预编译、预分区的规则，每个快照 revision、
+ * 每个策略只编译一次。
+ *
+ * 热路径读取：单次 atomic.Pointer.Load()，不加锁、无争用。
+ */
 func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime) *compiledRules {
 	rev := sn.Revision
 	key := compiledRulesKey{siteID: rt.Site.ID, policyID: rt.PolicyID}
 
-	// Lock-free fast path: load immutable snapshot and check cache.
+	// 无锁快路径：加载不可变快照并查缓存。
 	snap := e.compiledPtr.Load()
 	if snap.revision == rev {
 		if cr, ok := snap.cache[key]; ok {
@@ -394,7 +395,7 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		}
 	}
 
-	// Cache miss — compile rules (expensive, but happens at most once per site per revision).
+	// 缓存未命中——编译规则（开销较大，但每个站点每个 revision 至多发生一次）。
 	all := convertAndCompile(rt.Rules)
 	cr := &compiledRules{}
 	for i := range all {
@@ -408,15 +409,15 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		}
 	}
 
-	// Serialize writes: copy-on-write the immutable map, then atomic Store.
+	// 串行化写入：先对不可变 map 做写时复制，再原子 Store。
 	e.compiledWriteMu.Lock()
 	current := e.compiledPtr.Load()
 	var newCache map[compiledRulesKey]*compiledRules
 	if current.revision != rev {
-		// Revision changed — start fresh.
+		// revision 已变化——从头重建。
 		newCache = make(map[compiledRulesKey]*compiledRules)
 	} else {
-		// Same revision — copy existing entries + add new one.
+		// revision 相同——复制现有条目并加入新条目。
 		newCache = make(map[compiledRulesKey]*compiledRules, len(current.cache)+1)
 		for k, v := range current.cache {
 			newCache[k] = v
@@ -429,12 +430,14 @@ func (e *Engine) getCompiledRules(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	return cr
 }
 
-// getOrBuildPhases returns a cached phase chain for the given site or builds
-// one. The chain is keyed by per-site phase inputs and stays valid as long as
-// the snapshot revision, effective protection pointer and site-level phase
-// toggles do not change.
-//
-// Hot-path read: single atomic.Pointer.Load() — no lock, no cache-line bouncing.
+/**
+ * getOrBuildPhases 返回给定站点的缓存阶段链，没有则构建一条。
+ *
+ * 缓存键由按站点的阶段输入构成；只要快照 revision、生效防护配置指针与站点级
+ * 阶段开关不变，链就持续有效。
+ *
+ * 热路径读取：单次 atomic.Pointer.Load()，不加锁、无缓存行争用。
+ */
 func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, cr *compiledRules, prot *store.ProtectionConfig) []pipeline.Phase {
 	if e == nil {
 		return nil
@@ -452,7 +455,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	}
 	deps := e.loadPhaseDeps()
 
-	// Lock-free fast path.
+	// 无锁快路径。
 	snap := e.phasesPtr.Load()
 	if snap.revision == rev {
 		if entry, ok := snap.cache[key]; ok && entry.prot == prot && entry.lua == lp && entry.luaRevision == luaRevision && entry.deps == deps {
@@ -460,7 +463,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		}
 	}
 
-	// Build a fresh chain. Pre-allocate capacity for the maximum size.
+	// 构建新链。按最大规模预分配容量。
 	phases := make([]pipeline.Phase, 0, 11)
 
 	// 按 phase 跳过检测：配了跳过路径的 phase 会被包一层按路径短路的装饰器，
@@ -525,7 +528,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 		phases = append(phases, rules.NewCustomPhasePrecompiled(cr.Custom))
 	}
 
-	// Serialize writes: copy-on-write the immutable map, then atomic Store.
+	// 串行化写入：先对不可变 map 做写时复制，再原子 Store。
 	e.phasesWriteMu.Lock()
 	current := e.phasesPtr.Load()
 	var newCache map[phasesCacheKey]*phasesEntry
@@ -544,7 +547,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 	return phases
 }
 
-// Process runs a request through maintenance check, site resolution, and WAF pipeline.
+// Process 让请求依次经过维护检查、站点解析与 WAF 管道。
 func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	sn := e.resolver.Snapshot()
 	if sn == nil {
@@ -558,14 +561,17 @@ func (e *Engine) Process(reqCtx *pipeline.RequestCtx) ProcessResult {
 	return e.processResolved(sn, rt, reqCtx)
 }
 
-// ProcessResolved runs the WAF pipeline for an already-resolved site.
-// The dataplane already resolves bind+host before pre-checks; reusing that
-// result avoids a second MatchSite lookup and the associated per-request copy.
+/**
+ * ProcessResolved 为已完成站点解析的请求运行 WAF 管道。
+ *
+ * 数据面在预检查之前已解析过 bind+host，复用该结果可避免第二次 MatchSite
+ * 查找及其附带的每请求拷贝。
+ */
 func (e *Engine) ProcessResolved(sn *snapshot.Snapshot, rt *snapshot.SiteRuntime, reqCtx *pipeline.RequestCtx) ProcessResult {
 	return e.processResolved(sn, rt, reqCtx)
 }
 
-// Evaluate runs only the WAF rule chain for an already-resolved site (testing helper).
+// Evaluate 只对已完成站点解析的请求运行 WAF 规则链（测试辅助方法）。
 func (e *Engine) Evaluate(clientIP net.IP, path, rawQuery string, siteRules []snapshot.CompiledRule) action.Result {
 	compiled := convertAndCompile(siteRules)
 	ctx := &pipeline.RequestCtx{
@@ -594,12 +600,12 @@ func (e *Engine) AntiReplay() *antireplay.AntiReplayManager {
 }
 func (e *Engine) Escalation() *escalation.EscalationManager { return e.escalation }
 
-// SetDropExecutor attaches a drop executor to the engine.
+// SetDropExecutor 为引擎挂载丢包执行器。
 func (e *Engine) SetDropExecutor(d *drop.DropExecutor) {
 	e.dropExecutor = d
 }
 
-// SetAntiReplayManager attaches an anti-replay manager to the engine.
+// SetAntiReplayManager 为引擎挂载防重放管理器。
 func (e *Engine) SetAntiReplayManager(m *antireplay.AntiReplayManager) {
 	if e == nil {
 		return
@@ -609,20 +615,20 @@ func (e *Engine) SetAntiReplayManager(m *antireplay.AntiReplayManager) {
 	})
 }
 
-// SetEscalationManager attaches an escalation manager to the engine.
+// SetEscalationManager 为引擎挂载分级升级管理器。
 func (e *Engine) SetEscalationManager(m *escalation.EscalationManager) {
 	e.escalation = m
 }
 
-// convertAndCompile converts snapshot CompiledRules to engine-ready rules.Compiled.
-// Used by Evaluate (testing helper) and getCompiledRules (cached per snapshot).
+// convertAndCompile 把快照里的 CompiledRule 转为引擎可直接使用的 rules.Compiled。
+// 供 Evaluate（测试辅助）与 getCompiledRules（按快照缓存）共用。
 func convertAndCompile(sr []snapshot.CompiledRule) []rules.Compiled {
 	storeRules := make([]store.Rule, len(sr))
 	for i, r := range sr {
-		// Compound rules store raw JSON as arg; reconstruct the original pattern.
+		// 复合规则把原始 JSON 存进 arg，此处还原为原始 pattern。
 		pattern := r.Kind + ":" + r.Arg
 		if r.Kind == "compound" {
-			pattern = r.Arg // compound patterns are raw JSON starting with "{"
+			pattern = r.Arg // 复合规则的 pattern 是原始 JSON，以 "{" 开头
 		}
 		storeRules[i] = store.Rule{
 			Phase:       r.Phase,

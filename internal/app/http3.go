@@ -83,11 +83,15 @@ func (s *http3LoopbackRequestState) SetStream(stream any) {
 	s.mu.Unlock()
 }
 
-// ResetFn builds the closure registered as the loopback reset signal. It is
-// intentionally free of the state's cancel chain: cancel() tears down the
-// loopback request context, which is the wrong side of the proxy; the
-// closure performs CancelWrite(H3 REQUEST_CANCELED) on the quota-owned
-// stream only.
+/**
+ * ResetFn 构造注册为 loopback 复位信号的闭包。
+ *
+ * 该闭包刻意不走 state 自身的 cancel 链：cancel() 会拆掉 loopback 请求上下文，
+ * 而那是代理的另一侧；闭包只对配额所拥有的那条流执行
+ * CancelWrite(H3 REQUEST_CANCELED)。
+ *
+ * @return 复位闭包；不可用时返回 nil。
+ */
 func (s *http3LoopbackRequestState) ResetFn() func() {
 	if s == nil {
 		return nil
@@ -304,7 +308,15 @@ type cancelableBody struct {
 	stop      func() bool
 }
 
-// newCancelableBody closes the upstream body when the request context is canceled.
+/**
+ * newCancelableBody 包装上游响应体，使请求上下文取消时自动关闭它。
+ *
+ * @param ctx 请求上下文；nil 或 Done() 为 nil 时不注册回调。
+ * @param body 上游响应体。
+ * @param onCleanup 关闭时的清理回调。
+ * @param cancelReq 取消请求的函数。
+ * @return 可取消的上游响应体。
+ */
 func newCancelableBody(ctx context.Context, body io.ReadCloser, onCleanup func(), cancelReq context.CancelFunc) *cancelableBody {
 	b := &cancelableBody{ctx: ctx, body: body, onCleanup: onCleanup, cancelReq: cancelReq}
 	if ctx != nil && ctx.Done() != nil {
@@ -469,12 +481,15 @@ func (w *http3CancelAwareResponseWriter) startStreamCancelWatch(ctx context.Cont
 // 任何异常包装器（自引用、环形引用、无限代理）都在常数步内终止。
 const http3UnwrapDepthLimit = 8
 
-// unwrapHTTP3ResponseWriter 沿 Unwrap() http.ResponseWriter 链下钻，
-// 返回链末端仍实现了 Unwrap 的那个包装器之下的对象。终止条件有三重：
-// 深度达上限、当前对象未实现 Unwrap、或下一跳为空/与当前对象相同。
-//
-// @param w 起始 ResponseWriter
-// @return 解包链终点；w 为 nil 时返回 nil
+/**
+ * unwrapHTTP3ResponseWriter 沿 Unwrap() http.ResponseWriter 链下钻，
+ * 返回链末端仍实现了 Unwrap 的那个包装器之下的对象。
+ *
+ * 终止条件有三重：深度达上限、当前对象未实现 Unwrap、或下一跳为空/与当前对象相同。
+ *
+ * @param w 起始 ResponseWriter。
+ * @return 解包链终点；w 为 nil 时返回 nil。
+ */
 func unwrapHTTP3ResponseWriter(w http.ResponseWriter) http.ResponseWriter {
 	for depth := 0; depth < http3UnwrapDepthLimit && w != nil; depth++ {
 		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
@@ -490,15 +505,20 @@ func unwrapHTTP3ResponseWriter(w http.ResponseWriter) http.ResponseWriter {
 	return w
 }
 
-// http3ResponseStream 从 ResponseWriter 中解析出承载 QUIC 流的对象
-// （quic-go 的 *http3.responseWriter 的 str 字段）。
-//
-// 解析前先走 Unwrap 链：生产传入的是 *http3CancelAwareResponseWriter，
-// 它嵌入 http.ResponseWriter 且无 str 字段，直接反射必然返回 nil，会让
-// h3 的流级取消静默失效（SetStream(nil) → ResetFn()==nil）。
-//
-// 形状不符（非指针、非结构体、缺 str 字段、str 为 nil）一律返回 nil，
-// 与既有契约一致；调用方对 nil 均已有安全处理。
+/**
+ * http3ResponseStream 从 ResponseWriter 中解析出承载 QUIC 流的对象
+ * （quic-go 的 *http3.responseWriter 的 str 字段）。
+ *
+ * 解析前先走 Unwrap 链：生产传入的是 *http3CancelAwareResponseWriter，
+ * 它嵌入 http.ResponseWriter 且无 str 字段，直接反射必然返回 nil，会让
+ * h3 的流级取消静默失效（SetStream(nil) → ResetFn()==nil）。
+ *
+ * 形状不符（非指针、非结构体、缺 str 字段、str 为 nil）一律返回 nil，
+ * 与既有契约一致；调用方对 nil 均已有安全处理。
+ *
+ * @param w 待解析的 ResponseWriter。
+ * @return 承载 QUIC 流的对象；形状不符时为 nil。
+ */
 func http3ResponseStream(w http.ResponseWriter) any {
 	w = unwrapHTTP3ResponseWriter(w)
 	if w == nil {

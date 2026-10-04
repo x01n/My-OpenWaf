@@ -26,7 +26,7 @@ func GetProtectionSettings(repo *repository.SystemSettingsRepo) app.HandlerFunc 
 	}
 }
 
-// buildProtectionResponse converts stored string fields back to JSON objects for the frontend.
+// buildProtectionResponse 把以字符串存储的字段还原成 JSON 对象，供前端使用。
 func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	out := make(map[string]any)
 	raw, _ := json.Marshal(cfg)
@@ -41,7 +41,7 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 	out["escalation_steps"] = []any{}
 	out["skip_path_by_phase"] = map[string][]string{}
 
-	// Expand legacy owasp_modules string and expose category_sensitivity as the UI source.
+	// 展开 legacy 形态的 owasp_modules 字符串，并把 category_sensitivity 作为 UI 的权威来源。
 	if cfg.OWASPModules != "" {
 		var modules map[string]string
 		if json.Unmarshal([]byte(cfg.OWASPModules), &modules) == nil {
@@ -53,7 +53,7 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 		categorySensitivity = map[string]string{}
 	}
 	out["category_sensitivity"] = categorySensitivity
-	// Expand cc_rules string → array
+	// 把 cc_rules 字符串展开为数组
 	if cfg.CCRules != "" {
 		var rules []any
 		if json.Unmarshal([]byte(cfg.CCRules), &rules) == nil {
@@ -95,8 +95,8 @@ func buildProtectionResponse(cfg store.ProtectionConfig) map[string]any {
 
 func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		// Parse into a generic map first so we can peel object/array fields before unmarshaling
-		// into ProtectionConfig (several DB-backed JSON blobs are typed as string in Go).
+		// 先解析成通用 map，才能在反序列化进 ProtectionConfig 之前
+		// 摘出对象/数组字段（若干 DB 侧 JSON blob 在 Go 里是 string 类型）。
 		var raw map[string]json.RawMessage
 		if err := c.BindJSON(&raw); err != nil {
 			c.JSON(400, map[string]string{"error": "请求体格式无效"})
@@ -258,8 +258,8 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 				return err
 			}
 
-			// Sync bot_detection_enabled to bot_settings.Enabled so the bot page
-			// reflects changes made on the protection page.
+			// 把 bot_detection_enabled 同步到 bot_settings.Enabled，
+			// 让 bot 页面能反映在 protection 页面所做的修改。
 			if present["bot_detection_enabled"] {
 				if err := shared.SyncProtectionBotToSettings(txRepo, cfg.BotDetectionEnabled); err != nil {
 					return err
@@ -299,10 +299,9 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 	}
 }
 
-// validateRateLimitConfig prevents an enabled limiter with a zero window or
-// zero quota from turning every request into a synthetic 429. Negative values
-// are rejected even while disabled so a later toggle cannot activate a broken
-// configuration.
+// validateRateLimitConfig 防止「已启用但窗口为零或配额为零」的限流器
+// 把每个请求都变成人为的 429。即使限流器处于关闭状态也拒绝负值，
+// 以免之后一旦打开就启用了坏配置。
 func validateRateLimitConfig(cfg store.ProtectionConfig, present map[string]bool) error {
 	if (present["request_ratelimit_window"] && cfg.RequestRateLimitWindow < 0) ||
 		(present["request_ratelimit_max"] && cfg.RequestRateLimitMax < 0) {

@@ -23,8 +23,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// appProcGRPCDataFrame builds a gRPC-Web DATA frame: one frame flag byte,
-// a big-endian uint32 payload length, then the payload.
+// appProcGRPCDataFrame 构造一个 gRPC-Web DATA 帧：1 字节帧标志，
+// 大端 uint32 负载长度，然后是负载本身。
 func appProcGRPCDataFrame(flag byte, payload []byte) []byte {
 	out := make([]byte, 5+len(payload))
 	out[0] = flag
@@ -33,8 +33,8 @@ func appProcGRPCDataFrame(flag byte, payload []byte) []byte {
 	return out
 }
 
-// appProcGRPCMessage wraps an unary message with the gRPC length prefix:
-// a zero compressed flag, a big-endian uint32 length, then the message.
+// appProcGRPCMessage 用一个 gRPC 长度前缀包裹 unary 消息：
+// 1 字节压缩标志（0）、大端 uint32 长度，然后是消息。
 func appProcGRPCMessage(payload []byte) []byte {
 	out := make([]byte, 5+len(payload))
 	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
@@ -42,10 +42,10 @@ func appProcGRPCMessage(payload []byte) []byte {
 	return out
 }
 
-// appProcGRPCWebTrailers builds the in-body trailers frame of the
-// Envoy-style server form of gRPC-Web: flag 0x80, payload
-// "grpc-status:<code>" plus optional message and extra entries. In this form
-// grpc-status does not travel in the HTTP Trailer segment.
+// appProcGRPCWebTrailers 构造 gRPC-Web 的 Envoy 风格服务端
+// 体内 trailer 帧：标志 0x80，负载为
+// "grpc-status:<code>" 加可选 message 与额外条目。这种形式下
+// grpc-status 不走 HTTP Trailer 段。
 func appProcGRPCWebTrailers(status int, message string) []byte {
 	payload := fmt.Sprintf("grpc-status:%d", status)
 	if message != "" {
@@ -54,16 +54,16 @@ func appProcGRPCWebTrailers(status int, message string) []byte {
 	return appProcGRPCDataFrame(0x80, []byte(payload))
 }
 
-// appProcGRPCWebUnaryBody assembles one unary message frame plus the
-// trailers frame carried at the end of the body.
+// appProcGRPCWebUnaryBody 组装一个 unary 消息帧，外加
+// 挂在 body 末尾的 trailers 帧。
 func appProcGRPCWebUnaryBody(message string) []byte {
 	body := append([]byte{}, appProcGRPCDataFrame(0, appProcGRPCMessage([]byte(message)))...)
 	return append(body, appProcGRPCWebTrailers(0, "")...)
 }
 
-// appProcEnableH2H3Network seeds the system settings used by every site in
-// this file: HTTP/2 + HTTP/3 enabled, the reserved UDP bind for QUIC, and
-// self-signed TLS defaults.
+// appProcEnableH2H3Network 写入本文件所有站点共用的系统设置：
+// 启用 HTTP/2 + HTTP/3、指定 QUIC 预留的 UDP bind，
+// 以及自签 TLS 默认值。
 func appProcEnableH2H3Network(db *gorm.DB, udpBind string) error {
 	networkCfgBytes, err := json.Marshal(adminsystem.NetworkConfig{
 		HTTP2Enabled:   true,
@@ -98,7 +98,7 @@ func appProcEnableH2H3Network(db *gorm.DB, udpBind string) error {
 	return nil
 }
 
-// appProcHTTP2Client dials the WAF data plane over TLS and forces ALPN "h2".
+// appProcHTTP2Client 通过 TLS 连接 WAF 数据面，并强制 ALPN 为 "h2"。
 func appProcHTTP2Client(t *testing.T, appProc *appProcessHarness, bind string, host string, path string) (*http.Response, []byte) {
 	t.Helper()
 
@@ -142,11 +142,11 @@ func appProcHTTP2Client(t *testing.T, appProc *appProcessHarness, bind string, h
 	return nil, nil
 }
 
-// TestRunGRPCWebUnaryOverH2InSeparateProcess proxies one Envoy-style
-// gRPC-Web unary response (message frame + in-body trailers frame carrying
-// grpc-status) from an H2 upstream through the WAF to an H2 client and
-// requires byte-identical frames, correct content-type and no
-// Content-Encoding.
+// TestRunGRPCWebUnaryOverH2InSeparateProcess 把一条 Envoy 风格的
+// gRPC-Web unary 响应（消息帧 + 携带 grpc-status 的体内 trailers 帧）
+// 从 H2 上游经 WAF 代理到 H2 客户端，
+// 要求帧逐字节一致、content-type 正确，且不带
+// Content-Encoding。
 func TestRunGRPCWebUnaryOverH2InSeparateProcess(t *testing.T) {
 	wantBody := appProcGRPCWebUnaryBody("grpc-web-unary-blackbox")
 	var upstreamRequests atomic.Int32
@@ -244,9 +244,9 @@ func TestRunGRPCWebUnaryOverH2InSeparateProcess(t *testing.T) {
 	}
 }
 
-// TestRunGRPCWebServerStreamOverH2InSeparateProcess proxies a multi-message
-// gRPC-Web server stream with the trailers frame at the end of the body and
-// requires the complete frame sequence to survive byte for byte.
+// TestRunGRPCWebServerStreamOverH2InSeparateProcess 代理一条多消息的
+// gRPC-Web 服务端流，trailers 帧位于 body 末尾，
+// 要求完整帧序列逐字节存活。
 func TestRunGRPCWebServerStreamOverH2InSeparateProcess(t *testing.T) {
 	var frames []byte
 	for index := 0; index < 4; index++ {
@@ -304,11 +304,11 @@ func TestRunGRPCWebServerStreamOverH2InSeparateProcess(t *testing.T) {
 	}
 }
 
-// TestRunGRPCoverHTTP3InSeparateProcess drives a real H3 gRPC echo upstream:
-// the WAF H3 listener carries the request to an http3.Server upstream, the
-// message frame comes back byte-identical and grpc-status arrives in the
-// H3 trailer segment. The access log must record h3 in, HTTP/3.0 out and
-// QUIC-prefixed JA4 metadata.
+// TestRunGRPCoverHTTP3InSeparateProcess 驱动一个真实的 H3 gRPC 回显上游：
+// WAF 的 H3 监听把请求送到 http3.Server 上游，
+// 消息帧逐字节返回，grpc-status 出现在
+// H3 trailer 段。访问日志必须记录入站 h3、出站 HTTP/3.0 以及
+// QUIC 前缀的 JA4 元数据。
 func TestRunGRPCoverHTTP3InSeparateProcess(t *testing.T) {
 	wantEchoFrame := appProcGRPCDataFrame(0, appProcGRPCMessage([]byte("h3-grpc-echo-blackbox")))
 	upstream, upstreamBase := startAppProcessHTTP3UpstreamServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -408,12 +408,12 @@ func TestRunGRPCoverHTTP3InSeparateProcess(t *testing.T) {
 	appProc.requireFingerprintSummaryForAccessLog(t, accessLog, "grpc over h3")
 }
 
-// TestRunCachesGRPCWebAndGRPCTrailerBodiesInSeparateProcess proves or
-// refutes the cache defect: with a prefix cache rule hit and
-// Cache-Control: public, max-age=60, both the gRPC-Web in-body-trailer form
-// and the classic in-Trailer gRPC form must NOT be stored. A second request
-// must reach the upstream again (miss), while a control text path must hit
-// the cache as the positive control.
+// TestRunCachesGRPCWebAndGRPCTrailerBodiesInSeparateProcess 用于证实或
+// 证伪该缓存缺陷：在命中前缀缓存规则且
+// Cache-Control: public, max-age=60 的条件下，gRPC-Web 的体内 trailer 形式
+// 与经典 in-Trailer 的 gRPC 形式都不得被缓存。第二个请求
+// 必须再次到达上游（miss），而作为阳性对照的文本路径必须
+// 命中缓存。
 func TestRunCachesGRPCWebAndGRPCTrailerBodiesInSeparateProcess(t *testing.T) {
 	webBody := appProcGRPCWebUnaryBody("grpc-web-cache-probe")
 	classicFrame := appProcGRPCDataFrame(0, appProcGRPCMessage([]byte("grpc-classic-cache-probe")))
@@ -475,8 +475,7 @@ func TestRunCachesGRPCWebAndGRPCTrailerBodiesInSeparateProcess(t *testing.T) {
 		return nil
 	})
 
-	// Cache decisions are transport independent: drive the data plane over
-	// plain HTTP/1.1.
+	// 缓存决策与传输层无关：用普通 HTTP/1.1 驱动数据面。
 	webResp, webBodyFirst := appProc.waitHTTPResponse(t, tcpBind, siteHost, webPath, nil, func(resp *http.Response, body []byte) bool {
 		return resp.StatusCode == http.StatusOK
 	})
@@ -500,8 +499,8 @@ func TestRunCachesGRPCWebAndGRPCTrailerBodiesInSeparateProcess(t *testing.T) {
 	classicCallsAfterFirst := classicCalls.Load()
 	controlCallsAfterFirst := controlCalls.Load()
 
-	// Second pass: a correct policy keeps the upstream counts unchanged only
-	// for the control text path; grpc responses must be fetched again.
+	// 第二轮：策略正确时，上游计数只在对照文本路径上保持不变；
+	// gRPC 响应必须重新回源。
 	webResp2, webBodySecond := appProc.waitHTTPResponse(t, tcpBind, siteHost, webPath, nil, func(resp *http.Response, body []byte) bool {
 		return resp.StatusCode == http.StatusOK
 	})

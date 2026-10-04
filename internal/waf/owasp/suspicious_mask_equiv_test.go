@@ -5,11 +5,12 @@ import (
 	"testing"
 )
 
-// refSuspiciousContentEquiv reconstructs hasSuspiciousContent "before keyword bucketization":
-// byte-table scan plus a literal keyword chain (refSuspiciousKeywordsMaskEquiv lives in
-// mask_equiv_test.go and is the pre-mask reference). The char table is untouched by the
-// keyword bucketization, so both sides share it — the contrast is limited to
-// hasSuspiciousKeywords vs its literal reference, composed into the same entry function.
+// refSuspiciousContentEquiv 重建「关键词分桶之前」的 hasSuspiciousContent：
+// 字节表扫描加字面关键词链（refSuspiciousKeywordsMaskEquiv 位于
+// mask_equiv_test.go，是遮蔽前的参照实现）。
+//
+// 字符表未被关键词分桶改动，两侧共用，因此对比范围仅限于
+// hasSuspiciousKeywords 与其字面参照，并组合进同一个入口函数。
 func refSuspiciousContentEquiv(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if suspiciousCharSet[s[i]] {
@@ -19,9 +20,9 @@ func refSuspiciousContentEquiv(s string) bool {
 	return refSuspiciousKeywordsMaskEquiv(s)
 }
 
-// TestHasSuspiciousContentKeywordsGlue verifies hasSuspiciousContent == char-table ∨ keywords
-// over fixed shapes and every suspKeywordMaskEquivLiterals literal plus its single-byte
-// truncations, so a truncation that shifts into a shorter table word is caught per input.
+// TestHasSuspiciousContentKeywordsGlue 校验 hasSuspiciousContent == 字符表 ∨ 关键词
+// 在固定形态上的等价性，覆盖 suspKeywordMaskEquivLiterals 的每个字面及其单字节
+// 截断，使「截断后恰好落进更短的表词」的情况在逐输入比对中被捕获。
 func TestHasSuspiciousContentKeywordsGlue(t *testing.T) {
 	cases := []string{
 		";", "'", "\"", "<", "(", "/", "-", ".", "%", "=",
@@ -47,8 +48,8 @@ func TestHasSuspiciousContentKeywordsGlue(t *testing.T) {
 	}
 }
 
-// TestHasSuspiciousContentRandomGlue fuzzes the composed entry over shell-flavored random
-// strings; each input must agree between the literal-chain reference and the mask build.
+// TestHasSuspiciousContentRandomGlue 用 shell 风格随机串模糊测试该组合入口；
+// 每个输入都必须在字面链参照与遮蔽构建之间取得一致。
 func TestHasSuspiciousContentRandomGlue(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260930))
 	for i := 0; i < 120000; i++ {

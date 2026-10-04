@@ -16,7 +16,7 @@ import (
 	"My-OpenWaf/internal/snapshot"
 )
 
-// ForwardSSE streams a text/event-stream response from upstream to the client.
+// ForwardSSE 把上游的 text/event-stream 响应流式转发给客户端。
 func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) error {
 	transport, normalizedBase := proxy.UpstreamRoundTripperForBase(rt, base)
 	rawPath := string(c.Request.URI().RequestURI())
@@ -258,7 +258,7 @@ func copySSETrailers(c *app.RequestContext, trailers http.Header) {
 	}
 }
 
-// IsSSERequest checks if the client expects a text/event-stream response.
+// IsSSERequest 检查客户端是否期望 text/event-stream 响应。
 func IsSSERequest(c *app.RequestContext) bool {
 	accept := strings.ToLower(string(c.GetHeader("Accept")))
 	idx := strings.Index(accept, "text/event-stream")

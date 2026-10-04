@@ -46,7 +46,7 @@ func (rl *RedisRateLimiter) Enabled() bool {
 	return enabled
 }
 
-// SetEnabled cannot re-enable an invalid window/quota pair.
+// SetEnabled 无法重新启用非法的 window/quota 组合。
 func (rl *RedisRateLimiter) SetEnabled(v bool) {
 	if rl == nil {
 		return
@@ -59,7 +59,7 @@ func (rl *RedisRateLimiter) SetEnabled(v bool) {
 	rl.enabled.Store(v)
 }
 
-// Reconfigure updates window and max parameters.
+// Reconfigure 更新 window 与 max 参数。
 func (rl *RedisRateLimiter) Reconfigure(windowSec, maxReqs int, enabled bool) {
 	if rl == nil {
 		return
@@ -138,7 +138,7 @@ func (rl *RedisRateLimiter) Allow(key string) bool {
 	return result == 1
 }
 
-// Increment adds one event to the current sliding window and returns the count.
+// Increment 向当前滑动窗口加入一个事件并返回计数。
 func (rl *RedisRateLimiter) Increment(key string) int64 {
 	if rl == nil {
 		return 0
@@ -164,7 +164,7 @@ func (rl *RedisRateLimiter) Increment(key string) int64 {
 	return result
 }
 
-// IsOverLimit checks the current sliding window without incrementing it.
+// IsOverLimit 检查当前滑动窗口但不自增。
 func (rl *RedisRateLimiter) IsOverLimit(key string) bool {
 	if rl == nil {
 		return false

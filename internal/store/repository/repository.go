@@ -6,15 +6,15 @@ import (
 	"gorm.io/gorm"
 )
 
-// WriteQueueBackend is the interface that allows repositories to submit async writes
-// without importing the observability package (avoiding import cycles).
+// WriteQueueBackend 让各 repository 无需 import observability 包
+// 即可提交异步写入（从而避免 import cycle）。
 type WriteQueueBackend interface {
 	Submit(fn func(tx *gorm.DB) error)
 	SubmitWait(fn func(tx *gorm.DB) error) error
 }
 
-// HotCacheBackend is the interface for Redis-backed hot data caching.
-// Defined here as an interface to avoid import cycles with the cache package.
+// HotCacheBackend 是 Redis 热数据缓存所用接口。
+// 在此以接口形式定义，是为了避免与 cache 包产生 import cycle。
 type HotCacheBackend interface {
 	Get(key string, dest any) bool
 	Set(key string, value any, ttl time.Duration)
@@ -25,7 +25,7 @@ type HotCacheBackend interface {
 	SetList(key string, items any, total int64, ttl time.Duration)
 }
 
-// Repos aggregates all entity repositories.
+// Repos 汇总全部实体 repository。
 type Repos struct {
 	Site               *SiteRepo
 	Certificate        *CertificateRepo
@@ -89,13 +89,13 @@ func NewWithLogDB(db *gorm.DB, logDB *gorm.DB) *Repos {
 	}
 }
 
-// SetHotCache wires Redis hot cache into repositories that support it.
+// SetHotCache 把 Redis 热缓存接入支持它的 repository。
 func (r *Repos) SetHotCache(hc HotCacheBackend) {
 	r.AccessLog.SetHotCache(hc)
 	r.SecurityEvent.SetHotCache(hc)
 }
 
-// SetWriteQueue wires the async write queue into repositories that support it.
+// SetWriteQueue 把异步写队列接入支持它的 repository。
 func (r *Repos) SetWriteQueue(wq WriteQueueBackend) {
 	r.AccessLog.SetWriteQueue(wq)
 	r.SecurityEvent.SetWriteQueue(wq)

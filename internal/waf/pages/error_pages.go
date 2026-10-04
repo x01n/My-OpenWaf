@@ -9,7 +9,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
-// ErrorPageConfig defines the configuration for a custom error page.
+// ErrorPageConfig 定义自定义错误页的配置。
 type ErrorPageConfig struct {
 	StatusCode  int    `json:"status_code"`
 	Title       string `json:"title"`
@@ -19,7 +19,7 @@ type ErrorPageConfig struct {
 	ContentType string `json:"content_type"`
 }
 
-// defaultErrorPages provides built-in error page configurations.
+// defaultErrorPages 提供内置错误页配置。
 var defaultErrorPages = map[int]*ErrorPageConfig{
 	403: {StatusCode: 403, Title: "Access Denied", Body: "Your request has been blocked by the web application firewall.\n您的请求已被Web应用防火墙拦截。"},
 	404: {StatusCode: 404, Title: "Not Found", Body: "The requested resource could not be found.\n请求的资源未找到。"},
@@ -30,7 +30,7 @@ var defaultErrorPages = map[int]*ErrorPageConfig{
 	504: {StatusCode: 504, Title: "Gateway Timeout", Body: "The upstream server did not respond in time.\n上游服务器未能及时响应。"},
 }
 
-// GetDefaultErrorPage returns the default error page config for a status code.
+// GetDefaultErrorPage 返回指定状态码的默认错误页配置。
 func GetDefaultErrorPage(statusCode int) *ErrorPageConfig {
 	if cfg, ok := defaultErrorPages[statusCode]; ok {
 		return cfg
@@ -42,8 +42,8 @@ func GetDefaultErrorPage(statusCode int) *ErrorPageConfig {
 	}
 }
 
-// RenderErrorPage renders an error page HTML for the given status code.
-// If customConfig is provided, it overrides the default.
+// RenderErrorPage 渲染指定状态码的错误页 HTML。
+// customConfig 非 nil 时覆盖默认配置。
 func RenderErrorPage(statusCode int, customConfig *ErrorPageConfig) []byte {
 	cfg := *GetDefaultErrorPage(statusCode)
 	if customConfig != nil {
@@ -117,7 +117,7 @@ func renderErrorTemplate(html string, statusCode int, title string) string {
 	return buf.String()
 }
 
-// WriteErrorPage writes an error page response directly to the Hertz context.
+// WriteErrorPage 把错误页响应直接写入 Hertz 上下文。
 func WriteErrorPage(_ context.Context, c *app.RequestContext, statusCode int, customConfig *ErrorPageConfig) {
 	c.Response.Header.Del("Server")
 	contentType := "text/html; charset=utf-8"
@@ -135,7 +135,7 @@ func WriteErrorPage(_ context.Context, c *app.RequestContext, statusCode int, cu
 	c.Data(statusCode, contentType, page)
 }
 
-// WriteWelcomePage renders the OpenWAF welcome page when no site matches the request.
+// WriteWelcomePage 在没有站点匹配请求时渲染 OpenWAF 欢迎页。
 func WriteWelcomePage(_ context.Context, c *app.RequestContext) {
 	c.Response.Header.Del("Server")
 	c.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate")

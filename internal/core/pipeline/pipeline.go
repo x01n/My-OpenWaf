@@ -11,46 +11,47 @@ import (
 	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
-// RequestCtx carries all decoded request data through the pipeline.
+// RequestCtx 携带全部已解码的请求数据流经管道。
 type RequestCtx struct {
 	// Context 是请求生命周期上下文；为 nil 时保持测试和外部调用方的兼容行为。
 	Context   context.Context
 	RequestID string
-	Bind      string // Listener bind address (e.g., ":443")
+	Bind      string // 监听器绑定地址（如 ":443"）
 	ClientIP  net.IP
 	Method    string
 	Path      string
-	// OriginalPath retains the immutable inbound path for phase skip matching after request-stage plugins mutate Path.
+	// OriginalPath 保留不可变的入站路径，供请求阶段插件改写 Path 之后仍能
+	// 做阶段跳过匹配。
 	OriginalPath string
 	RawQuery     string
 	Host         string
 	UserAgent    string
 
-	// ChallengeIdentity* retain the pre-mutation identity used to validate
-	// challenge pass cookies after request-stage plugins mutate the request view.
+	// ChallengeIdentity* 保留改写前的身份信息，用于在请求阶段插件改写请求视图
+	// 之后仍能校验挑战通过 cookie。
 	ChallengeIdentityCaptured  bool
 	ChallengeIdentityUserAgent string
 	ChallengeIdentityCookie    string
 	SiteID                     uint
 	Headers                    map[string]string
-	// HeadersLowercase reports that every key in Headers is already lowercase.
+	// HeadersLowercase 表示 Headers 中的每个键都已小写。
 	HeadersLowercase bool
-	HeaderKeys       []string // Ordered header keys for fingerprinting
+	HeaderKeys       []string // 有序的请求头键名，供指纹使用
 	Body             []byte
 	ContentType      string
 	TLS              tlsfp.TLSClientFingerprint
 
-	// AntiReplayTTL is per-site nonce window in seconds (0 = engine default).
+	// AntiReplayTTL 是按站点的 nonce 窗口秒数（0 表示用引擎默认值）。
 	AntiReplayTTL int
-	// AntiReplayConsumedNonce records a Cookie nonce already validated by the handler.
-	// The pipeline skips only the same X-Nonce value; a different header nonce is still checked.
+	// AntiReplayConsumedNonce 记录已被处理器校验过的 Cookie nonce。
+	// 管道只跳过相同的 X-Nonce 值；值不同的请求头 nonce 仍会被校验。
 	AntiReplayConsumedNonce string
 
 	QueryParams map[string]string
 	QueryValues map[string][]string
 
-	// BodyTargets caches extracted body targets to avoid re-parsing in
-	// multiple phases (OWASP + CVE both need the same targets).
+	// BodyTargets 缓存已抽取的请求体目标，避免多个阶段重复解析
+	// （OWASP 与 CVE 需要同一批目标）。
 	BodyTargets     []string
 	BodyTargetsDone bool
 
@@ -63,22 +64,22 @@ type RequestCtx struct {
 	matcherQueryValues   url.Values
 	matcherQueryValuesOK bool
 
-	// matcherHeaders caches the matcher-visible header map derived from the
-	// request headers plus Host/TLS/header-order aliases.
+	// matcherHeaders 缓存匹配器可见的请求头 map，由请求头叠加
+	// Host/TLS/头顺序别名派生而来。
 	matcherHeaders        map[string]string
 	matcherHeadersReady   bool
 	matcherHeadersAliased bool
 
-	// BotScoreResult stores bot detection scoring for async logging in the dataplane.
-	// This is set by the bot detection phase and read after pipeline execution.
+	// BotScoreResult 保存 bot 检测评分，供数据面异步写日志。
+	// 由 bot 检测阶段写入，在管道执行之后读取。
 	BotScoreResult *BotScoreInfo
 
-	// phaseObserveHits stores observe-only hits emitted inside a phase before that
-	// phase later returns a stronger terminal action.
+	// phaseObserveHits 暂存某阶段内部先产生的仅观察命中，该阶段随后又返回了
+	// 更强的终止动作。
 	phaseObserveHits []action.Result
 
-	// observeHitsBuf is a reusable buffer for collecting observe hits during
-	// pipeline.Run, avoiding per-request slice allocation.
+	// observeHitsBuf 是 pipeline.Run 收集观察命中的可复用缓冲，
+	// 避免每请求分配切片。
 	observeHitsBuf []action.Result
 
 	// requestMutation 是管道阶段产生的待应用请求改写，由数据面在 Run 返回后
@@ -89,7 +90,7 @@ type RequestCtx struct {
 	// 由数据面转交给 proxy 的响应变换链。nil 表示没有改写。
 	responseMutations []ResponseMutator
 
-	// Derived header string cache: computed once per request, reused across phases.
+	// 派生请求头字符串缓存：每请求计算一次，跨阶段复用。
 	derivedALPN         string
 	derivedALPNDone     bool
 	derivedHeaderOrder  string
@@ -99,9 +100,7 @@ type RequestCtx struct {
 }
 
 /**
- * ResetMutationCaches clears request-derived values after a pre-pipeline mutation.
- *
- * @return void
+ * ResetMutationCaches 清空管道前改写之后产生的全部请求派生值。
  */
 func (ctx *RequestCtx) ResetMutationCaches() {
 	if ctx == nil {
@@ -128,7 +127,7 @@ func (ctx *RequestCtx) ContextOrBackground() context.Context {
 	return ctx.Context
 }
 
-// CachedMatcherHeaders returns the per-request matcher header cache when ready.
+// CachedMatcherHeaders 在缓存就绪时返回每请求的匹配器请求头缓存。
 func (ctx *RequestCtx) CachedMatcherHeaders() (map[string]string, bool) {
 	if !ctx.matcherHeadersReady {
 		return nil, false
@@ -136,55 +135,54 @@ func (ctx *RequestCtx) CachedMatcherHeaders() (map[string]string, bool) {
 	return ctx.matcherHeaders, true
 }
 
-// CachedMatcherHeadersAliased reports whether the cached matcher headers still
-// alias the live request header map.
+// CachedMatcherHeadersAliased 报告已缓存的匹配器请求头是否仍与实时请求头
+// map 别名共享。
 func (ctx *RequestCtx) CachedMatcherHeadersAliased() bool {
 	return ctx.matcherHeadersReady && ctx.matcherHeadersAliased
 }
 
-// CachedJSONBodyObject returns the lazily parsed JSON object for the request
-// body, computed and stored once per request by bodyJSONPath-style matchers.
-// 解析失败也计入 Done，避免同一请求重复尝试。
+// CachedJSONBodyObject 返回请求体懒解析出的 JSON 对象；由 bodyJSONPath 类
+// 匹配器每请求计算并存储一次。解析失败也计入 Done，避免同一请求重复尝试。
 func (ctx *RequestCtx) CachedJSONBodyObject() (map[string]any, bool) {
 	return ctx.matcherJSONBody, ctx.matcherJSONBodyDone
 }
 
-// StoreJSONBodyObject saves the parsed JSON object of the request body.
+// StoreJSONBodyObject 保存请求体解析出的 JSON 对象。
 func (ctx *RequestCtx) StoreJSONBodyObject(obj map[string]any) {
 	ctx.matcherJSONBody = obj
 	ctx.matcherJSONBodyDone = true
 }
 
-// CachedMatcherQueryValues returns the lazily parsed query values shared by
-// queryParam-style matchers. ok 为 false 表示尚未解析。
+// CachedMatcherQueryValues 返回 queryParam 类匹配器共享的懒解析查询值。
+// ok 为 false 表示尚未解析。
 func (ctx *RequestCtx) CachedMatcherQueryValues() (url.Values, bool) {
 	return ctx.matcherQueryValues, ctx.matcherQueryValuesOK
 }
 
-// StoreMatcherQueryValues saves the parsed query values for queryParam-style
-// matchers. values 保持 nil-safe：nil 时以 Done 语义跳过重复解析。
+// StoreMatcherQueryValues 保存 queryParam 类匹配器解析出的查询值。
+// values 保持 nil-safe：nil 时以 Done 语义跳过重复解析。
 func (ctx *RequestCtx) StoreMatcherQueryValues(values url.Values) {
 	ctx.matcherQueryValues = values
 	ctx.matcherQueryValuesOK = true
 }
 
-// StoreMatcherHeaders saves the per-request matcher header cache.
+// StoreMatcherHeaders 保存每请求的匹配器请求头缓存。
 func (ctx *RequestCtx) StoreMatcherHeaders(headers map[string]string) {
 	ctx.matcherHeaders = headers
 	ctx.matcherHeadersReady = true
 	ctx.matcherHeadersAliased = false
 }
 
-// StoreAliasedMatcherHeaders saves a matcher header cache that aliases the
-// live request header map instead of a detached derived copy.
+// StoreAliasedMatcherHeaders 保存与实时请求头 map 别名共享的匹配器请求头
+// 缓存，而非脱离的派生副本。
 func (ctx *RequestCtx) StoreAliasedMatcherHeaders(headers map[string]string) {
 	ctx.matcherHeaders = headers
 	ctx.matcherHeadersReady = true
 	ctx.matcherHeadersAliased = true
 }
 
-// ReusableMatcherHeadersBuffer returns the detached matcher header cache kept
-// on the pooled RequestCtx for reuse across requests.
+// ReusableMatcherHeadersBuffer 返回池化 RequestCtx 上保留的脱离式匹配器
+// 请求头缓存，供跨请求复用。
 func (ctx *RequestCtx) ReusableMatcherHeadersBuffer() map[string]string {
 	if ctx.matcherHeadersAliased {
 		return nil
@@ -192,7 +190,7 @@ func (ctx *RequestCtx) ReusableMatcherHeadersBuffer() map[string]string {
 	return ctx.matcherHeaders
 }
 
-// ClearMatcherHeadersCache drops the per-request matcher header cache.
+// ClearMatcherHeadersCache 丢弃每请求的匹配器请求头缓存。
 func (ctx *RequestCtx) ClearMatcherHeadersCache() {
 	if ctx.matcherHeadersAliased {
 		ctx.matcherHeaders = nil
@@ -201,19 +199,19 @@ func (ctx *RequestCtx) ClearMatcherHeadersCache() {
 	ctx.matcherHeadersAliased = false
 }
 
-// AppendHeaderKey records the original header key.
+// AppendHeaderKey 记录请求头的原始键名。
 func (ctx *RequestCtx) AppendHeaderKey(key string) {
 	ctx.HeaderKeys = append(ctx.HeaderKeys, key)
 }
 
-// ClearHeaderKeys releases the recorded header keys while keeping capacity for reuse.
+// ClearHeaderKeys 释放已记录的请求头键名，同时保留容量以便复用。
 func (ctx *RequestCtx) ClearHeaderKeys() {
 	if ctx.HeaderKeys != nil {
 		ctx.HeaderKeys = ctx.HeaderKeys[:0]
 	}
 }
 
-// AppendPhaseObserveHits buffers observe-only hits emitted inside a phase.
+// AppendPhaseObserveHits 缓冲某阶段内部产生的仅观察命中。
 func (ctx *RequestCtx) AppendPhaseObserveHits(results []action.Result) {
 	if len(results) == 0 {
 		return
@@ -221,7 +219,7 @@ func (ctx *RequestCtx) AppendPhaseObserveHits(results []action.Result) {
 	ctx.phaseObserveHits = append(ctx.phaseObserveHits, results...)
 }
 
-// DrainPhaseObserveHits returns and clears the buffered per-phase observe hits.
+// DrainPhaseObserveHits 取出并清空缓冲的阶段内观察命中。
 func (ctx *RequestCtx) DrainPhaseObserveHits() []action.Result {
 	if len(ctx.phaseObserveHits) == 0 {
 		return nil
@@ -231,7 +229,7 @@ func (ctx *RequestCtx) DrainPhaseObserveHits() []action.Result {
 	return hits
 }
 
-// DerivedALPN returns the cached ALPN join string, computing it on first call.
+// DerivedALPN 返回缓存的 ALPN 拼接串，首次调用时计算。
 func (ctx *RequestCtx) DerivedALPN(compute func() string) string {
 	if !ctx.derivedALPNDone {
 		ctx.derivedALPN = compute()
@@ -240,7 +238,7 @@ func (ctx *RequestCtx) DerivedALPN(compute func() string) string {
 	return ctx.derivedALPN
 }
 
-// DerivedHeaderOrder returns the cached header order join string, computing it on first call.
+// DerivedHeaderOrder 返回缓存的请求头顺序拼接串，首次调用时计算。
 func (ctx *RequestCtx) DerivedHeaderOrder(compute func() string) string {
 	if !ctx.derivedHeaderDone {
 		ctx.derivedHeaderOrder = compute()
@@ -249,7 +247,7 @@ func (ctx *RequestCtx) DerivedHeaderOrder(compute func() string) string {
 	return ctx.derivedHeaderOrder
 }
 
-// DerivedCipherSuites returns the cached cipher suites format string, computing it on first call.
+// DerivedCipherSuites 返回缓存的密码套件格式化串，首次调用时计算。
 func (ctx *RequestCtx) DerivedCipherSuites(compute func() string) string {
 	if !ctx.derivedCipherDone {
 		ctx.derivedCipherSuites = compute()
@@ -275,18 +273,20 @@ type BotScoreInfo struct {
 	DangerReasons []string
 }
 
-// Phase is one stage in the WAF processing pipeline.
+// Phase 是 WAF 处理管道中的一个阶段。
 type Phase interface {
 	Name() string
 	Execute(ctx *RequestCtx) (action.Result, bool)
 }
 
-// RequestMutator 是管道阶段可选的请求改写出口。
-//
-// 阶段在管道内运行，拿不到 Hertz 请求对象（pipeline 包不认识 hertz），
-// 因此改写意图先落在 RequestCtx 上，由数据面在管道返回后写回真实请求。
-// 字段与 jsplugin.MutationPlan 同构：method/path/raw_query/body 用指针区分
-// 「不改」与「显式置空」，头变更用增删两张表。
+/**
+ * RequestMutator 是管道阶段可选的请求改写出口。
+ *
+ * 阶段在管道内运行，拿不到 Hertz 请求对象（pipeline 包不认识 hertz），
+ * 因此改写意图先落在 RequestCtx 上，由数据面在管道返回后写回真实请求。
+ * 字段与 jsplugin.MutationPlan 同构：method/path/raw_query/body 用指针区分
+ * 「不改」与「显式置空」，头变更用增删两张表。
+ */
 type RequestMutator struct {
 	Method        *string
 	Path          *string
@@ -305,15 +305,17 @@ func (ctx *RequestCtx) SetRequestMutation(mutation RequestMutator) {
 	ctx.requestMutation = &stored
 }
 
-// ApplyRequestMutation 校验改写并在管道上下文内就地生效。
-//
-// 阶段（Lua pre）在管道中途产生改写时立即调用：后续阶段因此看到改写后的
-// 请求，与「pre 在昂贵检测之前、可以改变检测对象」的定位一致。Hertz 请求
-// 的写回不在管道内做（pipeline 不认识 hertz），由数据面在管道返回后按
-// DrainRequestMutation 的意图完成。
-//
-// 先整体校验、再整体应用：任何一项非法都让整份改写失败且不留部分效果，
-// 静默生效一半会让脚本行为无法从源码推断。
+/**
+ * ApplyRequestMutation 校验改写并在管道上下文内就地生效。
+ *
+ * 阶段（Lua pre）在管道中途产生改写时立即调用：后续阶段因此看到改写后的
+ * 请求，与「pre 在昂贵检测之前、可以改变检测对象」的定位一致。Hertz 请求
+ * 的写回不在管道内做（pipeline 不认识 hertz），由数据面在管道返回后按
+ * DrainRequestMutation 的意图完成。
+ *
+ * 先整体校验、再整体应用：任何一项非法都让整份改写失败且不留部分效果，
+ * 静默生效一半会让脚本行为无法从源码推断。
+ */
 func (ctx *RequestCtx) ApplyRequestMutation(mutation RequestMutator) error {
 	if ctx == nil {
 		return nil
@@ -385,12 +387,14 @@ func (ctx *RequestCtx) ApplyRequestMutation(mutation RequestMutator) error {
 	return nil
 }
 
-// mutationHeaderName 归一化头名；非法或属于保留头时 ok=false。
-//
-// 保留头表与 jsplugin 的 isForbiddenJSHeader、luaplugin 的 allowedRequestHeader
-// 逐项一致：Host 决定路由与站点匹配，Content-Length 与 Transfer-Encoding 决定
-// 消息边界，逐跳头由传输层生成。管道阶段在改写生效前先挡住它们——这里写入的
-// Headers 会被后续阶段（规则匹配、指纹）直接读到。
+/**
+ * mutationHeaderName 归一化头名；非法或属于保留头时 ok=false。
+ *
+ * 保留头表与 jsplugin 的 isForbiddenJSHeader、luaplugin 的 allowedRequestHeader
+ * 逐项一致：Host 决定路由与站点匹配，Content-Length 与 Transfer-Encoding 决定
+ * 消息边界，逐跳头由传输层生成。管道阶段在改写生效前先挡住它们——这里写入的
+ * Headers 会被后续阶段（规则匹配、指纹）直接读到。
+ */
 func mutationHeaderName(name string) (string, bool) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" || !isMutationToken(trimmed) {
@@ -450,10 +454,12 @@ func (ctx *RequestCtx) DrainRequestMutation() (RequestMutator, bool) {
 	return mutation, true
 }
 
-// ResponseMutator 是管道外阶段（Lua post）产生的响应改写意图。
-//
-// 与 RequestMutator 对称：post 阶段在代理之前算完，但响应体要等代理回来才有，
-// 因此意图先挂在 RequestCtx 上，由数据面转交给 proxy 的响应变换链消费。
+/**
+ * ResponseMutator 是管道外阶段（Lua post）产生的响应改写意图。
+ *
+ * 与 RequestMutator 对称：post 阶段在代理之前算完，但响应体要等代理回来才有，
+ * 因此意图先挂在 RequestCtx 上，由数据面转交给 proxy 的响应变换链消费。
+ */
 type ResponseMutator struct {
 	// ScriptName 是产生改写的脚本，仅用于诊断与日志。
 	ScriptName string
@@ -484,13 +490,13 @@ func (ctx *RequestCtx) DrainResponseMutations() []ResponseMutator {
 	return mutations
 }
 
-// RunResult bundles the terminal action with any observe-only hits for logging.
+// RunResult 打包最终判定与需记录的仅观察命中。
 type RunResult struct {
 	Action      action.Result
 	ObserveHits []action.Result
 }
 
-// Pipeline is an ordered chain of phases executed in sequence.
+// Pipeline 是按顺序执行的阶段有序链。
 type Pipeline struct {
 	phases []Phase
 }
@@ -499,13 +505,15 @@ func New(phases ...Phase) *Pipeline {
 	return &Pipeline{phases: phases}
 }
 
-// Run executes a phase slice directly without allocating a Pipeline wrapper.
-// Prefer this for hot-path callers; the Pipeline.Run method now delegates here.
-//
-// Drop/intercept results short-circuit immediately (highest priority).
-// Challenge results are deferred: pipeline continues so that subsequent phases
-// (OWASP, CVE, etc.) still run. If a higher-priority terminal action appears later,
-// it overrides the challenge. Otherwise the challenge is returned at the end.
+/**
+ * Run 直接执行阶段切片，不额外分配 Pipeline 包装。
+ * 热路径调用方优先使用本函数；Pipeline.Run 方法现已委托到这里。
+ *
+ * drop/intercept 结果立即短路（优先级最高）。
+ * challenge 结果延迟处理：管道继续运行，使后续阶段（OWASP、CVE 等）仍能执行；
+ * 若之后出现更高优先级的终止动作，它将覆盖该 challenge；否则在末尾返回
+ * 该 challenge。
+ */
 func Run(phases []Phase, ctx *RequestCtx) RunResult {
 	observeHits := ctx.observeHitsBuf[:0]
 	var pendingChallenge *action.Result
@@ -551,7 +559,7 @@ func Run(phases []Phase, ctx *RequestCtx) RunResult {
 	return RunResult{Action: action.Pass(), ObserveHits: observeHits}
 }
 
-// Run executes each phase in order. Kept for backward compatibility.
+// Run 按顺序执行各阶段。为向后兼容保留。
 func (p *Pipeline) Run(ctx *RequestCtx) RunResult {
 	return Run(p.phases, ctx)
 }

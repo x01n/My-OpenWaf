@@ -45,7 +45,7 @@ func invokeOWASPPost(t *testing.T, handler app.HandlerFunc, uri, idParam string,
 	return ctx
 }
 
-// ---- GetOWASPRuleStats ----
+// GetOWASPRuleStats
 
 func TestGetOWASPRuleStatsCountsRegistry(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
@@ -108,7 +108,7 @@ func TestGetOWASPRuleStatsRespectsDisableOverride(t *testing.T) {
 	}
 }
 
-// ---- ListOWASPRulesFromRegistry ----
+// ListOWASPRulesFromRegistry
 
 func TestListOWASPRulesFiltersByCategory(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
@@ -195,7 +195,7 @@ func TestListOWASPRulesSortsByID(t *testing.T) {
 	}
 }
 
-// ---- UpdateSingleOWASPRule 边界路径 ----
+// UpdateSingleOWASPRule 边界路径
 
 func TestUpdateSingleOWASPRuleUnknownRuleReturns404(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
@@ -236,7 +236,7 @@ func TestUpdateSingleOWASPRuleAcceptsRedirectWithTarget(t *testing.T) {
 	}
 }
 
-// ---- BatchUpdateOWASPRules ----
+// BatchUpdateOWASPRules
 
 func TestBatchUpdateOWASPRulesRejectsEmptyArray(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
@@ -393,7 +393,7 @@ func TestBatchUpdateOWASPRulesRejectsRedirectWithoutTarget(t *testing.T) {
 	}
 }
 
-// ---- overrideHasRedirectActionWithoutTarget ----
+// overrideHasRedirectActionWithoutTarget
 
 func TestOverrideHasRedirectActionWithoutTarget(t *testing.T) {
 	tests := []struct {

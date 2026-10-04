@@ -7,36 +7,36 @@ import (
 	"gorm.io/gorm"
 )
 
-// V2MigrateSingleSite consolidates Listener and ForwardingProfile into Site.
-// This migration:
-// 1. Adds new columns to sites table
-// 2. Migrates data from listeners and forwarding_profiles
-// 3. Backs up old tables with _backup suffix
-// 4. Drops original listener and forwarding_profile tables
+// V2MigrateSingleSite 把 Listener 与 ForwardingProfile 合并进 Site。
+// 本迁移依次完成：
+// 1. 为 sites 表新增列
+// 2. 从 listeners 与 forwarding_profiles 迁移数据
+// 3. 以 _backup 后缀备份旧表
+// 4. 删除原 listener 与 forwarding_profile 表
 func V2MigrateSingleSite(db *gorm.DB) error {
-	// Check if migration already applied
+	// 检查迁移是否已执行过
 	if !db.Migrator().HasTable("listeners") {
-		return nil // Already migrated
+		return nil // 已完成迁移
 	}
 
-	// Start transaction
+	// 开启事务
 	return db.Transaction(func(tx *gorm.DB) error {
-		// Step 1: Add new columns to sites table if they don't exist
+		// 步骤 1：若 sites 表缺少新列则补齐
 		if err := addSiteColumns(tx); err != nil {
 			return fmt.Errorf("failed to add site columns: %w", err)
 		}
 
-		// Step 2: Migrate data from listeners to sites
+		// 步骤 2：把 listeners 的数据迁移到 sites
 		if err := migrateListenerData(tx); err != nil {
 			return fmt.Errorf("failed to migrate listener data: %w", err)
 		}
 
-		// Step 3: Migrate data from forwarding_profiles to sites
+		// 步骤 3：把 forwarding_profiles 的数据迁移到 sites
 		if err := migrateForwardingProfileData(tx); err != nil {
 			return fmt.Errorf("failed to migrate forwarding profile data: %w", err)
 		}
 
-		// Step 4: Backup old tables
+		// 步骤 4：备份旧表
 		timestamp := time.Now().Format("20060102_150405")
 		if err := tx.Exec(fmt.Sprintf("ALTER TABLE listeners RENAME TO listeners_backup_%s", timestamp)).Error; err != nil {
 			return fmt.Errorf("failed to backup listeners table: %w", err)
@@ -82,7 +82,7 @@ func addSiteColumns(tx *gorm.DB) error {
 }
 
 func migrateListenerData(tx *gorm.DB) error {
-	// Query all sites with their listener data
+	// 查询全部站点及其监听器数据
 	rows, err := tx.Raw(`
 		SELECT
 			s.id,
@@ -102,7 +102,7 @@ func migrateListenerData(tx *gorm.DB) error {
 	}
 	defer rows.Close()
 
-	// Update each site with listener configuration
+	// 用监听器配置逐条更新站点
 	for rows.Next() {
 		var (
 			siteID                              uint
@@ -127,7 +127,7 @@ func migrateListenerData(tx *gorm.DB) error {
 }
 
 func migrateForwardingProfileData(tx *gorm.DB) error {
-	// Query all sites with their forwarding profile data
+	// 查询全部站点及其转发配置数据
 	rows, err := tx.Raw(`
 		SELECT
 			s.id,
@@ -142,7 +142,7 @@ func migrateForwardingProfileData(tx *gorm.DB) error {
 	}
 	defer rows.Close()
 
-	// Update each site with forwarding configuration
+	// 用转发配置逐条更新站点
 	for rows.Next() {
 		var (
 			siteID               uint
@@ -165,7 +165,7 @@ func migrateForwardingProfileData(tx *gorm.DB) error {
 	return nil
 }
 
-// siteTable is a dummy struct for GORM Migrator column checks
+// siteTable 是供 GORM Migrator 做列检查的占位结构体。
 type siteTable struct {
 	Bind                  string
 	Network               string

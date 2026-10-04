@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// --- isSensitiveRecordedKey ---
+// isSensitiveRecordedKey 相关测试
 
 func TestIsSensitiveRecordedKey(t *testing.T) {
 	sensitive := []string{
@@ -36,7 +36,7 @@ func TestIsSensitiveRecordedKey(t *testing.T) {
 	}
 }
 
-// --- truncateRecordedValue ---
+// truncateRecordedValue 相关测试
 
 func TestTruncateRecordedValue(t *testing.T) {
 	t.Run("short value unchanged", func(t *testing.T) {
@@ -64,7 +64,7 @@ func TestTruncateRecordedValue(t *testing.T) {
 	})
 }
 
-// --- sanitizeRecordedText ---
+// sanitizeRecordedText 相关测试
 
 func TestSanitizeRecordedText(t *testing.T) {
 	t.Run("no sensitive content unchanged", func(t *testing.T) {
@@ -95,7 +95,7 @@ func TestSanitizeRecordedText(t *testing.T) {
 	})
 }
 
-// --- sanitizeRecordedQueryString ---
+// sanitizeRecordedQueryString 相关测试
 
 func TestSanitizeRecordedQueryString(t *testing.T) {
 	t.Run("empty returns empty", func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestSanitizeRecordedQueryString(t *testing.T) {
 		if strings.Contains(got, "abc") {
 			t.Errorf("token value should be redacted, got %q", got)
 		}
-		// url.Values.Encode() URL-encodes '[' and ']' in the redacted marker
+		// url.Values.Encode() 会把 redacted 标记里的 '[' 和 ']' 做 URL 编码
 		if !strings.Contains(got, "redacted") {
 			t.Errorf("expected redacted marker, got %q", got)
 		}
@@ -130,7 +130,7 @@ func TestSanitizeRecordedQueryString(t *testing.T) {
 	})
 }
 
-// --- sanitizeRecordedJSONValue ---
+// sanitizeRecordedJSONValue 相关测试
 
 func TestSanitizeRecordedJSONValue(t *testing.T) {
 	t.Run("map with sensitive key redacted", func(t *testing.T) {
@@ -177,7 +177,7 @@ func TestSanitizeRecordedJSONValue(t *testing.T) {
 	})
 }
 
-// --- sanitizeRecordedBodySnippet ---
+// sanitizeRecordedBodySnippet 相关测试
 
 func TestSanitizeRecordedBodySnippet(t *testing.T) {
 	t.Run("empty body returns empty", func(t *testing.T) {
@@ -252,7 +252,7 @@ func TestSanitizeRecordedBodySnippetRedactsMalformedSecrets(t *testing.T) {
 	}
 }
 
-// --- captureRecordedHTTPHeaders ---
+// captureRecordedHTTPHeaders 相关测试
 
 func TestCaptureRecordedHTTPHeaders(t *testing.T) {
 	t.Run("nil header returns empty", func(t *testing.T) {

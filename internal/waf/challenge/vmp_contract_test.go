@@ -47,13 +47,15 @@ const isaSourcePath = "../../../wasm-pow-solver/src/isa.rs"
 // libSourcePath 是宿主侧 blob 布局镜像的位置（相对仓库根）。
 const libSourcePath = "../../../wasm-pow-solver/src/lib.rs"
 
-// opcodeConstRe 匹配 isa.rs 里 opcode 常量的**唯一合法书写形式**。
-//
-//	`pub const OP_SHA256_COMPRESS: u8 = 0x1E;`
-//
-// 契约测试不解析 Rust 语法，只认这一种形态。isa.rs 顶部的注释里写明了
-// 这个格式约束；格式被改动时本测试会因为「解析不到任何一行」而失败，
-// 而不是静默跳过。
+/**
+ * opcodeConstRe 匹配 isa.rs 里 opcode 常量的**唯一合法书写形式**。
+ *
+ *	`pub const OP_SHA256_COMPRESS: u8 = 0x1E;`
+ *
+ * 契约测试不解析 Rust 语法，只认这一种形态。isa.rs 顶部的注释里写明了
+ * 这个格式约束；格式被改动时本测试会因为「解析不到任何一行」而失败，
+ * 而不是静默跳过。
+ */
 var opcodeConstRe = regexp.MustCompile(`(?m)^pub const (OP_[A-Z0-9_]+): u8 = (0x[0-9A-F]{2});$`)
 
 // headerConstRe 匹配容器常量（非 opcode 的 u 类型常量）。
@@ -79,15 +81,17 @@ func readISASource(t *testing.T) string {
 	return string(raw)
 }
 
-// TestISAOpcodesMatchGoMirror 是本改动的核心契约测试。
-//
-// 机制：isa.rs 里每一条 `pub const OP_*: u8 = 0xNN;` 都必须能在 Go 侧
-// `vmpasm.OpcodeTable` 找到同值的镜像，且 Go 侧不得有 isa.rs 里没有的条目。
-//
-// 变异验证（实测均变红，见交付报告）：
-//   - isa.rs 任一 opcode 数值改一位 → 本用例 FAIL（值不等）
-//   - isa.rs 注释掉一行 opcode 常量 → 本用例 FAIL（Go 侧多出条目）
-//   - Go 侧 opcode 常量改一位     → 本用例 FAIL（值不等）
+/**
+ * TestISAOpcodesMatchGoMirror 是本改动的核心契约测试。
+ *
+ * 机制：isa.rs 里每一条 `pub const OP_*: u8 = 0xNN;` 都必须能在 Go 侧
+ * `vmpasm.OpcodeTable` 找到同值的镜像，且 Go 侧不得有 isa.rs 里没有的条目。
+ *
+ * 变异验证（实测均变红，见交付报告）：
+ *   - isa.rs 任一 opcode 数值改一位 → 本用例 FAIL（值不等）
+ *   - isa.rs 注释掉一行 opcode 常量 → 本用例 FAIL（Go 侧多出条目）
+ *   - Go 侧 opcode 常量改一位     → 本用例 FAIL（值不等）
+ */
 func TestISAOpcodesMatchGoMirror(t *testing.T) {
 	src := readISASource(t)
 	matches := opcodeConstRe.FindAllStringSubmatch(src, -1)
@@ -148,10 +152,12 @@ func TestISAOpcodesMatchGoMirror(t *testing.T) {
 	}
 }
 
-// TestISAOpcodesAreContiguousAndReserved 锁定 opcode 的数值布局。
-//
-// 机制：0x00..0x22 必须连续分配，0x23..0xFF 保留。
-// 数值不连续意味着有人插入了一个 opcode 却没更新文档与 Go 镜像。
+/**
+ * TestISAOpcodesAreContiguousAndReserved 锁定 opcode 的数值布局。
+ *
+ * 机制：0x00..0x22 必须连续分配，0x23..0xFF 保留。
+ * 数值不连续意味着有人插入了一个 opcode 却没更新文档与 Go 镜像。
+ */
 func TestISAOpcodesAreContiguousAndReserved(t *testing.T) {
 	src := readISASource(t)
 	matches := opcodeConstRe.FindAllStringSubmatch(src, -1)
@@ -179,7 +185,9 @@ func TestISAOpcodesAreContiguousAndReserved(t *testing.T) {
 	}
 }
 
-// TestISAContainerConstantsMatchGoMirror 锁定容器常量。
+/**
+ * TestISAContainerConstantsMatchGoMirror 锁定容器常量。
+ */
 func TestISAContainerConstantsMatchGoMirror(t *testing.T) {
 	src := readISASource(t)
 	matches := headerConstRe.FindAllStringSubmatch(src, -1)
@@ -228,24 +236,26 @@ func TestISAContainerConstantsMatchGoMirror(t *testing.T) {
 	}
 }
 
-// TestMemoryLayoutIsSelfConsistent 是**自洽锁**，与上面的值锁互补。
-//
-// # 为什么需要它（线 B 提出、team-lead 采纳）
-//
-// 值锁只比「isa.rs 的解析值 == Go 镜像的当前值」。若有人把 `MAX_IN_BYTES`
-// 从 4096 改成 8192，Rust 侧的 `OUT_BASE`/`HEAP_BASE` 会**自动跟随**推导，
-// 而 Go 镜像如果只是"被同步改成了同样的绝对值"，值锁依然通过 ——
-// 漂移被掩盖了。
-//
-// 自洽锁断言的是**推导关系**而不是数值快照：
-//
-//	InEnd    == InBase + MaxInBytes
-//	OutBase  == InEnd
-//	OutEnd   == OutBase + MaxOutBytes
-//	HeapBase == OutEnd
-//
-// 关系断裂即红，无论两侧的绝对值是否"看起来一致"。
-// 这与 §9 否决「只写黄金向量」的理由同源：**锁关系，不只锁快照**。
+/**
+ * TestMemoryLayoutIsSelfConsistent 是**自洽锁**，与上面的值锁互补。
+ *
+ * # 为什么需要它（线 B 提出、team-lead 采纳）
+ *
+ * 值锁只比「isa.rs 的解析值 == Go 镜像的当前值」。若有人把 `MAX_IN_BYTES`
+ * 从 4096 改成 8192，Rust 侧的 `OUT_BASE`/`HEAP_BASE` 会**自动跟随**推导，
+ * 而 Go 镜像如果只是"被同步改成了同样的绝对值"，值锁依然通过 ——
+ * 漂移被掩盖了。
+ *
+ * 自洽锁断言的是**推导关系**而不是数值快照：
+ *
+ *	InEnd    == InBase + MaxInBytes
+ *	OutBase  == InEnd
+ *	OutEnd   == OutBase + MaxOutBytes
+ *	HeapBase == OutEnd
+ *
+ * 关系断裂即红，无论两侧的绝对值是否"看起来一致"。
+ * 这与 §9 否决「只写黄金向量」的理由同源：**锁关系，不只锁快照**。
+ */
 func TestMemoryLayoutIsSelfConsistent(t *testing.T) {
 	if got, want := vmpasm.InEnd, vmpasm.InBase+vmpasm.MaxInBytes; got != want {
 		t.Fatalf("InEnd = %d, want InBase + MaxInBytes = %d", got, want)
@@ -268,25 +278,27 @@ func TestMemoryLayoutIsSelfConsistent(t *testing.T) {
 	}
 }
 
-// TestBlobLayoutMatchesHostConstants 是 blob 布局的**跨语言锁**。
-//
-// # 为什么需要它（team-lead 早先指出、本轮补上）
-//
-// 输入/输出 blob 的偏移在**三处**各有一份：
-//
-//  1. `internal/pkg/vmpasm/pow_program.go` —— **权威**（Go 汇编器与程序私约）
-//  2. `wasm-pow-solver/src/lib.rs` 的 `mod blob` —— 宿主写入/读出用
-//  3. `wasm-pow-solver/src/isa.rs` 的注释 —— 只作说明，不参与编译
-//
-// 三方一致**没有任何强制机制**。今天已经出现过一次真实事故的雏形：
-// 两条线各自定义了互不兼容的布局而双方都自洽（因为当时无锁）。
-//
-// 本用例解析 `lib.rs` 的 `mod blob` 源文本，与 Go 侧权威常量逐条比对。
-// 与 opcode 锁同构：**漂移即红**。
-//
-// 变异验证（实测）：
-//   - 改 `lib.rs` 的 `OUT_MAGIC_OFF` 32 → 40 → 红
-//   - 改 `lib.rs` 的 `IN_LEN` 表达式 → 红
+/**
+ * TestBlobLayoutMatchesHostConstants 是 blob 布局的**跨语言锁**。
+ *
+ * # 为什么需要它（team-lead 早先指出、本轮补上）
+ *
+ * 输入/输出 blob 的偏移在**三处**各有一份：
+ *
+ *  1. `internal/pkg/vmpasm/pow_program.go` —— **权威**（Go 汇编器与程序私约）
+ *  2. `wasm-pow-solver/src/lib.rs` 的 `mod blob` —— 宿主写入/读出用
+ *  3. `wasm-pow-solver/src/isa.rs` 的注释 —— 只作说明，不参与编译
+ *
+ * 三方一致**没有任何强制机制**。今天已经出现过一次真实事故的雏形：
+ * 两条线各自定义了互不兼容的布局而双方都自洽（因为当时无锁）。
+ *
+ * 本用例解析 `lib.rs` 的 `mod blob` 源文本，与 Go 侧权威常量逐条比对。
+ * 与 opcode 锁同构：**漂移即红**。
+ *
+ * 变异验证（实测）：
+ *   - 改 `lib.rs` 的 `OUT_MAGIC_OFF` 32 → 40 → 红
+ *   - 改 `lib.rs` 的 `IN_LEN` 表达式 → 红
+ */
 func TestBlobLayoutMatchesHostConstants(t *testing.T) {
 	src := readLibSource(t)
 
@@ -362,11 +374,13 @@ func TestBlobLayoutMatchesHostConstants(t *testing.T) {
 	}
 }
 
-// TestBlobOutputMagicMatchesHostConstant 锁定输出魔数的**字节序列**。
-//
-// 三处写法各自独立：Go 侧是 u64 字面量、lib.rs 是字节串字面量、
-// `isa.rs` 是注释里的 hex。本用例把 `lib.rs` 的字节串与 Go 的 u64 互转比对，
-// 保证「小端存储后是同一串字节」。
+/**
+ * TestBlobOutputMagicMatchesHostConstant 锁定输出魔数的**字节序列**。
+ *
+ * 三处写法各自独立：Go 侧是 u64 字面量、lib.rs 是字节串字面量、
+ * `isa.rs` 是注释里的 hex。本用例把 `lib.rs` 的字节串与 Go 的 u64 互转比对，
+ * 保证「小端存储后是同一串字节」。
+ */
 func TestBlobOutputMagicMatchesHostConstant(t *testing.T) {
 	src := readLibSource(t)
 	m := regexp.MustCompile(`(?m)^\s*pub\(crate\) const OUT_MAGIC: \[u8; 8\] = \*b"([^"]*)";$`).FindStringSubmatch(src)
@@ -389,17 +403,19 @@ func TestBlobOutputMagicMatchesHostConstant(t *testing.T) {
 	}
 }
 
-// TestISAErrorCodeStringsAreStable 锁定错误码字符串。
-//
-// # 为什么错误码也要跨语言锁
-//
-// 错误码是**对 JS 侧可见的契约**：`solve_pow_batched` 用
-// `{"found":false,"error":"<code>"}` 把它们透出给浏览器。因此它们和
-// opcode 一样是「两处各写一份就会有漂移」的东西 —— Rust 侧定义、
-// Go 侧在测试里断言，任何一侧改名都会变红。
-//
-// 同时锁定「变体数」：`isa.rs` 里 `ProgramError` 的变体数必须等于这里的
-// 码位数，少一个（新增变体没同步）多一个（删了变体没同步）都报错。
+/**
+ * TestISAErrorCodeStringsAreStable 锁定错误码字符串。
+ *
+ * # 为什么错误码也要跨语言锁
+ *
+ * 错误码是**对 JS 侧可见的契约**：`solve_pow_batched` 用
+ * `{"found":false,"error":"<code>"}` 把它们透出给浏览器。因此它们和
+ * opcode 一样是「两处各写一份就会有漂移」的东西 —— Rust 侧定义、
+ * Go 侧在测试里断言，任何一侧改名都会变红。
+ *
+ * 同时锁定「变体数」：`isa.rs` 里 `ProgramError` 的变体数必须等于这里的
+ * 码位数，少一个（新增变体没同步）多一个（删了变体没同步）都报错。
+ */
 func TestISAErrorCodeStringsAreStable(t *testing.T) {
 	src := readISASource(t)
 
@@ -489,10 +505,12 @@ func TestISAMagicMatches(t *testing.T) {
 	}
 }
 
-// TestISADeclaresDelegationToVmp 锁定「执行循环不在 isa.rs」这条架构边界。
-//
-// 机制：isa.rs 的职责是常量 + 解码表 + 校验；dispatch 循环属于 vmp.rs。
-// 本用例以文件内容断言这条边界，防止有人把执行循环塞回 isa.rs 而两侧重复实现。
+/**
+ * TestISADeclaresDelegationToVmp 锁定「执行循环不在 isa.rs」这条架构边界。
+ *
+ * 机制：isa.rs 的职责是常量 + 解码表 + 校验；dispatch 循环属于 vmp.rs。
+ * 本用例以文件内容断言这条边界，防止有人把执行循环塞回 isa.rs 而两侧重复实现。
+ */
 func TestISADeclaresDelegationToVmp(t *testing.T) {
 	src := readISASource(t)
 	for _, marker := range []string{
@@ -513,7 +531,7 @@ func TestISADeclaresDelegationToVmp(t *testing.T) {
 	}
 }
 
-// --- 黄金向量：逐字节锁定编码 ---
+// 黄金向量分组：逐字节锁定编码
 
 // goldens 是 Go 汇编器产出的黄金向量。
 //
@@ -572,12 +590,14 @@ var goldens = []struct {
 	},
 }
 
-// allOpcodeProgram 生成「35 条 opcode 各出现一次」且**控制流合法**的程序。
-//
-// 布局要求：每条指令都从入口可达，且每条可达指令都能到达 HALT。
-// 因此 7 条跳转指令必须集中在倒数第二段，且无条件跳转 JMP 放在最后 ——
-// 放前面会让它后面的条件跳转全部不可达。所有跳转都指向末尾的 HALT；
-// 条件跳转的顺序后继恰好是下一条跳转指令，形成完整的链。
+/**
+ * allOpcodeProgram 生成「35 条 opcode 各出现一次」且**控制流合法**的程序。
+ *
+ * 布局要求：每条指令都从入口可达，且每条可达指令都能到达 HALT。
+ * 因此 7 条跳转指令必须集中在倒数第二段，且无条件跳转 JMP 放在最后 ——
+ * 放前面会让它后面的条件跳转全部不可达。所有跳转都指向末尾的 HALT；
+ * 条件跳转的顺序后继恰好是下一条跳转指令，形成完整的链。
+ */
 func allOpcodeProgram() []vmpasm.Instr {
 	return []vmpasm.Instr{
 		{Op: vmpasm.OpNop},
@@ -653,18 +673,20 @@ func TestGoldenVectorsVerifyClean(t *testing.T) {
 	}
 }
 
-// --- 反向断言 ---
+// 反向断言
 
-// TestTamperedGoldenVectorsAreRejected 是本文件的核心反向锁。
-//
-// 机制：对每条黄金向量的每一个字节、每一位各翻转一次，断言该变异**不可能是
-// 静默无效的** —— 要么被校验器拒绝，要么反汇编出的程序与原文不同。
-//
-// # 为什么不断言「一律被拒绝」
-//
-// 操作数字段（立即数、寄存器号、内存偏移）被翻转后往往仍是一个**合法但不同**
-// 的程序 —— 那是正确行为，不是缺陷。把它们一律要求拒绝会写出假的反向锁。
-// 「被拒绝 或 解码结果改变」才是真正要锁的机制：**校验器确实读了每一个字节**。
+/**
+ * TestTamperedGoldenVectorsAreRejected 是本文件的核心反向锁。
+ *
+ * 机制：对每条黄金向量的每一个字节、每一位各翻转一次，断言该变异**不可能是
+ * 静默无效的** —— 要么被校验器拒绝，要么反汇编出的程序与原文不同。
+ *
+ * # 为什么不断言「一律被拒绝」
+ *
+ * 操作数字段（立即数、寄存器号、内存偏移）被翻转后往往仍是一个**合法但不同**
+ * 的程序 —— 那是正确行为，不是缺陷。把它们一律要求拒绝会写出假的反向锁。
+ * 「被拒绝 或 解码结果改变」才是真正要锁的机制：**校验器确实读了每一个字节**。
+ */
 func TestTamperedGoldenVectorsAreRejected(t *testing.T) {
 	for _, g := range goldens {
 		t.Run(g.name, func(t *testing.T) {
@@ -705,11 +727,13 @@ func TestTamperedGoldenVectorsAreRejected(t *testing.T) {
 	}
 }
 
-// TestStructuralBytesAreAlwaysRejected 是本文件最严格的反向锁。
-//
-// 机制：容器头部（魔数、版本、flags、reserved、code_len）与 opcode 字节属于
-// **结构字段**，它们的任何一位翻转都必须让校验器拒绝 —— 不允许出现
-// "改了还是合法程序"的情况。
+/**
+ * TestStructuralBytesAreAlwaysRejected 是本文件最严格的反向锁。
+ *
+ * 机制：容器头部（魔数、版本、flags、reserved、code_len）与 opcode 字节属于
+ * **结构字段**，它们的任何一位翻转都必须让校验器拒绝 —— 不允许出现
+ * "改了还是合法程序"的情况。
+ */
 func TestStructuralBytesAreAlwaysRejected(t *testing.T) {
 	base, err := vmpasm.Unhex(goldens[len(goldens)-1].hex) // all_opcodes：opcode 覆盖面最大
 	if err != nil {
@@ -761,11 +785,13 @@ func TestUnknownOpcodesAreRejected(t *testing.T) {
 	}
 }
 
-// TestOutOfBoundsAccessIsRejected 反向：越界必须被拒绝。
-//
-// 注意 Go 侧无法执行程序，因此这里锁的是**编码层**的越界：
-// LOAD/STORE 的偏移字段超出声明内存时，校验器必须报 finding。
-// 运行期越界由 Rust 侧的 `vm_out_of_bounds` 负责（isa.rs 的单元测试覆盖）。
+/**
+ * TestOutOfBoundsAccessIsRejected 反向：越界必须被拒绝。
+ *
+ * 注意 Go 侧无法执行程序，因此这里锁的是**编码层**的越界：
+ * LOAD/STORE 的偏移字段超出声明内存时，校验器必须报 finding。
+ * 运行期越界由 Rust 侧的 `vm_out_of_bounds` 负责（isa.rs 的单元测试覆盖）。
+ */
 func TestOutOfBoundsAccessIsRejected(t *testing.T) {
 	// 偏移 = 0x7FFFFFFF，一页内存（64 KiB）下必然越界
 	code := []byte{vmpasm.OpLoad64, 0x10}
@@ -813,10 +839,12 @@ func TestBadJumpTargetsAreRejected(t *testing.T) {
 	}
 }
 
-// TestLegacyFormatIsRejected 反向：旧格式（无头部）必须被拒绝。
-//
-// 这是裁决 12 的核心：旧的 6-opcode 裸串不再被容忍，否则那个
-// 「固定 5 步状态机」就永远活着。
+/**
+ * TestLegacyFormatIsRejected 反向：旧格式（无头部）必须被拒绝。
+ *
+ * 这是裁决 12 的核心：旧的 6-opcode 裸串不再被容忍，否则那个
+ * 「固定 5 步状态机」就永远活着。
+ */
 func TestLegacyFormatIsRejected(t *testing.T) {
 	// 旧格式的两种形态：裸 opcode 串、以及 vmp.rs 历史测试里的 "VMPF" 帧头
 	legacy := [][]byte{
@@ -840,11 +868,13 @@ func TestLegacyFormatIsRejected(t *testing.T) {
 	}
 }
 
-// TestBudgetIsBounded 反向：预算公式必须真的封顶。
-//
-// Go 侧不执行程序，因此这里锁的是**预算常量本身**：公式
-// `min(PER_ITER_BUDGET * batch_size, MAX_STEPS_ABS)` 在 batch_size
-// 达到上限时不得溢出成天文数字。
+/**
+ * TestBudgetIsBounded 反向：预算公式必须真的封顶。
+ *
+ * Go 侧不执行程序，因此这里锁的是**预算常量本身**：公式
+ * `min(PER_ITER_BUDGET * batch_size, MAX_STEPS_ABS)` 在 batch_size
+ * 达到上限时不得溢出成天文数字。
+ */
 func TestBudgetIsBounded(t *testing.T) {
 	atLimit := uint64(vmpasm.PerIterBudget) * uint64(vmpasm.BatchSizeLimit)
 	if atLimit < vmpasm.MaxStepsAbs {
@@ -870,7 +900,7 @@ func TestBudgetIsBounded(t *testing.T) {
 	}
 }
 
-// --- 辅助 ---
+// 辅助
 
 func rawContainer(layout vmpasm.Layout, code []byte) []byte {
 	return vmpasm.BuildRaw(layout, code)
@@ -894,16 +924,18 @@ func fmtSscanHex(lit string, out *int64) (int, error) {
 	return 1, nil
 }
 
-// evalRustConst 解析 isa.rs 里容器常量的右值。
-//
-// 支持三种形态（够用即可，不是通用 Rust 求值器）：
-//
-//  1. 字面量         `24` / `0x01` / `1 << 30` / `1_000_000`
-//  2. 类型标注剥离   `MAX_IN_BYTES as u64`
-//  3. 加法链         `IN_BASE + MAX_IN_BYTES as u64`
-//
-// 引用只解析**已声明**的常量（按源码顺序遍历），未定义即报错 ——
-// 这样循环引用或改名都会被捕获。
+/**
+ * evalRustConst 解析 isa.rs 里容器常量的右值。
+ *
+ * 支持三种形态（够用即可，不是通用 Rust 求值器）：
+ *
+ *  1. 字面量         `24` / `0x01` / `1 << 30` / `1_000_000`
+ *  2. 类型标注剥离   `MAX_IN_BYTES as u64`
+ *  3. 加法链         `IN_BASE + MAX_IN_BYTES as u64`
+ *
+ * 引用只解析**已声明**的常量（按源码顺序遍历），未定义即报错 ——
+ * 这样循环引用或改名都会被捕获。
+ */
 func evalRustConst(expr string, defined map[string]uint64) (uint64, error) {
 	sum := uint64(0)
 	for _, term := range strings.Split(expr, "+") {

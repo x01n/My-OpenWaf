@@ -17,10 +17,16 @@ import (
 	"My-OpenWaf/internal/snapshot"
 )
 
-// grpcWebDataFrame builds a gRPC-Web DATA frame: the one-byte frame flag
-// (0x00 for data, 0x80 for trailers) followed by a big-endian uint32 payload
-// length and the payload. The message length prefix inside a message payload
-// is added by grpcMessagePayload.
+/**
+ * grpcWebDataFrame 构造一个 gRPC-Web DATA 帧。
+ *
+ * 帧体为 1 字节帧标志（0x00 表示数据、0x80 表示 trailer）、4 字节大端 payload
+ * 长度、payload 本身。消息 payload 内部的长度前缀由 grpcMessagePayload 补上。
+ *
+ * @param flag 帧标志。
+ * @param payload 帧负载。
+ * @return 完整帧字节。
+ */
 func grpcWebDataFrame(flag byte, payload []byte) []byte {
 	out := make([]byte, 5+len(payload))
 	out[0] = flag
@@ -29,8 +35,14 @@ func grpcWebDataFrame(flag byte, payload []byte) []byte {
 	return out
 }
 
-// grpcMessagePayload wraps an unary message with the gRPC length prefix:
-// one compressed flag byte, a big-endian uint32 message length, the message.
+/**
+ * grpcMessagePayload 为 unary 消息加上 gRPC 长度前缀。
+ *
+ * 前缀依次为 1 字节压缩标志、4 字节大端消息长度，之后是消息本身。
+ *
+ * @param payload 消息字节。
+ * @return 带长度前缀的消息帧。
+ */
 func grpcMessagePayload(payload []byte) []byte {
 	out := make([]byte, 5+len(payload))
 	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
@@ -38,10 +50,17 @@ func grpcMessagePayload(payload []byte) []byte {
 	return out
 }
 
-// grpcWebTrailersFrame builds the in-body trailers frame of the Envoy-style
-// server form of gRPC-Web: flag 0x80, payload "grpc-status:<code>", then an
-// optional "grpc-message:<message>" and any extra "key:value" entries. The
-// grpc-status never travels in the HTTP Trailer segment in this form.
+/**
+ * grpcWebTrailersFrame 构造 gRPC-Web 的 Envoy 服务端形态的体内 trailers 帧。
+ *
+ * 帧体为标志 0x80、payload "grpc-status:<code>"，其后可选 "grpc-message:<message>"
+ * 以及任意 "key:value" 条目。该形态下 grpc-status 从不走 HTTP Trailer 段。
+ *
+ * @param status grpc-status 码。
+ * @param message 可选的 grpc-message。
+ * @param extra 额外的 trailer 键值对。
+ * @return 完整 trailers 帧字节。
+ */
 func grpcWebTrailersFrame(status int, message string, extra map[string]string) []byte {
 	payload := fmt.Sprintf("grpc-status:%d", status)
 	if message != "" {
@@ -53,8 +72,14 @@ func grpcWebTrailersFrame(status int, message string, extra map[string]string) [
 	return grpcWebDataFrame(0x80, []byte(payload))
 }
 
-// h2GRPCWebUnaryUpstream serves one message frame plus the in-body trailers
-// frame over HTTP/2 with content type application/grpc-web+proto.
+/**
+ * h2GRPCWebUnaryUpstream 以 HTTP/2 起一路测试上游，返回一个消息帧加一个体内 trailers 帧。
+ *
+ * 响应 content type 为 application/grpc-web+proto。
+ *
+ * @param t 测试上下文。
+ * @return 已启动的测试上游。
+ */
 func h2GRPCWebUnaryUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,8 +97,13 @@ func h2GRPCWebUnaryUpstream(t *testing.T) *httptest.Server {
 	return upstream
 }
 
-// compressionRT returns runtime flags with a 1-byte compression threshold so
-// any compressible response qualifies for re-encoding.
+/**
+ * compressionRT 返回压缩阈值为 1 字节的运行时开关。
+ *
+ * 阈值取 1，使任何可压缩响应都够格被重新编码。
+ *
+ * @return 站点运行时。
+ */
 func compressionRT() snapshot.SiteRuntime {
 	return snapshot.SiteRuntime{
 		ResponseCompressionConfigured:  true,
@@ -83,10 +113,14 @@ func compressionRT() snapshot.SiteRuntime {
 	}
 }
 
-// TestForwardHTTPSkipsCompressionForGRPCWebAndGRPCJSONFamilies drives the
-// streaming ForwardHTTP path for every grpc-family content type and asserts
-// no Content-Encoding is applied, while the compressible text/plain control
-// response is gzip-encoded by the same runtime flags.
+/**
+ * TestForwardHTTPSkipsCompressionForGRPCWebAndGRPCJSONFamilies 覆盖流式 ForwardHTTP 路径。
+ *
+ * 对每种 grpc 家族 content type 断言不施加 Content-Encoding，而同一份运行时
+ * 开关下可压缩的 text/plain 对照响应必须被 gzip 编码。
+ *
+ * @param t 测试上下文。
+ */
 func TestForwardHTTPSkipsCompressionForGRPCWebAndGRPCJSONFamilies(t *testing.T) {
 	grpcTypes := []string{
 		"application/grpc",
@@ -122,7 +156,7 @@ func TestForwardHTTPSkipsCompressionForGRPCWebAndGRPCJSONFamilies(t *testing.T) 
 		})
 	}
 
-	// Control: the same runtime must still compress an ordinary text response.
+	// 对照：同一份运行时必须仍然压缩普通文本响应。
 	t.Run("control-text-plain", func(t *testing.T) {
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -154,8 +188,11 @@ func TestForwardHTTPSkipsCompressionForGRPCWebAndGRPCJSONFamilies(t *testing.T) 
 	})
 }
 
-// TestForwardBufferedResponseSkipsCompressionForGRPCWebFamilies covers the
-// buffered forwarding path used by the cache and app-route capture flows.
+/**
+ * TestForwardBufferedResponseSkipsCompressionForGRPCWebFamilies 覆盖缓存与 app-route 捕获所用的缓冲转发路径。
+ *
+ * @param t 测试上下文。
+ */
 func TestForwardBufferedResponseSkipsCompressionForGRPCWebFamilies(t *testing.T) {
 	payload := strings.Repeat("buffered-grpc-border-", 64)
 	for _, contentType := range []string{"application/grpc", "application/grpc+json", "application/grpc-web", "application/grpc-web+proto", "application/grpc-web+json"} {
@@ -182,9 +219,14 @@ func TestForwardBufferedResponseSkipsCompressionForGRPCWebFamilies(t *testing.T)
 	}
 }
 
-// TestForwardHTTPSkipsCompressionForGRPCWebTrailerBody forwards the Envoy
-// gRPC-Web body form (message frame + in-body trailers frame with
-// grpc-status) and requires the exact frame bytes with no Content-Encoding.
+/**
+ * TestForwardHTTPSkipsCompressionForGRPCWebTrailerBody 转发 Envoy 形态的 gRPC-Web 响应体。
+ *
+ * 该形态为消息帧加带 grpc-status 的体内 trailers 帧；断言帧字节逐字节一致
+ * 且不带 Content-Encoding。
+ *
+ * @param t 测试上下文。
+ */
 func TestForwardHTTPSkipsCompressionForGRPCWebTrailerBody(t *testing.T) {
 	payload := []byte(strings.Repeat("zx-body-payload", 512))
 	messageFrame := grpcWebDataFrame(0, grpcMessagePayload(payload))
@@ -213,11 +255,15 @@ func TestForwardHTTPSkipsCompressionForGRPCWebTrailerBody(t *testing.T) {
 	}
 }
 
-// TestShouldCacheHTTPResponseRejectsGRPCFamilies verifies the shared edge
-// cache never stores RPC response streams: every application/grpc family
-// (grpc, grpc+proto, grpc-web, grpc-web+proto) is excluded regardless of
-// upstream cache directives, because replaying one caller's stream to another
-// breaks RPC semantics (per-call trailers, status and payload continuity).
+/**
+ * TestShouldCacheHTTPResponseRejectsGRPCFamilies 验证共享边缘缓存永不存储 RPC 响应流。
+ *
+ * 无论上游缓存指令如何，application/grpc 家族（grpc、grpc+proto、grpc-web、
+ * grpc-web+proto）一律排除：把一个调用方的流回放给另一个会破坏 RPC 语义
+ * （逐调用的 trailer、状态与 payload 连续性）。
+ *
+ * @param t 测试上下文。
+ */
 func TestShouldCacheHTTPResponseRejectsGRPCFamilies(t *testing.T) {
 	for _, contentType := range []string{"application/grpc", "application/grpc+proto", "application/grpc-web", "application/grpc-web+proto", "application/grpc+json"} {
 		t.Run(contentType, func(t *testing.T) {
@@ -237,9 +283,13 @@ func TestShouldCacheHTTPResponseRejectsGRPCFamilies(t *testing.T) {
 	}
 }
 
-// TestForwardHTTPWritesH2CGRPCTrailerFrame verifies h2c gRPC classic
-// semantics through the streaming path: the message body frame and the
-// grpc-status response trailer both survive the proxy.
+/**
+ * TestForwardHTTPWritesH2CGRPCTrailerFrame 验证 h2c gRPC classic 语义在流式路径上成立。
+ *
+ * 消息体帧与 grpc-status 响应 trailer 都必须完整穿过代理。
+ *
+ * @param t 测试上下文。
+ */
 func TestForwardHTTPWritesH2CGRPCTrailerFrame(t *testing.T) {
 	messageFrame := grpcWebDataFrame(0, grpcMessagePayload([]byte("h2c-grpc-echo")))
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

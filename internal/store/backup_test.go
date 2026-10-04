@@ -576,7 +576,7 @@ func TestImportBackupRejectsInvalidJSPluginFields(t *testing.T) {
 	}
 }
 
-// TestImportBackupRejectsInvalidProtectionCaptchaType ensures backup restore validates JSON content.
+// TestImportBackupRejectsInvalidProtectionCaptchaType 确保备份恢复会校验 JSON 内容。
 func TestImportBackupRejectsInvalidProtectionCaptchaType(t *testing.T) {
 	db := newBackupTestDB(t)
 	data := &BackupData{

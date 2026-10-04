@@ -6,17 +6,19 @@ import (
 	"strings"
 )
 
-// Disassemble 把程序容器反汇编成文本，每行形如：
-//
-//	0000  01 30 08 07 06 05 04 03 02 01   MOVI R3, 0x102030405060708
-//	000A  17 FB FF FF FF                  JMP 0000
-//
-// 第一列是字节码段内的偏移，第二列是原始编码字节，第三列是指令文本。
-// 跳转指令的第三种形态回显目标偏移（`JMP 0000`）而不是相对量，
-// 便于与汇编器的标签对照。
-//
-// 反汇编是**规范性**的：对同一份字节码，输出唯一；且 Asm 能把它汇编回
-// 逐字节相同的编码（见 vmpasm_test.go 的往返用例）。
+/**
+ * Disassemble 把程序容器反汇编成文本，每行形如：
+ *
+ * 0000  01 30 08 07 06 05 04 03 02 01   MOVI R3, 0x102030405060708
+ * 000A  17 FB FF FF FF                  JMP 0000
+ *
+ * 第一列是字节码段内的偏移，第二列是原始编码字节，第三列是指令文本。
+ * 跳转指令的第三种形态回显目标偏移（`JMP 0000`）而不是相对量，
+ * 便于与汇编器的标签对照。
+ *
+ * 反汇编是**规范性**的：对同一份字节码，输出唯一；且 Asm 能把它汇编回
+ * 逐字节相同的编码（见 vmpasm_test.go 的往返用例）。
+ */
 func Disassemble(program []byte) (string, error) {
 	dec, layout, err := decodeContainer(program)
 	if err != nil {
@@ -62,8 +64,10 @@ func hexBytes(b []byte) string {
 	return strings.Join(parts, " ")
 }
 
-// disasmText 渲染指令文本；跳转指令回显目标偏移（`JNE L000A`），
-// 使输出能被 ParseText 重新解析。
+/**
+ * disasmText 渲染指令文本；跳转指令回显目标偏移（`JNE L000A`），
+ * 使输出能被 ParseText 重新解析。
+ */
 func disasmText(in Instr, d decoded) string {
 	if d.dest >= 0 {
 		return fmt.Sprintf("%s L%04X", rustMnemonic(nameOf(in.Op)), int(in.Imm))
@@ -105,11 +109,13 @@ var goNames = func() map[byte]string {
 	return out
 }()
 
-// ParseText 解析 Disassemble 的输出（忽略注释行、空行与标签行），
-// 返回可交给 Assemble 的指令序列。
-//
-// 支持的文本形态与 disasmText 的输出一致，另外接受 `Lxxxx:` 标签行，
-// 使反汇编输出可以被重新汇编（往返闭合）。
+/**
+ * ParseText 解析 Disassemble 的输出（忽略注释行、空行与标签行），
+ * 返回可交给 Assemble 的指令序列。
+ *
+ * 支持的文本形态与 disasmText 的输出一致，另外接受 `Lxxxx:` 标签行，
+ * 使反汇编输出可以被重新汇编（往返闭合）。
+ */
 func ParseText(text string) ([]Instr, map[int]string, error) {
 	var (
 		prog   []Instr
@@ -135,9 +141,11 @@ func ParseText(text string) ([]Instr, map[int]string, error) {
 	return prog, labels, nil
 }
 
-// parseTextInstr 解析单行指令文本，形如 `MOVI R3, 0x10` 或 `JMP L0000`。
-//
-// 只接受助记符（与 disasmText 输出一致），不接受十六进制字节列。
+/**
+ * parseTextInstr 解析单行指令文本，形如 `MOVI R3, 0x10` 或 `JMP L0000`。
+ *
+ * 只接受助记符（与 disasmText 输出一致），不接受十六进制字节列。
+ */
 func parseTextInstr(line string) (Instr, error) {
 	// 去掉 disasm 输出里的原始字节列（形如 "01 30 08 ..."）
 	fields := strings.Fields(line)
@@ -235,10 +243,12 @@ func parseTextInstr(line string) (Instr, error) {
 	return in, nil
 }
 
-// parseMemInstr 解析 LOAD/STORE 的两种书写方向：
-//
-//	LOAD64 R4, [R5-8]       ; 目标在前
-//	STORE64 [R5-8], R4      ; 地址在前
+/**
+ * parseMemInstr 解析 LOAD/STORE 的两种书写方向：
+ *
+ * LOAD64 R4, [R5-8]       ; 目标在前
+ * STORE64 [R5-8], R4      ; 地址在前
+ */
 func parseMemInstr(in Instr, args []string, mnemonic string) (Instr, error) {
 	if len(args) != 2 {
 		return Instr{}, fmt.Errorf("%s wants 2 operands, got %d", mnemonic, len(args))

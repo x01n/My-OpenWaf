@@ -10,13 +10,15 @@ import (
 	forkhttp2 "github.com/x01n/http2"
 )
 
-// TestH2StreamResetterSignatureMatchesForkErrCode 是接口签名锁。
-//
-// Go 的方法签名 identity 规则要求参数类型完全相同：dataplane 本地定义的
-// 命名类型 uint32 与 fork 的 http2.ErrCode 是**两个不同类型**，underlying
-// 相同并不满足。r7.44 曾以本地 http2ErrCode 声明本接口，导致 fork 升到
-// v0.3.0 后断言仍恒 false（实测：fork 签名实现不满足本地签名接口）。
-// 此锁用 fork 自己的命名类型做属性断言，防止缺陷复发。
+/**
+ * TestH2StreamResetterSignatureMatchesForkErrCode 是接口签名锁。
+ *
+ * Go 的方法签名 identity 规则要求参数类型完全相同：dataplane 本地定义的
+ * 命名类型 uint32 与 fork 的 http2.ErrCode 是**两个不同类型**，underlying
+ * 相同并不满足。r7.44 曾以本地 http2ErrCode 声明本接口，导致 fork 升到
+ * v0.3.0 后断言仍恒 false（实测：fork 签名实现不满足本地签名接口）。
+ * 此锁用 fork 自己的命名类型做属性断言，防止缺陷复发。
+ */
 func TestH2StreamResetterSignatureMatchesForkErrCode(t *testing.T) {
 	method, ok := reflect.TypeOf((*h2StreamResetter)(nil)).Elem().MethodByName("ResetStreamHandler")
 	if !ok {
@@ -38,7 +40,7 @@ func TestH2StreamResetterSignatureMatchesForkErrCode(t *testing.T) {
 	}
 }
 
-// h2ResetProbeConn implements the anonymous h2StreamResetter interface.
+// h2ResetProbeConn 实现匿名的 h2StreamResetter 接口。
 type h2ResetProbeConn struct {
 	code   forkhttp2.ErrCode
 	called bool
@@ -50,16 +52,19 @@ func (c *h2ResetProbeConn) ResetStreamHandler(code forkhttp2.ErrCode) bool {
 	return true
 }
 
-// h2ResetRefuseConn reports false from ResetStreamHandler, exercising the
-// fallback ordering in the drop path (502 lower in the chain).
+/**
+ * h2ResetRefuseConn 的 ResetStreamHandler 返回 false，
+ * 用于覆盖 drop 路径的兜底顺序（502 在链路中更靠后）。
+ */
 type h2ResetRefuseConn struct{}
 
 func (c *h2ResetRefuseConn) ResetStreamHandler(code forkhttp2.ErrCode) bool { return false }
 
-// TestMaybeH2ResetStreamAssertion verifies that the protocol verdict is the
-// type assertion itself: a conn carrying ResetStreamHandler takes the
-// stream-level reset path, and any other conn (including non-resetter
-// types) returns false.
+/**
+ * TestMaybeH2ResetStreamAssertion 验证协议裁决就是类型断言本身：
+ * 携带 ResetStreamHandler 的连接走流级重置路径，其他任何连接
+ * （包括非 resetter 类型）都返回 false。
+ */
 func TestMaybeH2ResetStreamAssertion(t *testing.T) {
 	t.Run("resetter hits and carries code", func(t *testing.T) {
 		guard := &InboundProtocolGuard{conn: &h2ResetProbeConn{}}
@@ -89,8 +94,10 @@ func TestMaybeH2ResetStreamAssertion(t *testing.T) {
 	})
 }
 
-// protocolGuardProbeConn is a plain net.Conn without any resetter method,
-// standing in for the HTTP/1 raw TCP conn shape.
+/**
+ * protocolGuardProbeConn 是不带任何 resetter 方法的普通 net.Conn，
+ * 用来代表 HTTP/1 raw TCP 连接的形态。
+ */
 type protocolGuardProbeConn struct{}
 
 func (c *protocolGuardProbeConn) Read(p []byte) (int, error)       { return 0, nil }
@@ -102,8 +109,10 @@ func (c *protocolGuardProbeConn) SetDeadline(time.Time) error      { return nil 
 func (c *protocolGuardProbeConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *protocolGuardProbeConn) SetWriteDeadline(time.Time) error { return nil }
 
-// TestMaybeH3ResetStreamClosure verifies that a registered reset closure is
-// executed exactly once by the drop path through the hertz context key.
+/**
+ * TestMaybeH3ResetStreamClosure 验证已注册的重置闭包会被 drop 路径
+ * 通过 hertz 上下文键恰好执行一次。
+ */
 func TestMaybeH3ResetStreamClosure(t *testing.T) {
 	c := app.NewContext(0)
 	if maybeH3ResetStream(c) {
@@ -122,8 +131,7 @@ func TestMaybeH3ResetStreamClosure(t *testing.T) {
 	}
 }
 
-// TestResetTokenLifecycle verifies register/take/unregister for the reset
-// closure transport.
+// TestResetTokenLifecycle 验证重置闭包传递通道的 register/take/unregister 流程。
 func TestResetTokenLifecycle(t *testing.T) {
 	calls := 0
 	token := RegisterInternalHTTP3ResetToken(func() { calls++ })

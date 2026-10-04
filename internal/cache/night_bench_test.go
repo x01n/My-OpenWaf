@@ -81,7 +81,7 @@ func BenchmarkNightQueryCacheGetMiss(b *testing.B) {
 	}
 }
 
-// ---------- ResponseCache ----------
+// ResponseCache
 
 // BenchmarkNightResponseLookupHit 数据面响应缓存命中读取：clearMu.RLock +
 // shard RLock + lastAccess 原子写。这是 GET 响应缓存的最热路径。
@@ -139,7 +139,7 @@ func BenchmarkNightResponseGetHit(b *testing.B) {
 	}
 }
 
-// ---------- CacheKey 生成 ----------
+// CacheKey 生成
 
 // nightKeyPool 复用堆缓冲，覆盖 CacheKey/CacheKeyBytes 的超栈热路径分配。
 var nightKeyPool = sync.Pool{
@@ -225,7 +225,7 @@ func BenchmarkNightCacheKeyPooled(b *testing.B) {
 	}
 }
 
-// ---------- 真实 Redis 基准（基准专用实例 6389，db5） ----------
+// 真实 Redis 基准（基准专用实例 6389，db5）
 //
 // echo 类伪服务端在握手后行为上无法与真实客户端完整对齐（依赖 HELLO
 // 应答内容重新协商并放弃僵死连接），这证实了伪 conn 的强度与协议深度不够。
@@ -408,7 +408,7 @@ func BenchmarkNightRedisKVIncrRealParallel(b *testing.B) {
 	})
 }
 
-// ---------- 与 Redis 无关的本地开销 ----------
+// 与 Redis 无关的本地开销
 
 // nightUnused 静默规避静态检查工具对某些 import 的告警路径保留。
 var nightUnused = struct {

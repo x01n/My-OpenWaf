@@ -13,7 +13,7 @@ const (
 	IPListWhite IPListKind = "whitelist"
 )
 
-// IPListEntry stores one blacklist or whitelist record (IP or CIDR).
+// IPListEntry 存储一条黑名单或白名单记录（IP 或 CIDR）。
 type IPListEntry struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`

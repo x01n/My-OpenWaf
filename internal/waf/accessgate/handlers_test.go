@@ -9,7 +9,7 @@ import (
 
 func newTestGate(t *testing.T) *Gate {
 	t.Helper()
-	// bcrypt hash of "pass123"
+	// "pass123" 的 bcrypt 哈希
 	hash := mustHashForTest(t, "pass123")
 	cfg := Config{
 		Enabled:            true,

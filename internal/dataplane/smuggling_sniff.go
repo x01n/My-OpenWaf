@@ -12,8 +12,10 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// smugglingRuleIDs 是走私原生嗅探五类判定对应的稳定规则标识。这些标识
-// 会一字不差进入 SecurityEvent.RuleIDStr，管理面可据其展示与筛选。
+/**
+ * smugglingRuleIDs 是走私原生嗅探五类判定对应的稳定规则标识。这些标识
+ * 会一字不差进入 SecurityEvent.RuleIDStr，管理面可据其展示与筛选。
+ */
 var smugglingRuleIDs = [...]string{
 	"owaf.smuggle.te_cl_coexist", // 1) TE 与 CL 共存
 	"owaf.smuggle.cl_mismatch",   // 2) 多个 CL 值不一致
@@ -22,8 +24,10 @@ var smugglingRuleIDs = [...]string{
 	"owaf.smuggle.cl_bad_value",  // 5) CL 值非数字/负数/超大
 }
 
-// smugglingCatProtoViol 是命中事件的 Category / Phase 值，与 OWASP 协议违规类
-// 归属同一语义（internal/waf/owasp 的 CatProtoViol 恒为 "protocol_violation"）。
+/**
+ * smugglingCatProtoViol 是命中事件的 Category / Phase 值，与 OWASP 协议违规类
+ * 归属同一语义（internal/waf/owasp 的 CatProtoViol 恒为 "protocol_violation"）。
+ */
 const smugglingCatProtoViol = "protocol_violation"
 
 // SmugglingSniffResult 是一次走私嗅探的判定结果。
@@ -40,22 +44,24 @@ type SmugglingSniffResult struct {
 	RuleID string
 }
 
-// SmugglingSniff 对一段请求头原始字节执行五类请求走私判定（RFC 9112 §6.3 +
-// 经典走私矩阵，全部大小写不敏感）：
-//
-//  1. Transfer-Encoding 与 Content-Length 同存；
-//  2. 多个 Content-Length 头且值不一致；
-//  3. 多个 Transfer-Encoding 头行；
-//  4. Transfer-Encoding 值不是单个 "chunked"（含 "chunked, chunked"、空值等畸形）；
-//  5. Content-Length 值为非数字/负数/超大溢出。
-//
-// 诚实边界说明：hertz 的 HTTP/1 解析器在请求头被送入 handler 之前，已按同样
-// 规则拒绝 TE+CL 共存、多个 TE 行、非 chunked TE、不一致 CL 与非法 CL 值（见
-// hertz 依赖 pkg/protocol/http1/req/header.go 的 errBothTEAndCL / errMultipleTE /
-// errUnsupportedTE / errDuplicateCL），HTTP/2 侧同样按 RFC 9113 裁决。因此从
-// handler 取得的已解析头永远命中不了这五类——本函数是防御纵深审计仪器：当上游
-// 通道（h2c、自研转发面或未来替换的解析器）把原始走私形态漏进 handler 时，这里
-// 负责留下协议违规审计证据，而不是假装能够在解析前看到字节。
+/**
+ * SmugglingSniff 对一段请求头原始字节执行五类请求走私判定（RFC 9112 §6.3 +
+ * 经典走私矩阵，全部大小写不敏感）：
+ *
+ *  1. Transfer-Encoding 与 Content-Length 同存；
+ *  2. 多个 Content-Length 头且值不一致；
+ *  3. 多个 Transfer-Encoding 头行；
+ *  4. Transfer-Encoding 值不是单个 "chunked"（含 "chunked, chunked"、空值等畸形）；
+ *  5. Content-Length 值为非数字/负数/超大溢出。
+ *
+ * 诚实边界说明：hertz 的 HTTP/1 解析器在请求头被送入 handler 之前，已按同样
+ * 规则拒绝 TE+CL 共存、多个 TE 行、非 chunked TE、不一致 CL 与非法 CL 值（见
+ * hertz 依赖 pkg/protocol/http1/req/header.go 的 errBothTEAndCL / errMultipleTE /
+ * errUnsupportedTE / errDuplicateCL），HTTP/2 侧同样按 RFC 9113 裁决。因此从
+ * handler 取得的已解析头永远命中不了这五类——本函数是防御纵深审计仪器：当上游
+ * 通道（h2c、自研转发面或未来替换的解析器）把原始走私形态漏进 handler 时，这里
+ * 负责留下协议违规审计证据，而不是假装能够在解析前看到字节。
+ */
 func SmugglingSniff(raw []byte) SmugglingSniffResult {
 	if len(raw) == 0 {
 		return SmugglingSniffResult{}
@@ -129,8 +135,10 @@ func requestSmugglingSniff(c *app.RequestContext, opts Options, siteID uint, req
 	}
 }
 
-// 走私判定使用的静态字节比较目标，避免每次比较时字符串转 []byte 的分配。
-// 仅在本包内只读使用，无写入者。
+/**
+ * 走私判定使用的静态字节比较目标，避免每次比较时字符串转 []byte 的分配。
+ * 仅在本包内只读使用，无写入者。
+ */
 var (
 	strTransferEncoding = []byte("Transfer-Encoding")
 	strContentLength    = []byte("Content-Length")
@@ -256,11 +264,13 @@ func smugglingRequestIdentity(c *app.RequestContext) (method, path, userAgent st
 	return method, path, userAgent
 }
 
-// requestHeaderLines 将已解析请求头重演为 "Key: Value" 行并拼接。
-//
-// 注意：hertz RequestHeader.VisitAll 不保证原线序（Host/CL/CT/UA/Trailer 等
-// 特殊字段先于普通字段枚举），因此这不是线级忠实的原始字节；对五类走私判定
-// 而言仅「某头是否出现 + 出现几次 + 值」是输入，与线序无关，该重演足够。
+/**
+ * requestHeaderLines 将已解析请求头重演为 "Key: Value" 行并拼接。
+ *
+ * 注意：hertz RequestHeader.VisitAll 不保证原线序（Host/CL/CT/UA/Trailer 等
+ * 特殊字段先于普通字段枚举），因此这不是线级忠实的原始字节；对五类走私判定
+ * 而言仅「某头是否出现 + 出现几次 + 值」是输入，与线序无关，该重演足够。
+ */
 func requestHeaderLines(c *app.RequestContext) []byte {
 	var b strings.Builder
 	c.Request.Header.VisitAll(func(k, v []byte) {

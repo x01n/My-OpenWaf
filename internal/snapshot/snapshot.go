@@ -15,7 +15,11 @@ import (
 	"My-OpenWaf/internal/waf/pageconfig"
 )
 
-// CompiledRule is a lightweight runtime rule (MVP ACL parser).
+/**
+ * CompiledRule 是轻量级运行时规则（MVP 版 ACL 解析器的产物）。
+ *
+ * 由 snapshot 构建期从 DSL 文本编译而来，请求期只做匹配，不再解析字符串。
+ */
 type CompiledRule struct {
 	ID          uint
 	Phase       store.RulePhase
@@ -23,14 +27,19 @@ type CompiledRule struct {
 	Priority    int
 	Kind        string
 	Arg         string
-	StatusCode  int    // custom HTTP status code (0 = default)
-	RedirectTo  string // URL for redirect action
-	CaptchaType string // Rule-level CAPTCHA type; empty inherits global protection config.
+	StatusCode  int    // 自定义 HTTP 状态码（0 = 用默认值）
+	RedirectTo  string // redirect 动作的目标 URL
+	CaptchaType string // 规则级验证码类型；留空则继承全局 protection 配置。
 	// CaptchaMinutes 是规则级验证码通过有效期（分钟）；0 继承全局 captcha_pass_ttl。
 	CaptchaMinutes int
 }
 
-// SiteRuntime holds resolved site for routing.
+/**
+ * SiteRuntime 是站点经解析后的运行时视图，供路由与请求处理使用。
+ *
+ * 快照构建期把 DB 中的站点、规则、上游、证书与各类保护覆盖值一次性解析到本结构；
+ * 数据面只读取，不再回查数据库。
+ */
 type SiteRuntime struct {
 	Site         store.Site
 	PolicyID     uint
@@ -41,56 +50,56 @@ type SiteRuntime struct {
 	NetworkDefaults NetworkDefaults
 	TLSDefaults     TLSDefaults
 
-	// Listener configuration (now embedded in Site)
+	// 监听配置（已内嵌进 Site）
 	Bind      string
 	TLSConfig *tls.Config
 
-	// Bot and attack protection
+	// bot 与攻击防护
 	BotProtection    store.BotProtectionConfig
 	AttackProtection store.AttackProtectionConfig
 
-	// Forwarding settings (now in Site model)
+	// 转发设置（已移入 Site 模型）
 	XFFMode              string
 	TrustedCIDR          string
 	ClientIPHeaderOrder  []string
 	PreserveOriginalHost bool
 
-	// Per-site maintenance
+	// 站点级维护模式
 	MaintenanceEnabled bool
 	MaintenanceHTML    string
 	MaintenanceStatus  int
 
-	// Per-site challenge policy overrides (site-level challenge_action / captcha_type).
+	// 站点级挑战策略覆盖（对应站点字段 challenge_action / captcha_type）。
 	// 空串 = 站点未覆盖，数据面回退到全局 ProtectionConfig；非空 = 站点覆盖值。
 	ChallengeAction      string
 	ChallengeCaptchaType string
 
-	// Per-site block page
+	// 站点级拦截页
 	BlockHTML   string
 	BlockStatus int
 
-	// Per-site response cache
+	// 站点级响应缓存
 	CacheEnabled    bool
 	CacheDefaultTTL int
 	CacheRules      []store.SiteCacheRule
 
-	// Anti-replay nonce protection
+	// 防重放 nonce 防护
 	AntiReplayEnabled bool
-	AntiReplayAction  string // action when nonce invalid (default: "challenge")
+	AntiReplayAction  string // nonce 校验失败时的动作（默认 "challenge"）
 	// AntiReplayCookieMode 合并后的 Cookie 校验模式终值（standard / dual）。
 	AntiReplayCookieMode string
 
-	// Per-site protection overrides (merged from Site fields).
-	// nil = use global ProtectionConfig.
+	// 站点级保护覆盖（由 Site 字段合并而来）。
+	// nil = 使用全局 ProtectionConfig。
 	EffectiveProtection *store.ProtectionConfig
 
-	// Application route rules (compiled per snapshot).
+	// 站点级应用路由规则（随快照编译）。
 	AppRouteRules []appresource.CompiledRule
 
-	// DynamicProtection holds the dynamic protection config (HTML obfuscation, JS obfuscation, watermark).
+	// DynamicProtection 是动态防护配置（HTML 混淆、JS 混淆、图片水印）。
 	DynamicProtection dynamic.ProtectionConfig
 
-	// AccessControl holds the site access control gate config (nil = disabled).
+	// AccessControl 是站点访问控制网关配置（nil = 未启用）。
 	AccessControl *AccessControlConfig
 
 	ResponseCompressionConfigured  bool
@@ -99,7 +108,7 @@ type SiteRuntime struct {
 	ResponseCompressionMinBytes    int
 	BrotliEnabled                  bool
 
-	// Upstream host header override (for explicit upstream host resolution).
+	// 上游 Host 头覆盖（用于显式指定上游 Host 的解析）。
 	UpstreamHostHeader string
 
 	// 站点级 IP 黑白名单（仅对该站点生效）。
@@ -132,7 +141,7 @@ type AccessControlPathRule struct {
 	Priority int
 }
 
-// TLSCertificateState describes whether an SNI route has a usable configured certificate.
+// TLSCertificateState 描述某个 SNI 路由是否已有可用的已配置证书。
 type TLSCertificateState string
 
 const (
@@ -178,8 +187,12 @@ const (
 	DiagnosticHandlingRejectInvalidCertificate = "reject_invalid_certificate"
 )
 
-// Snapshot is an immutable view for the dataplane (atomic pointer swap).
-
+/**
+ * Snapshot 是数据面可见的不可变配置视图（配合原子指针整体替换）。
+ *
+ * 一次构建、全程只读：请求处理期间不会有任何字段被改写，因此数据面无需加锁，
+ * reload 只是把新快照指针换上去。
+ */
 type Snapshot struct {
 	Revision uint64
 
@@ -196,7 +209,7 @@ type Snapshot struct {
 	SiteTLSCertBySNI      map[string]tls.Certificate
 	SiteTLSCertStateBySNI map[string]TLSCertificateState
 
-	// Protection settings loaded from SystemSettings.
+	// 从 SystemSettings 加载的保护配置。
 	Protection store.ProtectionConfig
 
 	// LuaPlugins 是已编译的自定义 Lua 策略脚本。
@@ -217,13 +230,13 @@ type Snapshot struct {
 	// ConfigDiagnostics 记录构建期跳过的无效配置，随快照原子发布。
 	ConfigDiagnostics []SnapshotConfigDiagnostic
 
-	// HTTP2 configuration
+	// HTTP2 配置
 	HTTP2Config HTTP2Config
 
 	// HSTS
 	HSTSEnabled bool
 
-	// XSS protection
+	// XSS 防护
 	XSSProtectionEnabled bool
 
 	// Expect-CT
@@ -236,7 +249,7 @@ type Snapshot struct {
 	HPKPReportOnlyEnabled bool
 	HPKPReportOnlyValue   string
 
-	// Response compression
+	// 响应压缩
 	ResponseCompressionEnabled     bool
 	ResponseCompressionGzipEnabled bool
 	ResponseCompressionMinBytes    int
@@ -244,7 +257,7 @@ type Snapshot struct {
 	// Brotli
 	BrotliEnabled bool
 
-	// ExcludeRecordHeaders holds header names that should skip resource recording.
+	// ExcludeRecordHeaders 记录的是应跳过资源记录的头部名。
 	ExcludeRecordHeaders []string
 }
 
@@ -252,7 +265,7 @@ func SiteMapKey(bind string, host string) string {
 	return bind + "\x00" + strings.ToLower(strings.TrimSpace(host))
 }
 
-// siteMapKeyNorm builds a map key assuming host is already normalized (lowercase, trimmed, port-stripped).
+// siteMapKeyNorm 组装站点映射键，前提是 host 已经规范化（小写、去首尾空白、去端口）。
 func siteMapKeyNorm(bind string, host string) string {
 	return bind + "\x00" + host
 }
@@ -261,8 +274,16 @@ func SNICertKey(bind string, sni string) string {
 	return "sni:" + bind + "\x00" + NormalizeMatchHost(sni)
 }
 
-// TLSCertificateStateForSNI resolves an SNI certificate state using the same
-// exact, wildcard, and catch-all host precedence as site matching.
+/**
+ * TLSCertificateStateForSNI 按与站点匹配相同的优先级解析某个 SNI 的证书状态。
+ *
+ * 优先级依次为精确匹配、通配符（`*.` 父域）、catch-all（`*`），与 MatchSite 保持
+ * 一致，避免「站点命中 A、证书却取到 B」这类不一致。
+ *
+ * @param bind 监听地址。
+ * @param sni  ClientHello 中的 SNI 名。
+ * @return 证书状态与是否命中；未命中时状态为空串。
+ */
 func (sn *Snapshot) TLSCertificateStateForSNI(bind string, sni string) (TLSCertificateState, bool) {
 	if sn == nil || sn.SiteTLSCertStateBySNI == nil {
 		return "", false
@@ -315,8 +336,15 @@ func (sn *Snapshot) MatchSite(bind string, hostHeader string) (SiteRuntime, bool
 	return SiteRuntime{}, false
 }
 
-// MatchSitePtr finds the SiteRuntime pointer for a bind address + host combination.
-// Zero-copy: returns the pointer stored directly in the Sites map.
+/**
+ * MatchSitePtr 按「监听地址 + Host」查找站点运行时指针。
+ *
+ * 零拷贝：直接返回 Sites map 中存放的指针，调用方不要在请求期内改写其指向的内容。
+ *
+ * @param bind 监听地址。
+ * @param hostHeader 请求 Host 头原值。
+ * @return 站点运行时指针与是否命中。
+ */
 func (sn *Snapshot) MatchSitePtr(bind string, hostHeader string) (*SiteRuntime, bool) {
 	host := NormalizeMatchHost(hostHeader)
 	if host == "" {
@@ -344,10 +372,17 @@ func (sn *Snapshot) MatchSitePtr(bind string, hostHeader string) (*SiteRuntime, 
 	return nil, false
 }
 
-// NormalizeMatchHost lowercases, trims, and strips the port from a host header.
-// Fast path: if the host is already lowercase ASCII with no whitespace or port, returns it without allocation.
+/**
+ * NormalizeMatchHost 对 Host 头做小写化、去首尾空白并剥离端口。
+ *
+ * 快路径：若 host 已是小写 ASCII 且不含空白与端口，原样返回，不产生分配——
+ * 绝大多数规范客户端都走这条路。
+ *
+ * @param host 请求 Host 头原值。
+ * @return 规范化后的 host。
+ */
 func NormalizeMatchHost(host string) string {
-	// Fast path: check if already normalized (common case for well-behaved clients).
+	// 快路径：判断是否已规范化（规范客户端的常见情况）。
 	needsWork := false
 	for i := 0; i < len(host); i++ {
 		c := host[i]
@@ -361,7 +396,7 @@ func NormalizeMatchHost(host string) string {
 	}
 
 	host = strings.ToLower(strings.TrimSpace(host))
-	// Strip port: find last colon and verify everything after is digits.
+	// 剥离端口：定位最后一个冒号，并确认其后全部是数字。
 	if i := strings.LastIndex(host, ":"); i >= 0 {
 		port := host[i+1:]
 		allDigits := len(port) > 0
@@ -378,7 +413,7 @@ func NormalizeMatchHost(host string) string {
 	return host
 }
 
-// isIPAddress checks whether the host string is an IP address (v4 or v6).
+// isIPAddress 判断 host 字符串是否为 IP 地址（v4 或 v6）。
 func isIPAddress(host string) bool {
 	for _, ch := range host {
 		if ch == '.' || ch == ':' || (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') {
@@ -389,15 +424,28 @@ func isIPAddress(host string) bool {
 	return net.ParseIP(host) != nil
 }
 
-// Holder stores current snapshot atomically.
+// Holder 以原子方式持有当前快照。
 type Holder struct {
 	ptr atomic.Pointer[Snapshot]
 }
 
-// Store publishes a snapshot unconditionally. Use StoreIfNewer for runtime reloads.
+/**
+ * Store 无条件发布一个快照。
+ *
+ * 运行时 reload 请改用 StoreIfNewer，否则可能用旧修订覆盖更新的快照。
+ *
+ * @param s 待发布的快照。
+ */
 func (h *Holder) Store(s *Snapshot) { h.ptr.Store(s) }
 
-// StoreIfNewer publishes s unless a newer revision is already active.
+/**
+ * StoreIfNewer 仅在当前已激活的修订更旧时才发布 s。
+ *
+ * CAS 循环保证并发 reload 之间不会用旧修订覆盖新修订。
+ *
+ * @param s 待发布的快照。
+ * @return 是否发布成功。
+ */
 func (h *Holder) StoreIfNewer(s *Snapshot) bool {
 	if s == nil {
 		return false
@@ -415,24 +463,24 @@ func (h *Holder) StoreIfNewer(s *Snapshot) bool {
 
 func (h *Holder) Load() *Snapshot { return h.ptr.Load() }
 
-// Shared runtime limits.
+// 共享的运行时上限。
 const (
 	WAFBodyScanLimit = 48 * 1024 // 48 KB
 )
 
-// Time constants (seconds).
+// 时间常量（秒）。
 const (
 	OneDaySeconds = 86400
 )
 
-// Default security header values.
+// 默认安全响应头取值。
 const (
 	DefaultExpectCTValue       = "max-age=86400, enforce"
 	DefaultHPKPValue           = ""
 	DefaultHPKPReportOnlyValue = ""
 )
 
-// Default response compression settings.
+// 默认响应压缩设置。
 const (
 	DefaultResponseCompressionEnabled     = true
 	DefaultResponseCompressionGzipEnabled = true

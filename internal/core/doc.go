@@ -1,16 +1,16 @@
-// Package core holds process-wide infrastructure and WAF engine:
+// Package core 承载进程级基础设施与 WAF 引擎：
 //
-//   - [My-OpenWaf/internal/core/action]:    WAF action types (allow/block/log_only/challenge)
-//   - [My-OpenWaf/internal/core/adminweb]:  embedded Next.js static export
-//   - [My-OpenWaf/internal/core/database]:  GORM open (sqlite / mysql / postgres)
-//   - [My-OpenWaf/internal/core/engine]:    top-level WAF processing engine
-//   - [My-OpenWaf/internal/core/health]:    liveness / readiness / status probes
-//   - [My-OpenWaf/internal/core/lifecycle]: multi-server startup + graceful shutdown
-//   - [My-OpenWaf/internal/core/pipeline]:  ordered request processing phases
-//   - [My-OpenWaf/internal/core/redis]:     optional rueidis client
-//   - [My-OpenWaf/internal/core/rules]:     rule compiler, matchers, phase implementations
-//   - [My-OpenWaf/internal/core/sites]:     virtual host resolver over snapshot
+//   - [My-OpenWaf/internal/core/action]:    WAF 动作类型（allow/block/log_only/challenge）
+//   - [My-OpenWaf/internal/core/adminweb]:  内嵌的 Next.js 静态导出产物
+//   - [My-OpenWaf/internal/core/database]:  打开 GORM 句柄（sqlite / mysql / postgres）
+//   - [My-OpenWaf/internal/core/engine]:    顶层 WAF 处理引擎
+//   - [My-OpenWaf/internal/core/health]:    存活 / 就绪 / 状态探针
+//   - [My-OpenWaf/internal/core/lifecycle]: 多服务器启动 + 优雅关闭
+//   - [My-OpenWaf/internal/core/pipeline]:  有序的请求处理阶段
+//   - [My-OpenWaf/internal/core/redis]:     可选的 rueidis 客户端
+//   - [My-OpenWaf/internal/core/rules]:     规则编译器、匹配器与阶段实现
+//   - [My-OpenWaf/internal/core/sites]:     基于快照的虚拟主机解析器
 //
-// Bootstrap config and runtime wiring live in config.go / runtime.go.
-// Domain persistence models live in [My-OpenWaf/internal/store].
+// 引导配置与运行时装配位于 config.go / runtime.go。
+// 领域持久化模型位于 [My-OpenWaf/internal/store]。
 package core

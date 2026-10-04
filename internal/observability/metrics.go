@@ -11,20 +11,22 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
-// UnifiedWriterStatsProvider exposes async writer diagnostics to /metrics.
+// UnifiedWriterStatsProvider 向 /metrics 暴露异步写入器的诊断数据。
 type UnifiedWriterStatsProvider interface {
 	Stats() UnifiedWriterStats
 }
 
-// WriteQueueStatsProvider exposes the generic repository write queue's
-// submission and persistence outcomes to /metrics. It is deliberately
-// separate from UnifiedWriterStatsProvider: the two queues have different
-// lifecycles and loss semantics.
+/**
+ * WriteQueueStatsProvider 向 /metrics 暴露通用仓储写队列的提交与持久化结果。
+ *
+ * 它刻意与 UnifiedWriterStatsProvider 分开：两个队列的生命周期与
+ * 丢失语义不同。
+ */
 type WriteQueueStatsProvider interface {
 	Stats() WriteQueueStats
 }
 
-// DataPlaneMetricsSnapshot is a point-in-time view of request-path counters.
+// DataPlaneMetricsSnapshot 是请求路径计数器的时点视图。
 type DataPlaneMetricsSnapshot struct {
 	QPS1s         float64
 	QPS5s         float64
@@ -40,7 +42,7 @@ type DataPlaneMetricsSnapshot struct {
 	AttackIPs     int64
 }
 
-// UpstreamMetricsSnapshot is a point-in-time view of upstream health and latency.
+// UpstreamMetricsSnapshot 是上游健康状态与延迟的时点视图。
 type UpstreamMetricsSnapshot struct {
 	HealthyCount     int64
 	UnhealthyCount   int64
@@ -51,7 +53,7 @@ type UpstreamMetricsSnapshot struct {
 	LatencySamples   int64
 }
 
-// CacheLayerStats holds cumulative hit/miss counters for a single named cache layer.
+// CacheLayerStats 保存单个具名缓存层的累计命中/未命中计数器。
 type CacheLayerStats struct {
 	Name   string
 	Hits   int64
@@ -61,11 +63,13 @@ type CacheLayerStats struct {
 	Errors int64
 }
 
-// LuaScriptStats holds cumulative execution counters for a single Lua policy script.
-//
-// 脚本失败/超时后只写一条 warn 日志就静默跳过，请求判定不受影响——这对可用性
-// 是对的，但也意味着策略长期失效不会有任何外部信号。把这些计数器暴露出来，
-// 运维才能对 Failures/Timeouts 的占比告警。
+/**
+ * LuaScriptStats 保存单个 Lua 策略脚本的累计执行计数器。
+ *
+ * 脚本失败/超时后只写一条 warn 日志就静默跳过，请求判定不受影响——这对可用性
+ * 是对的，但也意味着策略长期失效不会有任何外部信号。把这些计数器暴露出来，
+ * 运维才能对 Failures/Timeouts 的占比告警。
+ */
 type LuaScriptStats struct {
 	// Name 是脚本名，来自用户输入，作为 label 输出前必须转义。
 	Name  string
@@ -81,19 +85,19 @@ type LuaScriptStats struct {
 	AvgDurationMs float64
 }
 
-// CacheStatsSnapshotProvider returns per-layer cache hit/miss counters.
+// CacheStatsSnapshotProvider 返回各层缓存的命中/未命中计数器。
 type CacheStatsSnapshotProvider func() []CacheLayerStats
 
-// LuaScriptStatsProvider returns per-script Lua policy plugin counters.
+// LuaScriptStatsProvider 返回各 Lua 策略插件的计数器。
 type LuaScriptStatsProvider func() []LuaScriptStats
 
-// DataPlaneMetricsSnapshotProvider returns a current data-plane metrics snapshot.
+// DataPlaneMetricsSnapshotProvider 返回当前的数据面指标快照。
 type DataPlaneMetricsSnapshotProvider func() DataPlaneMetricsSnapshot
 
-// UpstreamMetricsSnapshotProvider returns a current upstream snapshot.
+// UpstreamMetricsSnapshotProvider 返回当前的上游快照。
 type UpstreamMetricsSnapshotProvider func() UpstreamMetricsSnapshot
 
-// Metrics collects WAF runtime metrics for the /metrics (Prometheus) endpoint.
+// Metrics 收集 WAF 运行期指标，供 /metrics（Prometheus）端点使用。
 type Metrics struct {
 	RequestsTotal atomic.Int64
 	Uptime        time.Time
@@ -106,15 +110,15 @@ type Metrics struct {
 	luaScriptStatsProvider     atomic.Value
 }
 
-// NewMetrics creates a new metrics collector.
+// NewMetrics 创建一个新的指标收集器。
 func NewMetrics() *Metrics {
 	return &Metrics{Uptime: time.Now()}
 }
 
-// RecordRequest increments the total request counter.
+// RecordRequest 递增请求总数计数器。
 func (m *Metrics) RecordRequest() { m.RequestsTotal.Add(1) }
 
-// SetUnifiedWriterStatsProvider attaches async writer diagnostics to /metrics.
+// SetUnifiedWriterStatsProvider 把异步写入器诊断数据挂到 /metrics。
 func (m *Metrics) SetUnifiedWriterStatsProvider(provider UnifiedWriterStatsProvider) {
 	if provider == nil {
 		return
@@ -122,8 +126,7 @@ func (m *Metrics) SetUnifiedWriterStatsProvider(provider UnifiedWriterStatsProvi
 	m.unifiedWriterStatsProvider.Store(provider)
 }
 
-// SetWriteQueueStatsProvider attaches generic repository queue diagnostics to
-// /metrics.
+// SetWriteQueueStatsProvider 把通用仓储队列诊断数据挂到 /metrics。
 func (m *Metrics) SetWriteQueueStatsProvider(provider WriteQueueStatsProvider) {
 	if provider == nil {
 		return
@@ -131,7 +134,7 @@ func (m *Metrics) SetWriteQueueStatsProvider(provider WriteQueueStatsProvider) {
 	m.writeQueueStatsProvider.Store(provider)
 }
 
-// SetDataPlaneMetricsProvider attaches request-path counters to /metrics.
+// SetDataPlaneMetricsProvider 把请求路径计数器挂到 /metrics。
 func (m *Metrics) SetDataPlaneMetricsProvider(provider DataPlaneMetricsSnapshotProvider) {
 	if provider == nil {
 		return
@@ -139,7 +142,7 @@ func (m *Metrics) SetDataPlaneMetricsProvider(provider DataPlaneMetricsSnapshotP
 	m.dataPlaneMetricsProvider.Store(provider)
 }
 
-// SetUpstreamMetricsProvider attaches upstream health and latency metrics to /metrics.
+// SetUpstreamMetricsProvider 把上游健康与延迟指标挂到 /metrics。
 func (m *Metrics) SetUpstreamMetricsProvider(provider UpstreamMetricsSnapshotProvider) {
 	if provider == nil {
 		return
@@ -147,7 +150,7 @@ func (m *Metrics) SetUpstreamMetricsProvider(provider UpstreamMetricsSnapshotPro
 	m.upstreamMetricsProvider.Store(provider)
 }
 
-// SetCacheStatsProvider attaches per-layer cache hit/miss metrics to /metrics.
+// SetCacheStatsProvider 把各层缓存的命中/未命中指标挂到 /metrics。
 func (m *Metrics) SetCacheStatsProvider(provider CacheStatsSnapshotProvider) {
 	if provider == nil {
 		return
@@ -155,7 +158,7 @@ func (m *Metrics) SetCacheStatsProvider(provider CacheStatsSnapshotProvider) {
 	m.cacheStatsProvider.Store(provider)
 }
 
-// SetLuaScriptStatsProvider attaches per-script Lua policy plugin metrics to /metrics.
+// SetLuaScriptStatsProvider 把各 Lua 策略插件的指标挂到 /metrics。
 func (m *Metrics) SetLuaScriptStatsProvider(provider LuaScriptStatsProvider) {
 	if provider == nil {
 		return
@@ -163,7 +166,7 @@ func (m *Metrics) SetLuaScriptStatsProvider(provider LuaScriptStatsProvider) {
 	m.luaScriptStatsProvider.Store(provider)
 }
 
-// PrometheusHandler returns a Hertz handler that serves /metrics in Prometheus text format.
+// PrometheusHandler 返回以 Prometheus 文本格式提供 /metrics 的 Hertz 处理函数。
 func PrometheusHandler(m *Metrics) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		body := PrometheusBody(m)
@@ -174,7 +177,7 @@ func PrometheusHandler(m *Metrics) app.HandlerFunc {
 	}
 }
 
-// PrometheusBody renders metrics in Prometheus text format.
+// PrometheusBody 以 Prometheus 文本格式渲染指标。
 func PrometheusBody(m *Metrics) string {
 	if m == nil {
 		m = NewMetrics()

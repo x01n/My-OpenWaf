@@ -18,7 +18,7 @@ const (
 	settingKeyBlockPage     = pageconfig.SettingKeyBlockPage
 )
 
-// GetPageTemplates returns all page template configurations.
+// GetPageTemplates 返回全部页面模板配置。
 func GetPageTemplates(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		captchaCfg := loadCaptchaPageConfig(repo)
@@ -33,7 +33,7 @@ func GetPageTemplates(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	}
 }
 
-// GetPageTemplate returns a specific page template configuration by type.
+// GetPageTemplate 按类型返回某个页面模板配置。
 func GetPageTemplate(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		pageType := c.Param("type")
@@ -50,7 +50,7 @@ func GetPageTemplate(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	}
 }
 
-// UpdatePageTemplate updates a specific page template configuration.
+// UpdatePageTemplate 更新某个页面模板配置。
 func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		pageType := c.Param("type")
@@ -111,7 +111,7 @@ func UpdatePageTemplate(repo *repository.SystemSettingsRepo, reload func() error
 	}
 }
 
-// ResetPageTemplate resets a page template to defaults.
+// ResetPageTemplate 把某个页面模板恢复为默认值。
 func ResetPageTemplate(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		pageType := c.Param("type")
@@ -144,7 +144,7 @@ func ResetPageTemplate(repo *repository.SystemSettingsRepo, reload func() error)
 	}
 }
 
-// PreviewPageTemplate renders a preview of the page template.
+// PreviewPageTemplate 渲染某个页面模板的预览。
 func PreviewPageTemplate(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		pageType := c.Param("type")
@@ -164,7 +164,7 @@ func PreviewPageTemplate(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	}
 }
 
-// PreviewPageTemplateDraft renders a preview using the submitted draft config without persisting it.
+// PreviewPageTemplateDraft 用提交上来的草稿配置渲染预览，但不做持久化。
 func PreviewPageTemplateDraft(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		pageType := c.Param("type")

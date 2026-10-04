@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// BruteForceDetector tracks login failures by IP and username to prevent brute force attacks.
+// BruteForceDetector 按 IP 与用户名统计登录失败次数，用于抵挡暴力破解。
 type BruteForceDetector struct {
 	mu          sync.RWMutex
 	attempts    map[string]*attemptRecord
@@ -22,8 +22,8 @@ type attemptRecord struct {
 	lastFail time.Time
 }
 
-// NewBruteForceDetector creates a detector with configurable limits.
-// Default: 5 failures, 15 minute lockout.
+// NewBruteForceDetector 创建一个可配置阈值的检测器。
+// 默认值：5 次失败、锁定 15 分钟。
 func NewBruteForceDetector(maxFailures int, lockoutDuration time.Duration) *BruteForceDetector {
 	if maxFailures <= 0 {
 		maxFailures = 5
@@ -64,25 +64,24 @@ func bruteforceKey(ip, username string) string {
 	return fmt.Sprintf("%s|%s", ip, username)
 }
 
-// IsLocked returns true if the given IP+username combination is locked out.
+// IsLocked 判断给定的 IP+用户名 组合是否处于锁定状态。
 func (bf *BruteForceDetector) IsLocked(ip, username string) bool {
 	bf.mu.RLock()
 	defer bf.mu.RUnlock()
 
-	// Check IP-level lock.
+	// 先看 IP 级锁定。
 	if bf.isLockedKey(ip) {
 		return true
 	}
-	// Check IP+username lock.
+	// 再看 IP+用户名 锁定。
 	return bf.isLockedKey(bruteforceKey(ip, username))
 }
 
-// isLockedKey reports whether the key is currently locked out.
-// It must stay read-only: callers hold only mu.RLock(), and RWMutex allows
-// concurrent readers, so mutating bf.attempts here would let two concurrent
-// IsLocked calls write the map at once and crash the process with
-// "fatal error: concurrent map writes". Expired records are left in place;
-// recordForKey resets them on the next failure and cleanupLoop reclaims them.
+// isLockedKey 报告该 key 当前是否被锁定。
+// 本方法必须保持只读：调用方只持有 mu.RLock()，而 RWMutex 允许多个读者并发，
+// 一旦在这里修改 bf.attempts，两个并发的 IsLocked 调用就可能同时写 map，
+// 触发 "fatal error: concurrent map writes" 使进程崩溃。已过期的记录
+// 故意留在原处：recordForKey 会在下次失败时重置它们，cleanupLoop 负责回收。
 func (bf *BruteForceDetector) isLockedKey(key string) bool {
 	rec, ok := bf.attempts[key]
 	if !ok {
@@ -94,15 +93,15 @@ func (bf *BruteForceDetector) isLockedKey(key string) bool {
 	return false
 }
 
-// RecordFailure increments the failure counter for both IP and IP+username.
+// RecordFailure 同时递增 IP 与 IP+用户名 两个维度的失败计数。
 func (bf *BruteForceDetector) RecordFailure(ip, username string) {
 	bf.mu.Lock()
 	defer bf.mu.Unlock()
 
 	now := time.Now()
-	// Record for IP+username.
+	// 记录 IP+用户名 维度。
 	bf.recordForKey(bruteforceKey(ip, username), now)
-	// Record for IP alone (global IP rate).
+	// 记录纯 IP 维度（IP 级全局限速）。
 	bf.recordForKey(ip, now)
 }
 
@@ -112,9 +111,8 @@ func (bf *BruteForceDetector) recordForKey(key string, now time.Time) {
 		rec = &attemptRecord{}
 		bf.attempts[key] = rec
 	}
-	// A record whose lockout has already elapsed starts a fresh count, so the
-	// caller regains the full failure budget instead of being re-locked by a
-	// single failure. isLockedKey deliberately leaves such records behind.
+	// 锁定已过期的记录会重新开始计数，让调用方拿回完整的失败额度，
+	// 而不是被单次失败立刻再次锁定。isLockedKey 有意保留这类记录。
 	if rec.failures >= bf.maxFailures && now.Sub(rec.lockedAt) >= bf.lockoutDur {
 		rec.failures = 0
 		rec.lockedAt = time.Time{}
@@ -126,14 +124,14 @@ func (bf *BruteForceDetector) recordForKey(key string, now time.Time) {
 	}
 }
 
-// RecordSuccess clears the failure counter for the given IP+username.
+// RecordSuccess 清除给定 IP+用户名 的失败计数。
 func (bf *BruteForceDetector) RecordSuccess(ip, username string) {
 	bf.mu.Lock()
 	defer bf.mu.Unlock()
 	delete(bf.attempts, bruteforceKey(ip, username))
 }
 
-// RemainingAttempts returns how many attempts remain before lockout.
+// RemainingAttempts 返回距离锁定还剩多少次尝试机会。
 func (bf *BruteForceDetector) RemainingAttempts(ip, username string) int {
 	bf.mu.RLock()
 	defer bf.mu.RUnlock()
@@ -143,8 +141,8 @@ func (bf *BruteForceDetector) RemainingAttempts(ip, username string) int {
 	if !ok {
 		return bf.maxFailures
 	}
-	// An expired lockout record is reset by the next recordForKey, so report
-	// the full budget rather than the stale zero it still holds.
+	// 已过期的锁定记录会在下次 recordForKey 时被重置，
+	// 所以这里上报完整额度，而不是它仍然持有的那个陈旧零值。
 	if rec.failures >= bf.maxFailures && time.Since(rec.lockedAt) >= bf.lockoutDur {
 		return bf.maxFailures
 	}
@@ -155,7 +153,7 @@ func (bf *BruteForceDetector) RemainingAttempts(ip, username string) int {
 	return remaining
 }
 
-// LockoutRemaining returns time remaining on lockout, or 0 if not locked.
+// LockoutRemaining 返回锁定状态的剩余时长，未锁定时返回 0。
 func (bf *BruteForceDetector) LockoutRemaining(ip, username string) time.Duration {
 	bf.mu.RLock()
 	defer bf.mu.RUnlock()
@@ -172,7 +170,7 @@ func (bf *BruteForceDetector) LockoutRemaining(ip, username string) time.Duratio
 	return remaining
 }
 
-// Close stops the periodic cleanup goroutine and is safe to call repeatedly.
+// Close 停止周期性清理协程，可安全地重复调用。
 func (bf *BruteForceDetector) Close() {
 	if bf == nil {
 		return
@@ -195,7 +193,7 @@ func (bf *BruteForceDetector) cleanupLoop() {
 			bf.mu.Lock()
 			now := time.Now()
 			for key, rec := range bf.attempts {
-				// Remove entries that have been idle for longer than lockout duration.
+				// 清理空闲时间超过两倍锁定时长的条目。
 				if now.Sub(rec.lastFail) > bf.lockoutDur*2 {
 					delete(bf.attempts, key)
 				}

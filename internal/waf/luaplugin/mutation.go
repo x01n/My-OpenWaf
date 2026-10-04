@@ -13,10 +13,12 @@ func parseQuery(raw string) (url.Values, error) {
 	return url.ParseQuery(raw)
 }
 
-// 请求/响应改写的资源上限。
-//
-// 与 jsplugin 的同名常量取同一组数值：两个引擎的能力边界应当一致，用户在
-// 两者之间迁移脚本时不会因为某一边更严而踩坑。
+/**
+ * 请求/响应改写的资源上限。
+ *
+ * 与 jsplugin 的同名常量取同一组数值：两个引擎的能力边界应当一致，用户在
+ * 两者之间迁移脚本时不会因为某一边更严而踩坑。
+ */
 const (
 	// maxMutationBodyBytes 限制脚本写入的请求体/响应体体积。
 	maxMutationBodyBytes = 16 * 1024
@@ -30,11 +32,13 @@ const (
 	maxMutationHeaderValueBytes = 2048
 )
 
-// requestMutationFromTable 从脚本返回表的 request 子表解析请求改写。
-//
-// 只读已知键，未知键忽略；非法条目逐项跳过而不是让整份改写失败——与
-// decisionFromTable 处理响应头的方式一致，一个写错的头名不应该让脚本的
-// 其余改写全部失效。用户可在 dry-run 返回值里逐项核对实际生效的内容。
+/**
+ * requestMutationFromTable 从脚本返回表的 request 子表解析请求改写。
+ *
+ * 只读已知键，未知键忽略；非法条目逐项跳过而不是让整份改写失败——与
+ * decisionFromTable 处理响应头的方式一致，一个写错的头名不应该让脚本的
+ * 其余改写全部失效。用户可在 dry-run 返回值里逐项核对实际生效的内容。
+ */
 func requestMutationFromTable(tbl *lua.LTable) *RequestMutation {
 	if tbl == nil {
 		return nil
@@ -86,9 +90,11 @@ func requestMutationFromTable(tbl *lua.LTable) *RequestMutation {
 	return mutation
 }
 
-// responseMutationFromTable 从脚本返回表的 response 子表解析响应改写。
-//
-// 与 request 子表对称：status_code / body / headers / delete_headers。
+/**
+ * responseMutationFromTable 从脚本返回表的 response 子表解析响应改写。
+ *
+ * 与 request 子表对称：status_code / body / headers / delete_headers。
+ */
 func responseMutationFromTable(tbl *lua.LTable) *ResponseMutation {
 	if tbl == nil {
 		return nil
@@ -136,10 +142,12 @@ func luaStringField(tbl *lua.LTable, key string) (string, bool) {
 	return string(value), true
 }
 
-// requestHeadersFromTable 解析 request 子表的 set_headers / headers。
-//
-// 两个键名都接受：set_headers 是 jsplugin 的写法，headers 是 Lua 判定表顶层
-// 的写法，用户在两个引擎之间迁移时不必记忆差异。
+/**
+ * requestHeadersFromTable 解析 request 子表的 set_headers / headers。
+ *
+ * 两个键名都接受：set_headers 是 jsplugin 的写法，headers 是 Lua 判定表顶层
+ * 的写法，用户在两个引擎之间迁移时不必记忆差异。
+ */
 func requestHeadersFromTable(tbl *lua.LTable) map[string]string {
 	for _, key := range []string{"set_headers", "headers"} {
 		if headers, ok := tbl.RawGetString(key).(*lua.LTable); ok {
@@ -163,10 +171,12 @@ func responseHeadersFromTable(tbl *lua.LTable) map[string]string {
 	return nil
 }
 
-// collectHeaders 把 Lua 表收集为头映射。
-//
-// filter 决定哪些头名允许；redactText 为 true 时额外拒绝明显带认证秘密的值
-// （响应体会回给客户端，不能把 Authorization 之类的内容反射出去）。
+/**
+ * collectHeaders 把 Lua 表收集为头映射。
+ *
+ * filter 决定哪些头名允许；redactText 为 true 时额外拒绝明显带认证秘密的值
+ * （响应体会回给客户端，不能把 Authorization 之类的内容反射出去）。
+ */
 func collectHeaders(tbl *lua.LTable, filter func(string) bool, redactText bool) map[string]string {
 	if tbl == nil {
 		return nil
@@ -202,14 +212,16 @@ func collectHeaders(tbl *lua.LTable, filter func(string) bool, redactText bool) 
 	return headers
 }
 
-// headerNamesFromValue 解析 delete_headers。
-//
-// 数组形态是 Lua 里最自然的写法（{ "X-A", "X-B" }）；对象形态
-// （{ ["X-A"] = true }）同样接受，与 jsplugin 的 delete_headers 语义对齐。
-// 对象形态的标记按真值判定：false / 0 / "" 的键不删除。
-//
-// filter 决定哪些头名允许删除：请求侧与响应侧各有一张保留头表，删掉 Host 或
-// Content-Length 会破坏代理层的请求构造，比删一个普通头危险得多。
+/**
+ * headerNamesFromValue 解析 delete_headers。
+ *
+ * 数组形态是 Lua 里最自然的写法（{ "X-A", "X-B" }）；对象形态
+ * （{ ["X-A"] = true }）同样接受，与 jsplugin 的 delete_headers 语义对齐。
+ * 对象形态的标记按真值判定：false / 0 / "" 的键不删除。
+ *
+ * filter 决定哪些头名允许删除：请求侧与响应侧各有一张保留头表，删掉 Host 或
+ * Content-Length 会破坏代理层的请求构造，比删一个普通头危险得多。
+ */
 func headerNamesFromValue(value lua.LValue, filter func(string) bool) []string {
 	tbl, ok := value.(*lua.LTable)
 	if !ok || tbl == nil {
@@ -279,11 +291,13 @@ func normalizeHeaderName(name string) (string, bool) {
 	return trimmed, true
 }
 
-// allowedRequestHeader 限制脚本能增删的请求头。
-//
-// 与 jsplugin 的 isForbiddenJSHeader 同一张表：Host 决定路由与站点匹配，
-// Content-Length 与 Transfer-Encoding 决定消息边界，逐跳头由传输层生成——
-// 脚本改动这些会破坏代理层的请求构造，而不是表达策略。
+/**
+ * allowedRequestHeader 限制脚本能增删的请求头。
+ *
+ * 与 jsplugin 的 isForbiddenJSHeader 同一张表：Host 决定路由与站点匹配，
+ * Content-Length 与 Transfer-Encoding 决定消息边界，逐跳头由传输层生成——
+ * 脚本改动这些会破坏代理层的请求构造，而不是表达策略。
+ */
 func allowedRequestHeader(name string) bool {
 	switch strings.ToLower(name) {
 	case "host", "content-length", "transfer-encoding", "connection", "keep-alive",
@@ -294,10 +308,12 @@ func allowedRequestHeader(name string) bool {
 	}
 }
 
-// safeMutationPath 校验脚本给出的新路径。
-//
-// 与 jsplugin 的 validateJSPath 同规则：必须是单个 / 开头的相对路径，不得携带
-// query、fragment、控制字符或绝对 URL，避免脚本把请求改写到本站之外。
+/**
+ * safeMutationPath 校验脚本给出的新路径。
+ *
+ * 与 jsplugin 的 validateJSPath 同规则：必须是单个 / 开头的相对路径，不得携带
+ * query、fragment、控制字符或绝对 URL，避免脚本把请求改写到本站之外。
+ */
 func safeMutationPath(raw string) (string, bool) {
 	path := truncateString(raw, maxMutationStringBytes)
 	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {

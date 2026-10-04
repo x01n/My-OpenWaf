@@ -22,20 +22,22 @@ import (
 并以变异验证确认它会红。
 */
 
-// TestPoWScriptInjectsPerAssetVersions 是本改动的核心契约测试。
-//
-// 背景：`generatePoWScriptBody` 的模板里 glue 与 wasm 是两个不同的 URL，
-// 历史上两个槽位共用同一个随机 cb —— 槽位错位不会编译报错，只会静默用错串。
-//
-// **必须用位置断言，不能用存在性断言**：两个 URL 都在正文里时，
-// `strings.Contains(script, wantWasm)` 在槽位对调后**依然成立**（实测：
-// 把 pow.go 的 `PowGlueURL(), PowWasmURL()` 对调，存在性断言版本不会变红）。
-// 因此这里逐位置核对：glue 必须落在 importScripts 里、wasm 必须落在
-// module_or_path 里。
-//
-// 变异验证（实测均变红）：
-//   - 两槽位对调            → FAIL: importScripts does not carry the glue URL
-//   - 两槽位都传 GlueURL()  → FAIL: module_or_path does not carry the wasm URL
+/**
+ * TestPoWScriptInjectsPerAssetVersions 是本改动的核心契约测试。
+ *
+ * 背景：`generatePoWScriptBody` 的模板里 glue 与 wasm 是两个不同的 URL，
+ * 历史上两个槽位共用同一个随机 cb —— 槽位错位不会编译报错，只会静默用错串。
+ *
+ * **必须用位置断言，不能用存在性断言**：两个 URL 都在正文里时，
+ * `strings.Contains(script, wantWasm)` 在槽位对调后**依然成立**（实测：
+ * 把 pow.go 的 `PowGlueURL(), PowWasmURL()` 对调，存在性断言版本不会变红）。
+ * 因此这里逐位置核对：glue 必须落在 importScripts 里、wasm 必须落在
+ * module_or_path 里。
+ *
+ * 变异验证（实测均变红）：
+ *   - 两槽位对调            → FAIL: importScripts does not carry the glue URL
+ *   - 两槽位都传 GlueURL()  → FAIL: module_or_path does not carry the wasm URL
+ */
 func TestPoWScriptInjectsPerAssetVersions(t *testing.T) {
 	script := GeneratePoWWASMScript(1, "version-nonce")
 

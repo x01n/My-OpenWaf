@@ -8,7 +8,7 @@ const (
 	CVEScopeSite   = "site"
 )
 
-// CVERuleScopeOverride stores nullable per-field CVE configuration at one explicit scope.
+// CVERuleScopeOverride 存储某个显式作用域下的按字段可空 CVE 配置。
 type CVERuleScopeOverride struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	RuleID      uint      `gorm:"not null;uniqueIndex:ux_cve_rule_scope" json:"rule_id"`

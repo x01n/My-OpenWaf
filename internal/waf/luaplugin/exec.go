@@ -19,10 +19,12 @@ const handlerName = "handle"
 // ErrNoHandler 表示脚本未定义入口函数。
 var ErrNoHandler = errors.New("luaplugin: script must define a global function " + handlerName + "(ctx)")
 
-// RequestView 是暴露给脚本的请求快照（只读）。
-//
-// 传值而非传指针：脚本拿到的是当次请求的副本视图，无法通过它改写 WAF 内部状态。
-// Headers 为已归一化的小写键映射。
+/**
+ * RequestView 是暴露给脚本的请求快照（只读）。
+ *
+ * 传值而非传指针：脚本拿到的是当次请求的副本视图，无法通过它改写 WAF 内部状态。
+ * Headers 为已归一化的小写键映射。
+ */
 type RequestView struct {
 	RequestID   string
 	ClientIP    string
@@ -60,7 +62,9 @@ type RequestView struct {
 	Debug func(message string)
 }
 
-// ResponseView 是可选的、受限的上游响应快照。
+/**
+ * ResponseView 是可选的、受限的上游响应快照。
+ */
 type ResponseView struct {
 	StatusCode  int
 	ContentType string
@@ -68,7 +72,7 @@ type ResponseView struct {
 	Body        string
 }
 
-// VerdictView is the safe subset of the builtin verdict exposed to post scripts.
+// VerdictView 是暴露给 post 脚本的内置判定安全子集。
 type VerdictView struct {
 	Matched    bool
 	Phase      string
@@ -81,8 +85,11 @@ type VerdictView struct {
 	Tags       []string
 }
 
-// SetRuntimeHooks 注入每次脚本调用可使用的受控观测回调。
-// 回调只在当前请求执行期间使用，不会进入 Lua 全局状态。
+/**
+ * SetRuntimeHooks 注入每次脚本调用可使用的受控观测回调。
+ *
+ * 回调只在当前请求执行期间使用，不会进入 Lua 全局状态。
+ */
 func (r *RequestView) SetRuntimeHooks(logFn func(string, string), debugFn func(string)) {
 	if r == nil {
 		return
@@ -91,11 +98,13 @@ func (r *RequestView) SetRuntimeHooks(logFn func(string, string), debugFn func(s
 	r.Debug = debugFn
 }
 
-// scriptLogger 返回脚本日志的宿主落点：引擎 logger 加上脚本名与阶段。
-//
-// 脚本名与阶段由这个 logger 携带而不是通过 Lua 上下文传递——两者是脚本自身
-// 的属性，不是请求的属性；让脚本从 ctx 自己报出脚本名，等于把日志的溯源自证
-// 交给被观测方。
+/**
+ * scriptLogger 返回脚本日志的宿主落点：引擎 logger 加上脚本名与阶段。
+ *
+ * 脚本名与阶段由这个 logger 携带而不是通过 Lua 上下文传递——两者是脚本自身
+ * 的属性，不是请求的属性；让脚本从 ctx 自己报出脚本名，等于把日志的溯源自证
+ * 交给被观测方。
+ */
 func (e *Engine) scriptLogger(s *Script) *slog.Logger {
 	if e == nil || s == nil {
 		return nil
@@ -107,14 +116,19 @@ func (e *Engine) scriptLogger(s *Script) *slog.Logger {
 	return base.With(slog.String("script", s.name), slog.String("stage", string(s.stage)))
 }
 
-// loggerToRuntimeHooks 把宿主 logger 适配成 ctx.log / ctx.debug 的回调。
-//
-// ctx.log 的 level 用词与 logger 的配置级别一致（debug/info/warn/error），
-// 无法识别的 level 按 info 记录：脚本的笔误不该让整条日志消失。
-//
-// 消息同时进入记录消息与 message 属性：项目的 pretty handler 只渲染记录消息，
-// 而 slog 的记录契约要求消息在 message 属性里，两者都写才不会在换 handler
-// 时丢内容。
+/**
+ * loggerToRuntimeHooks 把宿主 logger 适配成 ctx.log / ctx.debug 的回调。
+ *
+ * ctx.log 的 level 用词与 logger 的配置级别一致（debug/info/warn/error），
+ * 无法识别的 level 按 info 记录：脚本的笔误不该让整条日志消失。
+ *
+ * 消息同时进入记录消息与 message 属性：项目的 pretty handler 只渲染记录消息，
+ * 而 slog 的记录契约要求消息在 message 属性里，两者都写才不会在换 handler
+ * 时丢内容。
+ *
+ * @param logger 宿主 logger，为 nil 时返回 nil 回调。
+ * @return log 与 debug 两个回调。
+ */
 func loggerToRuntimeHooks(logger *slog.Logger) (func(string, string), func(string)) {
 	if logger == nil {
 		return nil, nil
@@ -139,11 +153,17 @@ func loggerToRuntimeHooks(logger *slog.Logger) (func(string, string), func(strin
 	return logFn, debugFn
 }
 
-// sanitizeScriptLogMessage 净化脚本写入的日志文本。
-//
-// 脚本能读到原始 Host 与请求头值，消息里因此可能带 CR/LF——条带化后才能交给
-// 宿主日志，否则一条脚本日志能伪造出多行日志条目。上限比 ctx.log 的 API 层
-// 截断更严：API 层限制的是单次调用的入参体积，这里限制的是最终落盘的行长。
+/**
+ * sanitizeScriptLogMessage 净化脚本写入的日志文本。
+ *
+ * 脚本能读到原始 Host 与请求头值，消息里因此可能带 CR/LF——条带化后才能交给
+ * 宿主日志，否则一条脚本日志能伪造出多行日志条目。上限比 ctx.log 的 API 层
+ * 截断更严：API 层限制的是单次调用的入参体积，这里限制的是最终落盘的行长。
+ *
+ * @param message 脚本给出的原始消息。
+ * @param limit 最终落盘行长上限。
+ * @return 截断并条带化后的消息；limit 非正时返回空串。
+ */
 func sanitizeScriptLogMessage(message string, limit int) string {
 	if limit <= 0 {
 		return ""
@@ -155,16 +175,18 @@ func sanitizeScriptLogMessage(message string, limit int) string {
 	return message
 }
 
-// Run 执行脚本并返回判定。
-//
-// 失败语义一律为「不判定」（返回零值 Decision 且 err 非 nil），由调用方决定是否
-// 放行——自定义策略出错不应使站点整体不可用。
-//
-// @param ctx 调用方 context，其取消会中断脚本执行。
-// @param pool 状态机池。
-// @param req  请求视图。
-// @param kv   跨请求存储，可为 nil。
-// @return 判定结果与错误。
+/**
+ * Run 执行脚本并返回判定。
+ *
+ * 失败语义一律为「不判定」（返回零值 Decision 且 err 非 nil），由调用方决定是否
+ * 放行——自定义策略出错不应使站点整体不可用。
+ *
+ * @param ctx 调用方 context，其取消会中断脚本执行。
+ * @param pool 状态机池。
+ * @param req  请求视图。
+ * @param kv   跨请求存储，可为 nil。
+ * @return 判定结果与错误。
+ */
 func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBackend) (Decision, error) {
 	start := time.Now()
 	s.runs.Add(1)
@@ -215,9 +237,11 @@ func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBa
 	return Decision{}, err
 }
 
-// callHandler 在受保护的环境中调用脚本入口，并把 panic 转为错误。
-//
-// gopher-lua 在栈溢出等情形下会 panic；不 recover 会直接打崩数据面。
+/**
+ * callHandler 在受保护的环境中调用脚本入口，并把 panic 转为错误。
+ *
+ * gopher-lua 在栈溢出等情形下会 panic；不 recover 会直接打崩数据面。
+ */
 func (s *Script) callHandler(L *lua.LState, runCtx context.Context, req RequestView, kv KVBackend) (dec Decision, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -227,8 +251,8 @@ func (s *Script) callHandler(L *lua.LState, runCtx context.Context, req RequestV
 
 	// 载入已编译原型并执行顶层代码（定义 handle 等）。
 	L.Push(L.NewFunctionFromProto(s.proto))
-	// Top-level chunks only define the handler. Discard all chunk return values
-	// so a script's previous results cannot remain below the handler call.
+	// 顶层 chunk 只负责定义 handler，丢弃其全部返回值，
+	// 以免脚本上次的结果残留在 handler 调用之下。
 	if err := L.PCall(0, 0, nil); err != nil {
 		return Decision{}, fmt.Errorf("luaplugin: %q init failed: %w", s.name, err)
 	}
@@ -250,10 +274,12 @@ func (s *Script) callHandler(L *lua.LState, runCtx context.Context, req RequestV
 	return decisionFromLua(ret)
 }
 
-// decisionFromLua 把脚本返回值转换为 Decision。
-//
-// 返回 nil / false 表示不判定；返回字符串等价于只给 action；
-// 返回表可携带 message / redirect_to / status_code / headers / response_body / tags。
+/**
+ * decisionFromLua 把脚本返回值转换为 Decision。
+ *
+ * 返回 nil / false 表示不判定；返回字符串等价于只给 action；
+ * 返回表可携带 message / redirect_to / status_code / headers / response_body / tags。
+ */
 func decisionFromLua(v lua.LValue) (Decision, error) {
 	switch val := v.(type) {
 	case *lua.LNilType:

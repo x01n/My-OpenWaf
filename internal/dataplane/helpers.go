@@ -10,8 +10,10 @@ import (
 	"My-OpenWaf/internal/waf/challenge"
 )
 
-// toLowerASCII 是 strings.ToLower 的零分配快路径。
-// 当字符串已全部为小写 ASCII 时直接返回原 string，无需分配。
+/**
+ * toLowerASCII 是 strings.ToLower 的零分配快路径。
+ * 当字符串已全部为小写 ASCII 时直接返回原 string，无需分配。
+ */
 func toLowerASCII(s string) string {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -32,7 +34,7 @@ func toLowerASCII(s string) string {
 	return s
 }
 
-// isStaticAsset returns true for common static asset paths that should skip nonce validation.
+// isStaticAsset 对常见的静态资产路径返回 true，这些路径应跳过 nonce 校验。
 func isStaticAsset(lowerPath string) bool {
 	staticExts := []string{".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".eot", ".map"}
 	for _, ext := range staticExts {
@@ -49,7 +51,7 @@ func isStaticAsset(lowerPath string) bool {
 	return false
 }
 
-// setNonceCookie sets the anti-replay nonce cookie on the response.
+// setNonceCookie 在响应上设置反重放 nonce cookie。
 func setNonceCookie(c *app.RequestContext, nonce string, secure bool) {
 	cookie := challenge.NonceKey + "=" + nonce + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + strconv.Itoa(snapshot.OneDaySeconds)
 	if secure {

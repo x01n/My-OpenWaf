@@ -9,8 +9,8 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// StringifyJSONishField normalizes JSON that is stored as a Go string but may be sent as
-// an object or array from the dashboard (e.g. cc_rules: []).
+// StringifyJSONishField 归一化「以 Go 字符串存储、但仪表盘可能以对象或数组下发」的 JSON
+// （例如 cc_rules: []）。
 func StringifyJSONishField(v json.RawMessage) string {
 	s := strings.TrimSpace(string(v))
 	if len(s) == 0 || s == "null" {
@@ -28,8 +28,7 @@ func StringifyJSONishField(v json.RawMessage) string {
 	return s
 }
 
-// PeelJSONStringBlobs extracts the given keys from a raw JSON map, stringifies them,
-// and removes them from the map.
+// PeelJSONStringBlobs 从原始 JSON map 中取出指定 key，把值字符串化，并从 map 中删除这些 key。
 func PeelJSONStringBlobs(raw map[string]json.RawMessage, keys []string) map[string]string {
 	out := make(map[string]string)
 	for _, key := range keys {
@@ -41,7 +40,7 @@ func PeelJSONStringBlobs(raw map[string]json.RawMessage, keys []string) map[stri
 	return out
 }
 
-// ValidateSkipPathByPhase rejects invalid phase-to-path-list objects before persistence.
+// ValidateSkipPathByPhase 在持久化之前拒绝非法的「phase -> 路径列表」对象。
 func ValidateSkipPathByPhase(raw string) error {
 	var pathsByPhase map[string][]string
 	if err := json.Unmarshal([]byte(raw), &pathsByPhase); err != nil || pathsByPhase == nil {
@@ -63,8 +62,7 @@ func ValidateSkipPathByPhase(raw string) error {
 	return nil
 }
 
-// ProtectionJSONBlobKeys returns the list of protection config fields that are stored
-// as JSON string blobs.
+// ProtectionJSONBlobKeys 返回以 JSON 字符串 blob 形式存储的 protection 配置字段列表。
 func ProtectionJSONBlobKeys() []string {
 	return []string{
 		"cc_rules",
@@ -78,7 +76,7 @@ func ProtectionJSONBlobKeys() []string {
 	}
 }
 
-// SiteJSONBlobKeys returns the list of site config fields that are stored as JSON string blobs.
+// SiteJSONBlobKeys 返回以 JSON 字符串 blob 形式存储的站点配置字段列表。
 func SiteJSONBlobKeys() []string {
 	return []string{
 		"cache_rules",
@@ -92,7 +90,7 @@ func SiteJSONBlobKeys() []string {
 	}
 }
 
-// BindSiteFromRequestBody parses a site JSON body into dst after normalizing JSON-blob fields.
+// BindSiteFromRequestBody 先归一化 JSON blob 字段，再把站点 JSON 请求体解析进 dst。
 func BindSiteFromRequestBody(body []byte, dst *store.Site) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -101,8 +99,8 @@ func BindSiteFromRequestBody(body []byte, dst *store.Site) error {
 	return bindSiteFromRaw(raw, dst)
 }
 
-// bindSiteFromRaw unmarshals a site JSON object into dst after lifting JSON-blob fields that
-// are stored as strings in store.Site but are often sent as arrays/objects from the UI.
+// bindSiteFromRaw 先把「在 store.Site 中以字符串存储、但前端常以数组/对象下发」的
+// JSON blob 字段摘出来，再把站点 JSON 对象解析进 dst。
 func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
 	skipPathRaw, skipPathPresent := raw["skip_path_by_phase"]
 	skipPathNull := skipPathPresent && strings.TrimSpace(string(skipPathRaw)) == "null"

@@ -11,16 +11,20 @@ import (
 
 var recvOnlyBoolChanType = reflect.TypeOf((<-chan bool)(nil))
 
-// closeNotifyMethodIndex 按 reflect.Type 缓存 CloseNotify 方法的索引，
-// 无该方法的类型缓存为 -1（恒无）。判断口径与
-// Value.MethodByName("CloseNotify").IsValid() 一致：命中时只把"按名
-// 线性查方法表"替换为"按索引 O(1) 取方法"，方法的存在性、原型检查
-// 与调用本身保持原样。表内只存类型级事实，不缓存任何连接/通道值。
+/**
+ * closeNotifyMethodIndex 按 reflect.Type 缓存 CloseNotify 方法的索引，
+ * 无该方法的类型缓存为 -1（恒无）。判断口径与
+ * Value.MethodByName("CloseNotify").IsValid() 一致：命中时只把"按名
+ * 线性查方法表"替换为"按索引 O(1) 取方法"，方法的存在性、原型检查
+ * 与调用本身保持原样。表内只存类型级事实，不缓存任何连接/通道值。
+ */
 var closeNotifyMethodIndex sync.Map // map[reflect.Type]int
 
-// SelectStreamCloseNotifyBinding 依据数据面 listener 是否具备 HTTP/2 协议栈
-// 选择请求级 CloseNotify 绑定函数。h1/h3 listener 的 conn 永不含 CloseNotify，
-// 启用禁选时直接返回 noop，省去每请求一次的全结构体 reflect 扫描。
+/**
+ * SelectStreamCloseNotifyBinding 依据数据面 listener 是否具备 HTTP/2 协议栈
+ * 选择请求级 CloseNotify 绑定函数。h1/h3 listener 的 conn 永不含 CloseNotify，
+ * 启用禁选时直接返回 noop，省去每请求一次的全结构体 reflect 扫描。
+ */
 func SelectStreamCloseNotifyBinding(disabled bool) func(context.Context, *app.RequestContext) (context.Context, func()) {
 	if disabled {
 		return noopStreamCloseNotifyBinding
@@ -28,16 +32,20 @@ func SelectStreamCloseNotifyBinding(disabled bool) func(context.Context, *app.Re
 	return bindStreamCloseNotifyContext
 }
 
-// noopStreamCloseNotifyBinding 原样返回请求 context，取消函数为空操作，
-// 用于不存在 CloseNotify 源的数据面 listener。
+/**
+ * noopStreamCloseNotifyBinding 原样返回请求 context，取消函数为空操作，
+ * 用于不存在 CloseNotify 源的数据面 listener。
+ */
 func noopStreamCloseNotifyBinding(ctx context.Context, _ *app.RequestContext) (context.Context, func()) {
 	return ctx, func() {}
 }
 
-// bindStreamCloseNotifyContext bridges request cancellation to stream closure.
-// hertz-contrib/http2 v0.1.8 does not cancel the handler context on RST_STREAM,
-// so we additionally bind the request context to the HTTP/2 response writer's
-// CloseNotify signal when it is available.
+/**
+ * bindStreamCloseNotifyContext 把请求取消桥接到流关闭。
+ * hertz-contrib/http2 v0.1.8 在收到 RST_STREAM 时不会取消 handler 上下文，
+ * 因此额外把请求上下文绑定到 HTTP/2 response writer 的 CloseNotify 信号
+ * （当该信号可用时）。
+ */
 func bindStreamCloseNotifyContext(ctx context.Context, c *app.RequestContext) (context.Context, func()) {
 	if c == nil {
 		return ctx, func() {}
@@ -64,9 +72,11 @@ func streamCloseNotifyChannel(conn any) (<-chan bool, bool) {
 	return findCloseNotifyChannel(reflect.ValueOf(conn))
 }
 
-// findCloseNotifyChannel 返回从 v 出发可定位到的第一个 CloseNotify 通道。
-// 与原实现的递归 DFS 语义完全一致，唯一差别是每节点的方法探测由
-// closeNotifyMethodIndex cache 索引化，不再每请求按名扫方法表。
+/**
+ * findCloseNotifyChannel 返回从 v 出发可定位到的第一个 CloseNotify 通道。
+ * 与原实现的递归 DFS 语义完全一致，唯一差别是每节点的方法探测由
+ * closeNotifyMethodIndex cache 索引化，不再每请求按名扫方法表。
+ */
 func findCloseNotifyChannel(v reflect.Value) (<-chan bool, bool) {
 	if !v.IsValid() {
 		return nil, false
@@ -98,9 +108,11 @@ func findCloseNotifyChannel(v reflect.Value) (<-chan bool, bool) {
 	return nil, false
 }
 
-// closeNotifyMethodIndexFor 返回 t 的方法集中 CloseNotify 方法的索引；
-// 不存在时返回 -1 并缓存该负结论。索引与
-// Value.Method(i) 一一对应，是 MethodByName 的等义快路径。
+/**
+ * closeNotifyMethodIndexFor 返回 t 的方法集中 CloseNotify 方法的索引；
+ * 不存在时返回 -1 并缓存该负结论。索引与
+ * Value.Method(i) 一一对应，是 MethodByName 的等义快路径。
+ */
 func closeNotifyMethodIndexFor(t reflect.Type) int {
 	if got, ok := closeNotifyMethodIndex.Load(t); ok {
 		return got.(int)
@@ -123,8 +135,10 @@ func AccessibleValue(v reflect.Value) reflect.Value {
 	return reflect.NewAt(v.Type(), unsafe.Pointer(v.UnsafeAddr())).Elem()
 }
 
-// callCloseNotifyAt 按方法索引从 v 取值后走与原名探测相同的校验与调用；
-// recover 边界放在函数体内，与 callCloseNotify 的防护等价。
+/**
+ * callCloseNotifyAt 按方法索引从 v 取值后走与原名探测相同的校验与调用；
+ * recover 边界放在函数体内，与 callCloseNotify 的防护等价。
+ */
 func callCloseNotifyAt(v reflect.Value, methodIndex int) (ch <-chan bool, ok bool) {
 	defer func() {
 		if recover() != nil {

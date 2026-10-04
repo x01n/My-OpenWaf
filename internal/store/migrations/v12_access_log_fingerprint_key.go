@@ -11,8 +11,8 @@ import (
 
 const v12AccessLogFingerprintBatchSize = 1000
 
-// v12AccessLogFingerprintTable is deliberately independent from store.AccessLog
-// so the migrations package does not introduce an import cycle.
+// v12AccessLogFingerprintTable 刻意独立于 store.AccessLog，
+// 以免 migrations 包引入 import cycle。
 type v12AccessLogFingerprintTable struct {
 	FingerprintKey string `gorm:"column:fingerprint_key;type:char(64);index:idx_al_fingerprint_key"`
 }
@@ -33,12 +33,10 @@ type v12AccessLogFingerprintRow struct {
 }
 
 /**
- * V12MigrateAccessLogFingerprintKey adds and backfills the indexed fingerprint
- * digest used by cold fingerprint aggregation queries.
+ * V12MigrateAccessLogFingerprintKey 新增并回填冷指纹聚合查询所用的索引指纹摘要。
  *
- * Only rows that contain JA3 or JA4 are backfilled because rows without either
- * value are intentionally excluded from fingerprint summaries. The keyset
- * cursor keeps memory bounded and remains efficient on large SQLite log files.
+ * 只回填含 JA3 或 JA4 的行，因为两者皆空的行本就被指纹汇总排除在外。
+ * keyset 游标让内存占用保持有界，在体量较大的 SQLite 日志库上依然高效。
  */
 func V12MigrateAccessLogFingerprintKey(db *gorm.DB) error {
 	if db == nil || !db.Migrator().HasTable("access_logs") {

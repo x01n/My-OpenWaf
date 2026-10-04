@@ -51,8 +51,10 @@ func replayRevokeCookieName(siteID uint) string {
 	return accessgate.NewGate(accessgate.Config{Enabled: true, SiteID: siteID}, nil).CookieName()
 }
 
-// newReplayRevokeEnv 复用本包既有测试脚手架（httptest 上游 + snapshot.Holder）。
-// 每实例独立构造 manager，跨实例共享 nonce 消费状态需用例显式传入共享 manager。
+/**
+ * newReplayRevokeEnv 复用本包既有测试脚手架（httptest 上游 + snapshot.Holder）。
+ * 每实例独立构造 manager，跨实例共享 nonce 消费状态需用例显式传入共享 manager。
+ */
 func newReplayRevokeEnv(t *testing.T, siteID uint, host string, shared *antireplay.AntiReplayManager) (app.HandlerFunc, *antireplay.AntiReplayManager, func() int) {
 	t.Helper()
 
@@ -108,8 +110,10 @@ func newReplayRevokeEnv(t *testing.T, siteID uint, host string, shared *antirepl
 		}
 }
 
-// doReplayRevokeRequest 驱动一次 handler 调用。sessionCookies 依次写入请求
-// Cookie 头（同名 cookie 只保留最后写入的值，与浏览器发送语义一致）。
+/**
+ * doReplayRevokeRequest 驱动一次 handler 调用。sessionCookies 依次写入请求
+ * Cookie 头（同名 cookie 只保留最后写入的值，与浏览器发送语义一致）。
+ */
 func doReplayRevokeRequest(handler app.HandlerFunc, host, nonce string, sessionCookies ...string) *app.RequestContext {
 	c := app.NewContext(0)
 	c.Request.Header.SetMethod(http.MethodGet)
@@ -140,8 +144,10 @@ func setCookieLinesWithPrefix(c *app.RequestContext, prefix string) []string {
 	return lines
 }
 
-// challengePassClearLines 提取响应中 __waf_passed 清除头的 Set-Cookie 行。
-// 该清除头无条件追加：__waf_passed 是无状态签名，「吊销」只能靠浏览器侧删除。
+/**
+ * challengePassClearLines 提取响应中 __waf_passed 清除头的 Set-Cookie 行。
+ * 该清除头无条件追加：__waf_passed 是无状态签名，「吊销」只能靠浏览器侧删除。
+ */
 func challengePassClearLines(c *app.RequestContext) []string {
 	return setCookieLinesWithPrefix(c, challenge.ChallengePassCookieName+"=;")
 }

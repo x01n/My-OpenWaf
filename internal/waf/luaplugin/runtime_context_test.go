@@ -16,10 +16,12 @@ type recordedLog struct {
 	attrs   map[string]string
 }
 
-// recordingHandler 记录日志记录与 WithAttrs 携带的属性。
-//
-// 用自定义 handler 而不是解析文本输出：断言的是「日志落到了哪个 logger、
-// 带什么属性、用什么级别」，文本格式属于 logger 包的职责，不该被本包测试锁定。
+/**
+ * recordingHandler 记录日志记录与 WithAttrs 携带的属性。
+ *
+ * 用自定义 handler 而不是解析文本输出：断言的是「日志落到了哪个 logger、
+ * 带什么属性、用什么级别」，文本格式属于 logger 包的职责，不该被本包测试锁定。
+ */
 type recordingHandler struct {
 	mu      *sync.Mutex
 	records *[]recordedLog
@@ -58,11 +60,13 @@ func (h *recordingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *recordingHandler) WithGroup(string) slog.Handler { return h }
 
-// TestEngineWiresScriptLogHooks 验证线上路径（经引擎执行）的 ctx.log / ctx.debug
-// 真正落到宿主 logger 上，且带上脚本名与阶段。
-//
-// 这是本文件存在的理由：SetRuntimeHooks 此前只有测试调用，生产零调用，
-// 脚本里的 ctx.log 是静默空操作——脚本作者会以为是自己写错了。
+/**
+ * TestEngineWiresScriptLogHooks 验证线上路径（经引擎执行）的 ctx.log / ctx.debug
+ * 真正落到宿主 logger 上，且带上脚本名与阶段。
+ *
+ * 这是本文件存在的理由：SetRuntimeHooks 此前只有测试调用，生产零调用，
+ * 脚本里的 ctx.log 是静默空操作——脚本作者会以为是自己写错了。
+ */
 func TestEngineWiresScriptLogHooks(t *testing.T) {
 	logger, records := newRecordingLogger()
 	e := NewEngine(testKV{available: true}, logger)
@@ -96,9 +100,11 @@ end`)
 	}
 }
 
-// TestEngineLogLevelMapping 验证脚本传入的 level 用词与 logger 配置级别一致。
-//
-// 无法识别的 level 落到 info 而不是被丢弃：脚本的笔误不该让整条日志消失。
+/**
+ * TestEngineLogLevelMapping 验证脚本传入的 level 用词与 logger 配置级别一致。
+ *
+ * 无法识别的 level 落到 info 而不是被丢弃：脚本的笔误不该让整条日志消失。
+ */
 func TestEngineLogLevelMapping(t *testing.T) {
 	cases := []struct {
 		scriptLevel string
@@ -131,10 +137,12 @@ func TestEngineLogLevelMapping(t *testing.T) {
 	}
 }
 
-// TestEngineLogSanitizesMessage 验证脚本日志被条带化并限长。
-//
-// 脚本能读到原始 Host 与请求头值，CR/LF 未净化时一条脚本日志能伪造出多行
-// 日志条目；限长则避免脚本把日志文件当作内存放大的出口。
+/**
+ * TestEngineLogSanitizesMessage 验证脚本日志被条带化并限长。
+ *
+ * 脚本能读到原始 Host 与请求头值，CR/LF 未净化时一条脚本日志能伪造出多行
+ * 日志条目；限长则避免脚本把日志文件当作内存放大的出口。
+ */
 func TestEngineLogSanitizesMessage(t *testing.T) {
 	logger, records := newRecordingLogger()
 	e := NewEngine(testKV{available: true}, logger)
@@ -166,10 +174,12 @@ end`)})
 	}
 }
 
-// TestInjectedViewHooksWinOverScriptHooks 验证视图注入的回调优先于脚本级回调。
-//
-// 两条路径的关系是固定的：脚本级回调供线上使用，视图注入供试运行与测试
-// 按次覆盖，后者优先，且不会串到下一次请求。
+/**
+ * TestInjectedViewHooksWinOverScriptHooks 验证视图注入的回调优先于脚本级回调。
+ *
+ * 两条路径的关系是固定的：脚本级回调供线上使用，视图注入供试运行与测试
+ * 按次覆盖，后者优先，且不会串到下一次请求。
+ */
 func TestInjectedViewHooksWinOverScriptHooks(t *testing.T) {
 	logger, records := newRecordingLogger()
 	e := NewEngine(testKV{available: true}, logger)
@@ -214,9 +224,11 @@ func TestScriptLevelHooksArePerScript(t *testing.T) {
 	}
 }
 
-// TestRuntimeHooksNeverLeakAcrossRequests 验证回调不会在池化状态机之间串场。
-//
-// 注入只作用于本次调用的视图副本；下一次请求（不带回调）应回落到脚本级回调。
+/**
+ * TestRuntimeHooksNeverLeakAcrossRequests 验证回调不会在池化状态机之间串场。
+ *
+ * 注入只作用于本次调用的视图副本；下一次请求（不带回调）应回落到脚本级回调。
+ */
 func TestRuntimeHooksNeverLeakAcrossRequests(t *testing.T) {
 	logger, records := newRecordingLogger()
 	e := NewEngine(testKV{available: true}, logger)
@@ -237,8 +249,10 @@ function handle(ctx) ctx.log("info", "x") return nil end`)})
 	}
 }
 
-// TestScriptRunWithoutHooksIsNoop 验证未经引擎装载、视图也未注入回调时，
-// ctx.log / ctx.debug 是安全空操作：不报错、不改变判定。
+/**
+ * TestScriptRunWithoutHooksIsNoop 验证未经引擎装载、视图也未注入回调时，
+ * ctx.log / ctx.debug 是安全空操作：不报错、不改变判定。
+ */
 func TestScriptRunWithoutHooksIsNoop(t *testing.T) {
 	script, err := Compile("standalone", StagePre, `
 function handle(ctx)
@@ -259,10 +273,12 @@ end`)
 	}
 }
 
-// TestDryRunLogHooksStayDisabled 验证试运行不会把脚本日志写进生产日志。
-//
-// dry-run 由控制面触发，若沿用引擎 logger，用户试运行一段带 ctx.log 的脚本
-// 就能往数据面日志里灌内容。
+/**
+ * TestDryRunLogHooksStayDisabled 验证试运行不会把脚本日志写进生产日志。
+ *
+ * dry-run 由控制面触发，若沿用引擎 logger，用户试运行一段带 ctx.log 的脚本
+ * 就能往数据面日志里灌内容。
+ */
 func TestDryRunLogHooksStayDisabled(t *testing.T) {
 	res := DryRun(StagePre, `
 function handle(ctx)
@@ -277,12 +293,14 @@ end`, RequestView{}, nil, 0)
 	}
 }
 
-// TestMissingRuntimeConfigMetricsAreEmptyNotErrors 验证未注入的 ctx.config /
-// ctx.metrics 保持可索引的空表：脚本读到的缺失键是 nil，不是运行时报错。
-//
-// Config 与 Metrics 在数据面没有写入方，脚本必须能安全地探测它们是否存在。
-// Runtime 由调用方（rules.BuildLuaRequestView）填写，本包内直接调用 Evaluate
-// 时不含该填充，因此这里显式给一个，才有资格断言缺失键的读法。
+/**
+ * TestMissingRuntimeConfigMetricsAreEmptyNotErrors 验证未注入的 ctx.config /
+ * ctx.metrics 保持可索引的空表：脚本读到的缺失键是 nil，不是运行时报错。
+ *
+ * Config 与 Metrics 在数据面没有写入方，脚本必须能安全地探测它们是否存在。
+ * Runtime 由调用方（rules.BuildLuaRequestView）填写，本包内直接调用 Evaluate
+ * 时不含该填充，因此这里显式给一个，才有资格断言缺失键的读法。
+ */
 func TestMissingRuntimeConfigMetricsAreEmptyNotErrors(t *testing.T) {
 	logger, _ := newRecordingLogger()
 	e := NewEngine(testKV{available: true}, logger)
@@ -303,11 +321,13 @@ end`)})
 	}
 }
 
-// TestScriptLevelHooksAreOverwrittenOnReload 验证脚本级回调归引擎所有：
-// 装载是唯一发布点，外部对 Script 的空设置会被下一次装载覆盖。
-//
-// 需要按调用屏蔽日志的场景必须走 RequestView 注入，见
-// TestInjectedHooksTakePrecedence 与 TestDryRunLogHooksStayDisabled。
+/**
+ * TestScriptLevelHooksAreOverwrittenOnReload 验证脚本级回调归引擎所有：
+ * 装载是唯一发布点，外部对 Script 的空设置会被下一次装载覆盖。
+ *
+ * 需要按调用屏蔽日志的场景必须走 RequestView 注入，见
+ * TestInjectedHooksTakePrecedence 与 TestDryRunLogHooksStayDisabled。
+ */
 func TestScriptLevelHooksAreOverwrittenOnReload(t *testing.T) {
 	logger, records := newRecordingLogger()
 	e := NewEngine(testKV{available: true}, logger)

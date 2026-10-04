@@ -6,7 +6,14 @@ import (
 	"strings"
 )
 
-// ParseOCSPStaple decodes an optional OCSP response stored as PEM, raw base64, or raw DER text.
+/**
+ * ParseOCSPStaple 解码可选的 OCSP 响应，兼容 PEM、裸 base64 与裸 DER 文本三种形式。
+ *
+ * 三种形式在运维手工粘贴时都可能出现，因此这里逐层尝试而不是只认其中一种。
+ *
+ * @param raw 配置或上游返回的 OCSP 文本。
+ * @return 解码后的 DER 字节与是否成功。
+ */
 func ParseOCSPStaple(raw string) ([]byte, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {

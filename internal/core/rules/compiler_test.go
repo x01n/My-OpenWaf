@@ -42,7 +42,7 @@ func TestCompileAndMatchAllowIP(t *testing.T) {
 	if len(compiled) != 2 {
 		t.Fatalf("expected 2 rules, got %d", len(compiled))
 	}
-	// allow_ip has lower priority → evaluated first
+	// allow_ip 优先级更低 → 先被求值
 	ctx := MatchCtx{ClientIP: net.ParseIP("10.0.0.1")}
 	if !compiled[0].Match(ctx) {
 		t.Fatal("allow should match")
@@ -81,16 +81,17 @@ func TestCompileQueryRegex(t *testing.T) {
 	}
 }
 
-// 下面这些测试是 P0 修复"前端→后端序列化契约"的回归测试。
-//
-// 背景：规则对话框（rule-form-dialog.tsx）通过前端 mapper 把每条条件行
-// 翻译为合法的 {kind, arg} 后再序列化为 compound JSON。回归测试必须证明：
-//  1. 对话框会产出的每一种 (target, method) 组合都能被 Compile 接受；
-//  2. 至少一个组合在匹配的请求上能命中；
-//  3. 错误形态（前端 mapper 会拒绝的组合），落到后端不能侥幸匹配。
-//
-// 这些 JSON 字面量与 `frontend/.../rule-pattern-mapper.ts` 的输出严格对齐。
-
+/**
+ * 下面这些测试是 P0 修复"前端→后端序列化契约"的回归测试。
+ *
+ * 背景：规则对话框（rule-form-dialog.tsx）通过前端 mapper 把每条条件行
+ * 翻译为合法的 {kind, arg} 后再序列化为 compound JSON。回归测试必须证明：
+ *  1. 对话框会产出的每一种 (target, method) 组合都能被 Compile 接受；
+ *  2. 至少一个组合在匹配的请求上能命中；
+ *  3. 错误形态（前端 mapper 会拒绝的组合），落到后端不能侥幸匹配。
+ *
+ * 这些 JSON 字面量与 `frontend/.../rule-pattern-mapper.ts` 的输出严格对齐。
+ */
 func TestCompileFrontendDialogURLPathContains(t *testing.T) {
 	// 对应 UI: target=url_path / method=contains / content=/admin
 	pattern := `{"kind":"path_contains","arg":"/admin"}`
@@ -568,7 +569,7 @@ func TestMixedRulePriority(t *testing.T) {
 		{Phase: store.PhaseACL, Pattern: "allow_ip:10.0.0.0/8", Action: store.ActionAllow, Enabled: true, Priority: 1},
 	}
 	compiled := Compile(rules)
-	// Priority 1 should come first
+	// Priority 1 的规则应排在前面
 	if compiled[0].Kind != "allow_ip" {
 		t.Fatalf("expected allow_ip first, got %s", compiled[0].Kind)
 	}

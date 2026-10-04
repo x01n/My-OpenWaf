@@ -43,8 +43,15 @@ func DefaultALPNForProtocolSwitches(http2Enabled bool, http3Enabled bool) string
 	return strings.Join(protos, ",")
 }
 
-// NormalizeALPNList converts a comma-separated ALPN list into a canonical,
-// lowercase, de-duplicated form while preserving custom protocols.
+/**
+ * NormalizeALPNList 把逗号分隔的 ALPN 列表规范化为小写、去重、顺序稳定的形式。
+ *
+ * 自定义协议原样保留，不做白名单过滤——ALPN 的取值由站点自行决定，
+ * 这里只负责等价写法归一（大小写、空白、重复项）。
+ *
+ * @param raw 站点配置的 ALPN 原串。
+ * @return 规范化后的逗号分隔列表。
+ */
 func NormalizeALPNList(raw string) string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0, 3)
@@ -84,7 +91,12 @@ func DefaultTLSDefaults() TLSDefaults {
 	}
 }
 
-// NormalizeNetwork returns the network value accepted by net.Listen for data listeners.
+/**
+ * NormalizeNetwork 返回数据面监听可接受的 network 取值（net.Listen 口径）。
+ *
+ * @param raw 配置中的 network 原值。
+ * @return tcp / tcp4 / tcp6 之一；其他取值返回空串表示非法。
+ */
 func NormalizeNetwork(raw string) string {
 	network := strings.ToLower(strings.TrimSpace(raw))
 	switch network {
@@ -95,7 +107,14 @@ func NormalizeNetwork(raw string) string {
 	}
 }
 
-// NormalizeHTTP3Bind validates and canonicalizes the UDP listen address for HTTP/3.
+/**
+ * NormalizeHTTP3Bind 校验并规范化 HTTP/3 的 UDP 监听地址。
+ *
+ * 空串视为合法（表示不单独指定，沿用默认端口），此时第二个返回值为 true。
+ *
+ * @param raw 配置中的 HTTP/3 监听地址。
+ * @return 规范化后的 host:port 与是否合法。
+ */
 func NormalizeHTTP3Bind(raw string) (string, bool) {
 	bind := strings.TrimSpace(raw)
 	if bind == "" {

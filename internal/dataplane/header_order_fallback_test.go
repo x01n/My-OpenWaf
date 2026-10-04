@@ -13,9 +13,11 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// 缓存槽移除后，无 reqCtx 可用的记录点回退到 requestHeaderOrder（VisitAll）
-// 枚举。本测试锁定该回退的 HeaderOrder 输出字节不变，且访问日志与安全事件
-// 共享同一顺序字符串（两条路径各自枚举一次，值必须一致）。
+/**
+ * 缓存槽移除后，无 reqCtx 可用的记录点回退到 requestHeaderOrder（VisitAll）
+ * 枚举。本测试锁定该回退的 HeaderOrder 输出字节不变，且访问日志与安全事件
+ * 共享同一顺序字符串（两条路径各自枚举一次，值必须一致）。
+ */
 func TestHeaderOrderFallbackSharedBetweenAccessAndSecurity(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

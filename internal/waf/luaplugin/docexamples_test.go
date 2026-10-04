@@ -10,10 +10,15 @@ import (
 // docExamplesDir 是文档里那组「可直接复制使用」的示例脚本。
 const docExamplesDir = "../../../docs/扩展与插件系统/lua-examples"
 
-// stageFromDocHeader 从示例头部注释里读出声明的阶段。
-//
-// 每个示例的块注释都有一行形如「阶段：pre（...）」或「阶段：post —— ...」。
-// 先判 post 再判 pre，避免前缀误配。
+/**
+ * stageFromDocHeader 从示例头部注释里读出声明的阶段。
+ *
+ * 每个示例的块注释都有一行形如「阶段：pre（...）」或「阶段：post —— ...」。
+ * 先判 post 再判 pre，避免前缀误配。
+ *
+ * @param src 示例脚本源码。
+ * @return 声明的阶段与是否识别成功。
+ */
 func stageFromDocHeader(src string) (Stage, bool) {
 	idx := strings.Index(src, "阶段：")
 	if idx < 0 {
@@ -29,15 +34,17 @@ func stageFromDocHeader(src string) (Stage, bool) {
 	return "", false
 }
 
-// TestDocExamplesCompileAndRun 保证文档示例始终可用。
-//
-// 这些脚本在文档里是「复制粘贴就能用」的定位，用户不会先去编译验证。
-// 一旦 ctx 字段改名、kv 接口调整或沙箱收紧了某个函数，示例会静默失效，
-// 而失效的表现是用户保存时报错——问题出在我们这边，却由用户先撞上。
-//
-// 断言两件事：能编译，以及在 Redis 缺失（kv 为 nil）时能跑完不报运行时错。
-// 后者尤其重要——示例注释明确承诺「Redis 未配置时降级为不判定」，
-// 若脚本实际在 kv 不可用时报错，那句承诺就是假的。
+/**
+ * TestDocExamplesCompileAndRun 保证文档示例始终可用。
+ *
+ * 这些脚本在文档里是「复制粘贴就能用」的定位，用户不会先去编译验证。
+ * 一旦 ctx 字段改名、kv 接口调整或沙箱收紧了某个函数，示例会静默失效，
+ * 而失效的表现是用户保存时报错——问题出在我们这边，却由用户先撞上。
+ *
+ * 断言两件事：能编译，以及在 Redis 缺失（kv 为 nil）时能跑完不报运行时错。
+ * 后者尤其重要——示例注释明确承诺「Redis 未配置时降级为不判定」，
+ * 若脚本实际在 kv 不可用时报错，那句承诺就是假的。
+ */
 func TestDocExamplesCompileAndRun(t *testing.T) {
 	entries, err := os.ReadDir(docExamplesDir)
 	if err != nil {
@@ -87,10 +94,15 @@ func TestDocExamplesCompileAndRun(t *testing.T) {
 	t.Logf("已验证 %d 个文档示例", checked)
 }
 
-// docSampleRequest 构造一个字段齐备的普通请求。
-//
-// 刻意用不含攻击特征的取值：这里验证的是「脚本能跑通」，不是「判定对不对」，
-// 断言判定结果就得预设每个示例的触发条件，那是在猜测示例意图。
+/**
+ * docSampleRequest 构造一个字段齐备的普通请求。
+ *
+ * 刻意用不含攻击特征的取值：这里验证的是「脚本能跑通」，不是「判定对不对」，
+ * 断言判定结果就得预设每个示例的触发条件，那是在猜测示例意图。
+ *
+ * @param stage 示例脚本声明的阶段。
+ * @return 示例用的请求视图。
+ */
 func docSampleRequest(stage Stage) RequestView {
 	req := RequestView{
 		RequestID:   "doc-example",

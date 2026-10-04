@@ -194,17 +194,17 @@ func TestLoadHTTP2ConfigNormalizesUnsafeLargeValues(t *testing.T) {
 }
 
 func TestParseTLSCipherSuitesRecognizesNamesAndDeduplicates(t *testing.T) {
-	// parseTLSCipherSuites only resolves named cipher suites (not numeric IDs like 49199 or 0xc02f).
-	// TLS_AES_128_GCM_SHA256 (0x1301) is a distinct TLS 1.3 suite from TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xc02f).
+	// parseTLSCipherSuites 只解析具名套件，不认数字 ID（如 49199 或 0xc02f）。
+	// TLS_AES_128_GCM_SHA256 (0x1301) 是 TLS 1.3 套件，与 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xc02f) 不同。
 	got := parseTLSCipherSuites("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,ECDHE_RSA_WITH_AES_128_GCM_SHA256,tls_ecdhe_rsa_with_aes_128_gcm_sha256")
 	if len(got) != 1 || got[0] != tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 {
 		t.Fatalf("unexpected cipher suites: %#v", got)
 	}
 }
 
-// TestSnapshotParsePatternRecognizesTLSFingerprintKinds was removed because
-// ParsePattern no longer supports TLS fingerprint kinds (tls_version, tls_sni,
-// tls_alpn, tls_cipher_suites, header_order_contains).
+// TestSnapshotParsePatternRecognizesTLSFingerprintKinds 已移除，
+// 因为 ParsePattern 不再支持 TLS 指纹类 kind（tls_version、tls_sni、
+// tls_alpn、tls_cipher_suites、header_order_contains）。
 
 func TestParseTLSVersionSupportsAliasesAndWireValues(t *testing.T) {
 	tests := []struct {
@@ -549,8 +549,8 @@ func TestEffectiveSiteTLSKeepsExplicitTLS12Minimum(t *testing.T) {
 	}
 }
 
-// TestBuildAttachesOCSPStapleToSnapshotTLSCertificates was removed because
-// Build() no longer attaches OCSP staple data to TLS certificates in the snapshot.
+// TestBuildAttachesOCSPStapleToSnapshotTLSCertificates 已移除，
+// 因为 Build() 不再把 OCSP staple 数据挂到快照里的 TLS 证书上。
 
 func TestParseCurvePreferencesAliasesAndDeduplicates(t *testing.T) {
 	got := ParseCurvePreferences("X25519,P-256,CurveP256,p384")
@@ -789,7 +789,7 @@ func TestRegisterSiteKeysAllowsDuplicateHostWithinSameSite(t *testing.T) {
 
 func TestRegisterSiteKeysMultiHost(t *testing.T) {
 	sites := make(map[string]*SiteRuntime)
-	// Site with comma-separated hosts including a wildcard
+	// 站点配置了逗号分隔的多个 host，其中含一个通配符
 	if err := registerSiteKeys(sites, testSiteRuntime(1, ":80", "a.example.com, b.example.com, *.example.com")); err != nil {
 		t.Fatalf("register site keys: %v", err)
 	}
@@ -803,7 +803,7 @@ func TestRegisterSiteKeysMultiHost(t *testing.T) {
 	if _, ok := sites[SiteMapKey(":80", "*.example.com")]; !ok {
 		t.Fatal("expected *.example.com to be registered")
 	}
-	// All three keys should point to the same site
+	// 三个键都应指向同一个站点
 	if sites[SiteMapKey(":80", "a.example.com")].Site.ID != 1 {
 		t.Fatal("site ID mismatch for a.example.com")
 	}
@@ -816,15 +816,15 @@ func TestMatchSiteMultiHost(t *testing.T) {
 	}
 	sn := &Snapshot{Sites: sites}
 
-	// Exact match
+	// 精确匹配
 	if rt, ok := sn.MatchSite(":8800", "app.example.com"); !ok || rt.Site.ID != 1 {
 		t.Fatal("expected exact match on app.example.com")
 	}
-	// Wildcard match on the second host
+	// 命中第二个 host 的通配符匹配
 	if rt, ok := sn.MatchSite(":8800", "sub.example.org"); !ok || rt.Site.ID != 1 {
 		t.Fatal("expected wildcard match on sub.example.org")
 	}
-	// No match
+	// 无匹配
 	if _, ok := sn.MatchSite(":8800", "other.test.com"); ok {
 		t.Fatal("expected no match on other.test.com")
 	}
@@ -1776,7 +1776,7 @@ func TestBuildRejectsInvalidProtectionJSON(t *testing.T) {
 	}
 }
 
-// TestBuildRejectsInvalidProtectionCaptchaType ensures valid JSON cannot bypass the CAPTCHA contract.
+// TestBuildRejectsInvalidProtectionCaptchaType 确保合法 JSON 也不能绕过验证码契约。
 func TestBuildRejectsInvalidProtectionCaptchaType(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 	if err := db.Create(&store.SystemSettings{Key: "protection", Value: `{"captcha_type":"pow"}`}).Error; err != nil {
@@ -2008,8 +2008,8 @@ func TestBuildDefaultsResponseCompressionSettingsWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
-	// loadBoolSetting returns false when the setting row is missing,
-	// so both compression booleans default to false without explicit DB rows.
+	// 设置行缺失时 loadBoolSetting 返回 false，
+	// 因此没有显式 DB 行时两个压缩开关都默认 false。
 	if sn.ResponseCompressionEnabled {
 		t.Fatalf("snapshot ResponseCompressionEnabled = %v, want false (loadBoolSetting default)", sn.ResponseCompressionEnabled)
 	}
@@ -2508,8 +2508,8 @@ func TestBuildCompilesAndResolvesUpstreamHostTemplate(t *testing.T) {
 	if !ok {
 		t.Fatal("site was not matched")
 	}
-	// ResolveOutboundHost returns the raw UpstreamHost value when set,
-	// without template expansion.
+	// 站点显式设置了 UpstreamHost 时，ResolveOutboundHost 返回原值，
+	// 不做模板展开。
 	got, err := ResolveOutboundHost(rt, "127.0.0.1:8080", "app.example.test")
 	if err != nil {
 		t.Fatalf("ResolveOutboundHost returned error: %v", err)
@@ -2541,8 +2541,8 @@ func TestBuildPrecomputesStaticUpstreamHost(t *testing.T) {
 	if !ok {
 		t.Fatal("site was not matched")
 	}
-	// Build does not precompute UpstreamHostHeader; ResolveOutboundHost
-	// returns the raw Site.UpstreamHost value directly.
+	// Build 不预计算 UpstreamHostHeader；ResolveOutboundHost
+	// 直接返回 Site.UpstreamHost 的原值。
 	if rt.Site.UpstreamHost != "backend.example.com:8443" {
 		t.Fatalf("site upstream host = %q, want %q", rt.Site.UpstreamHost, "backend.example.com:8443")
 	}
@@ -2575,7 +2575,7 @@ func TestParseSiteCacheRulesSuffixNoLeadingSlash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Bare token without ".", "/", "?" is treated as a file extension → ".config"
+	// 不含 "."、"/"、"?" 的裸 token 会被当作文件扩展名 → ".config"
 	if len(rules) != 1 || rules[0].Path != ".config" {
 		t.Fatalf("got %#v", rules)
 	}

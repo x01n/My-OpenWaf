@@ -58,7 +58,7 @@ func TestFalsePositiveCreateListGetUpdate(t *testing.T) {
 		t.Errorf("note = %q, want %q", items[0].Note, rec.Note)
 	}
 
-	// Get by id。
+	// 按 ID 查询。
 	got, err := repo.Get(rec.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)

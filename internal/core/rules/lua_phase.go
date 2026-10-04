@@ -16,16 +16,22 @@ type LuaPluginEvaluator interface {
 	Evaluate(ctx context.Context, stage luaplugin.Stage, req luaplugin.RequestView) luaplugin.Decision
 }
 
-// luaPhase 在管道中执行自定义 Lua 策略。
+/**
+ * luaPhase 在管道中执行自定义 Lua 策略。
+ *
+ * 阶段名依 stage 取值：StagePre 得到 lua_pre，其余得到 lua_post。
+ */
 type luaPhase struct {
 	engine LuaPluginEvaluator
 	stage  luaplugin.Stage
 }
 
-// NewLuaPhase 创建 Lua 插件阶段。
-//
-// stage 决定执行时机：StagePre 在昂贵检测（OWASP/CVE）之前，可提早放行或拦截；
-// StagePost 在全部内置阶段之后，能读到内置引擎的判定结果。
+/**
+ * NewLuaPhase 创建 Lua 插件阶段。
+ *
+ * stage 决定执行时机：StagePre 在昂贵检测（OWASP/CVE）之前，可提早放行或拦截；
+ * StagePost 在全部内置阶段之后，能读到内置引擎的判定结果。
+ */
 func NewLuaPhase(engine LuaPluginEvaluator, stage luaplugin.Stage) pipeline.Phase {
 	return &luaPhase{engine: engine, stage: stage}
 }
@@ -61,7 +67,6 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	// 请求改写与判定是两条独立通道：脚本可以只改请求、只判定，或两者都做。
 	// pre 阶段在管道内、上游请求尚未发出，改写才有意义，因此只在此阶段应用；
 	// post 阶段响应已经回完（见 engine.applyPostLuaDecision）。
-	//
 	// 改写就地生效并立即记入管道上下文：后续阶段（OWASP/CVE/Bot 等）看到的
 	// 是改写后的请求，这正是 pre「在昂贵检测之前改变检测对象」的定位。数据面
 	// 在管道返回后再把同一份意图写回 Hertz 请求，供代理与日志使用。
@@ -126,17 +131,19 @@ func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 	return res, terminal
 }
 
-// BuildLuaRequestView 把管道上下文转为脚本可见的只读视图。
-//
-// 导出供 engine 包在管道之外执行后置脚本时复用——后置阶段需读到内置判定，
-// 无法作为普通管道阶段实现。
-//
-// 传副本而非指针：脚本无法借它改写 WAF 内部状态。Body 按管道已截断的
-// 检查窗口传递，不额外读取。
-//
-// 该函数只服务前置阶段；Runtime 固定标注 lua_pre。后置脚本必须另行覆盖
-// Runtime（见 BuildLuaPostRuntimeView），否则脚本无法区分自己跑在内置判定
-// 之前还是之后。
+/**
+ * BuildLuaRequestView 把管道上下文转为脚本可见的只读视图。
+ *
+ * 导出供 engine 包在管道之外执行后置脚本时复用——后置阶段需读到内置判定，
+ * 无法作为普通管道阶段实现。
+ *
+ * 传副本而非指针：脚本无法借它改写 WAF 内部状态。Body 按管道已截断的
+ * 检查窗口传递，不额外读取。
+ *
+ * 该函数只服务前置阶段；Runtime 固定标注 lua_pre。后置脚本必须另行覆盖
+ * Runtime（见 BuildLuaPostRuntimeView），否则脚本无法区分自己跑在内置判定
+ * 之前还是之后。
+ */
 func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
 	if ctx == nil {
 		return luaplugin.RequestView{}
@@ -171,14 +178,16 @@ func BuildLuaRequestView(ctx *pipeline.RequestCtx) luaplugin.RequestView {
 	return view
 }
 
-// buildLuaRuntimeView 构造脚本可见的只读运行时参数视图。
-//
-// 只放「由宿主确定、脚本无法自行声明」的三项：阶段、管道阶段名与请求 ID。
-// 脚本名、站点配置等脚本自身的属性不在此列——让脚本从 ctx 自报脚本名，
-// 等于把日志溯源交给被观测方。
-//
-// 返回 nil 而非空表时，脚本侧 ctx.runtime 仍是一个可索引的表（api.go 的
-// stringMapToTable 对 nil map 返回空表），访问缺失键得到 nil 而不是报错。
+/**
+ * buildLuaRuntimeView 构造脚本可见的只读运行时参数视图。
+ *
+ * 只放「由宿主确定、脚本无法自行声明」的三项：阶段、管道阶段名与请求 ID。
+ * 脚本名、站点配置等脚本自身的属性不在此列——让脚本从 ctx 自报脚本名，
+ * 等于把日志溯源交给被观测方。
+ *
+ * 返回 nil 而非空表时，脚本侧 ctx.runtime 仍是一个可索引的表（api.go 的
+ * stringMapToTable 对 nil map 返回空表），访问缺失键得到 nil 而不是报错。
+ */
 func buildLuaRuntimeView(ctx *pipeline.RequestCtx, phase string, stage luaplugin.Stage) map[string]string {
 	if ctx == nil || phase == "" {
 		return nil
@@ -190,17 +199,22 @@ func buildLuaRuntimeView(ctx *pipeline.RequestCtx, phase string, stage luaplugin
 	}
 }
 
-// BuildLuaPostRuntimeView 构造后置阶段脚本可见的运行时参数视图。
-//
-// 导出供 engine 包在管道之外执行后置脚本时复用：后置阶段不在管道里，拿不到
-// 管道阶段对象，但阶段名对脚本必须与前置阶段可区分。
+/**
+ * BuildLuaPostRuntimeView 构造后置阶段脚本可见的运行时参数视图。
+ *
+ * 导出供 engine 包在管道之外执行后置脚本时复用：后置阶段不在管道里，拿不到
+ * 管道阶段对象，但阶段名对脚本必须与前置阶段可区分。
+ */
 func BuildLuaPostRuntimeView(ctx *pipeline.RequestCtx) map[string]string {
 	return buildLuaRuntimeView(ctx, "lua_post", luaplugin.StagePost)
 }
 
-// PopulateLuaQueryParams parses the raw query once for Lua request contexts.
-// QueryParams preserves the first value for existing scripts, while QueryValues
-// preserves every decoded value in request order for new scripts.
+/**
+ * PopulateLuaQueryParams 为 Lua 请求上下文解析一次原始查询串。
+ *
+ * QueryParams 保留首个值以兼容既有脚本，QueryValues 则按请求顺序保留每个
+ * 解码后的值，供新脚本使用。
+ */
 func PopulateLuaQueryParams(ctx *pipeline.RequestCtx) {
 	if ctx == nil || ctx.RawQuery == "" {
 		return

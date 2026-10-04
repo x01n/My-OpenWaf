@@ -6,7 +6,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// CVERuleRecord stores custom and feed-synchronised CVE rules.
+// CVERuleRecord 存储自定义规则与 feed 同步下来的 CVE 规则。
 type CVERuleRecord struct {
 	ID          uint           `gorm:"primarykey" json:"id"`
 	CreatedAt   time.Time      `json:"created_at"`
@@ -34,7 +34,7 @@ type CVERuleRecord struct {
 
 func (CVERuleRecord) TableName() string { return "cve_rules" }
 
-// CVESyncLog records the result of a CVE feed synchronisation run.
+// CVESyncLog 记录一次 CVE feed 同步的结果。
 type CVESyncLog struct {
 	ID         uint      `gorm:"primarykey" json:"id"`
 	Source     string    `gorm:"size:32" json:"source"` // nvd, github

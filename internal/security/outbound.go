@@ -16,7 +16,7 @@ var (
 
 const trustedInboundHTTP3ContextKey = "security_trusted_inbound_http3"
 
-// MarkTrustedInboundHTTP3 records that the data plane authenticated HTTP/3 loopback metadata.
+// MarkTrustedInboundHTTP3 记录数据面已确认 HTTP/3 loopback 元数据可信。
 func MarkTrustedInboundHTTP3(c *app.RequestContext) {
 	if c != nil {
 		c.Set(trustedInboundHTTP3ContextKey, true)
@@ -32,7 +32,7 @@ func trustedInboundHTTP3(c *app.RequestContext) bool {
 	return ok && marked
 }
 
-// RebuildOutboundForwardingHeaders replaces client-supplied forwarding identity headers.
+// RebuildOutboundForwardingHeaders 替换客户端自带的转发身份头。
 func RebuildOutboundForwardingHeaders(headers http.Header, clientIP net.IP, origHost string, preserveOriginalHost bool, proto string) {
 	for key := range headers {
 		switch {
@@ -55,7 +55,7 @@ func RebuildOutboundForwardingHeaders(headers http.Header, clientIP net.IP, orig
 	}
 }
 
-// TrustedInboundForwardedProto reports the scheme negotiated on the client connection.
+// TrustedInboundForwardedProto 报告客户端连接上协商出的 scheme。
 func TrustedInboundForwardedProto(c *app.RequestContext) string {
 	if trustedInboundHTTP3(c) {
 		return "h3"
@@ -70,7 +70,7 @@ func TrustedInboundForwardedProto(c *app.RequestContext) string {
 	return "http"
 }
 
-// ApplyOutboundForwarding rebuilds forwarding identity headers and sets the outbound Host.
+// ApplyOutboundForwarding 重建转发身份头并设置出站 Host。
 func ApplyOutboundForwarding(out *http.Request, clientIP net.IP, origHost string, preserveOriginalHost bool, upstreamHost string, proto string) {
 	RebuildOutboundForwardingHeaders(out.Header, clientIP, origHost, preserveOriginalHost, proto)
 	if upstreamHost != "" {

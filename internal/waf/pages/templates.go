@@ -14,7 +14,7 @@ import (
 //go:embed templates/*.html
 var pageTemplateFS embed.FS
 
-// fallbackPageData contains the public fields shown by block and maintenance fallbacks.
+// fallbackPageData 包含块页与维护页回退时展示的公开字段。
 type fallbackPageData struct {
 	Maintenance bool
 	Title       string
@@ -23,7 +23,7 @@ type fallbackPageData struct {
 	Label       string
 }
 
-// upstreamErrorPageData contains the public fields shown by the upstream fallback.
+// upstreamErrorPageData 包含上游回退页展示的公开字段。
 type upstreamErrorPageData struct {
 	StatusCode int
 	Title      string
@@ -34,7 +34,7 @@ type upstreamErrorPageData struct {
 	Icon       template.HTML
 }
 
-// errorPageTemplateData contains the fields rendered by the built-in error page.
+// errorPageTemplateData 包含内置错误页渲染的字段。
 type errorPageTemplateData struct {
 	StatusCode int
 	Title      string
@@ -44,7 +44,7 @@ type errorPageTemplateData struct {
 	Icon       template.HTML
 }
 
-// challengePageData contains trusted generated scripts and escaped challenge values.
+// challengePageData 包含受信生成脚本与已转义的挑战值。
 type challengePageData struct {
 	RequestID      string
 	EnvJS          template.JS
@@ -87,12 +87,12 @@ func executePageTemplate(name string, data any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// RenderChallengePreview renders a safe static preview of the JS challenge page.
+// RenderChallengePreview 渲染 JS 挑战页的安全静态预览。
 func RenderChallengePreview(cfg pageconfig.ChallengePageConfig) []byte {
 	return []byte(buildChallengeHTML("preview-request", "preview-ts", "preview-token", "", "", "", "", cfg))
 }
 
-// RenderBlockPreview renders a safe preview using the same configured block renderer.
+// RenderBlockPreview 使用与线上一致的块页渲染器生成安全预览。
 func RenderBlockPreview(cfg pageconfig.BlockPageConfig) []byte {
 	data := configuredPageConfig(cfg, false)
 	data.RequestID = "preview-request"

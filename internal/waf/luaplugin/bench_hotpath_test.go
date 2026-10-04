@@ -6,12 +6,14 @@ import (
 	"testing"
 )
 
-// 本文件量化数据面热路径上「阶段是否有脚本」这一判断的固定代价。
-//
-// 管道里的 lua 阶段对每个请求都会先问一次 HasScripts，未配置脚本时也要问。
-// 当前实现用 RWMutex 保护脚本 slice；RLock 会对同一 cache line 做原子加，
-// 多核高 QPS 下产生跨核争抢。下面用等价的两种读路径做对照，判断是否值得改成
-// atomic.Pointer（与项目 snapshot.Holder 的既有做法一致）。
+/**
+ * 本文件量化数据面热路径上「阶段是否有脚本」这一判断的固定代价。
+ *
+ * 管道里的 lua 阶段对每个请求都会先问一次 HasScripts，未配置脚本时也要问。
+ * 当前实现用 RWMutex 保护脚本 slice；RLock 会对同一 cache line 做原子加，
+ * 多核高 QPS 下产生跨核争抢。下面用等价的两种读路径做对照，判断是否值得改成
+ * atomic.Pointer（与项目 snapshot.Holder 的既有做法一致）。
+ */
 
 // rwMutexBaseline 复现当前实现的读路径。
 type rwMutexBaseline struct {

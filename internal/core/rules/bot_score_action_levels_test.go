@@ -77,14 +77,16 @@ func bsaOnlyUA(ua string) map[string]string {
 	return map[string]string{"User-Agent": ua}
 }
 
-// bsaHighScoreRequest 返回当前实现下可获得最高加权总分的请求形态（实测 89）：
-// 空 UA（UA 模块 100）+ 头全缺（指纹模块 100）+ POST /(scanner path)
-// + Connection: close + TLS10 + 已确认黑名单 IP（IP 声誉 60）
-// + 行为窗口 3 倍阈值（行为模块 100）。
-//
-// 注意：该形态**必须**带 IP 声誉命中，否则 PreScreen 不命中、评分链路根本
-// 不会执行（空 UA 与缺头本身都不触发预筛）。这是本次实现的一条硬约束，
-// 直接决定了「纯靠 UA+指纹 能到多高」的上限。
+/**
+ * bsaHighScoreRequest 返回当前实现下可获得最高加权总分的请求形态（实测 89）：
+ * 空 UA（UA 模块 100）+ 头全缺（指纹模块 100）+ POST /(scanner path)
+ * + Connection: close + TLS10 + 已确认黑名单 IP（IP 声誉 60）
+ * + 行为窗口 3 倍阈值（行为模块 100）。
+ *
+ * 注意：该形态**必须**带 IP 声誉命中，否则 PreScreen 不命中、评分链路根本
+ * 不会执行（空 UA 与缺头本身都不触发预筛）。这是本次实现的一条硬约束，
+ * 直接决定了「纯靠 UA+指纹 能到多高」的上限。
+ */
 func bsaHighScoreRequest() (map[string]string, string, string, bool) {
 	return map[string]string{"Connection": "close"},
 		"POST", "/.env", true
@@ -234,14 +236,14 @@ func bsaPrimeBehavior(limiter *bsaFakeLimiter, ctx *pipeline.RequestCtx, want in
 	limiter.counts[bsaBehaviorKey(ctx)] = want - 1
 }
 
-// ─────────────── 期望值推导：独立复算契约，不复制魔数 ───────────────
-
-// bsaExpectedAction 由「加权总分 + 危险标记 + 阈值」独立推导期望 action。
-//
-// 这是对实现契约的**独立复算**（不是重演实现代码）：
-//  1. 档位 = ClassifyScore(总分, 阈值)——档位边界的唯一权威；
-//  2. 危险下界：dangerous 且档位低于挑战 → 抬到挑战；
-//  3. 档位 → action 的五档映射。
+/**
+ * bsaExpectedAction 由「加权总分 + 危险标记 + 阈值」独立推导期望 action（独立复算契约，不复制魔数）。
+ *
+ * 这是对实现契约的**独立复算**（不是重演实现代码）：
+ *  1. 档位 = ClassifyScore(总分, 阈值)——档位边界的唯一权威；
+ *  2. 危险下界：dangerous 且档位低于挑战 → 抬到挑战；
+ *  3. 档位 → action 的五档映射。
+ */
 func bsaExpectedAction(total int, dangerous bool, threshold int) (action.Type, bool) {
 	tier := bot.ClassifyScore(total, threshold)
 	if dangerous && tier < bot.TierChallenge {
@@ -268,24 +270,24 @@ func bsaTotalOf(ctx *pipeline.RequestCtx) string {
 	return strconv.Itoa(ctx.BotScoreResult.TotalScore)
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // 一、裁决第 4 条：五档 → action 的端到端映射
-// ══════════════════════════════════════════════════════════════════════════
 
-// TestBSAFiveTierDispositionsReachExpectedActions 用真实 Execute 走完五档。
-//
-// 样本（数值为实测）与阈值：
-//   - pass      : 干净浏览器，总分 0，T=80
-//   - observe   : zgrab 工具 UA + 只带 UA 的头集，总分 41，T=80
-//   - challenge : 空头集 + 已确认黑名单 IP，总分 64，T=80
-//   - intercept : 四模块满分样本（无 GeoIP 命中），总分 89，T=80
-//   - drop      : 同一请求改 T=75（75×9/8 = 84 ≤ 89）
-//
-// 【更正】本节此前断言「默认阈值 80 下 drop 不可达」，该结论有误——漏算了
-// GeoIP 模块。ScoreIP 在同一 ASN 同时命中机房与 VPN 时可达 40，再叠加高风险
-// 国家 20，上限 60；60×5% = 3 分。因此五模块满分形态为
-// 40 + 25 + 15 + 3 + 9 = 92 ≥ 90 → 默认阈值下即落 TierDrop。
-// 该形态已由 TestBSADropReachableAtDefaultThreshold 单独覆盖（用内嵌 GeoIP 夹具）。
+/**
+ * TestBSAFiveTierDispositionsReachExpectedActions 用真实 Execute 走完五档。
+ *
+ * 样本（数值为实测）与阈值：
+ *   - pass      : 干净浏览器，总分 0，T=80
+ *   - observe   : zgrab 工具 UA + 只带 UA 的头集，总分 41，T=80
+ *   - challenge : 空头集 + 已确认黑名单 IP，总分 64，T=80
+ *   - intercept : 四模块满分样本（无 GeoIP 命中），总分 89，T=80
+ *   - drop      : 同一请求改 T=75（75×9/8 = 84 ≤ 89）
+ *
+ * 【更正】本节此前断言「默认阈值 80 下 drop 不可达」，该结论有误——漏算了
+ * GeoIP 模块。ScoreIP 在同一 ASN 同时命中机房与 VPN 时可达 40，再叠加高风险
+ * 国家 20，上限 60；60×5% = 3 分。因此五模块满分形态为
+ * 40 + 25 + 15 + 3 + 9 = 92 ≥ 90 → 默认阈值下即落 TierDrop。
+ * 该形态已由 TestBSADropReachableAtDefaultThreshold 单独覆盖（用内嵌 GeoIP 夹具）。
+ */
 func TestBSAFiveTierDispositionsReachExpectedActions(t *testing.T) {
 	highHeaders, highMethod, highPath, highTLS10 := bsaHighScoreRequest()
 
@@ -296,7 +298,7 @@ func TestBSAFiveTierDispositionsReachExpectedActions(t *testing.T) {
 		path       string
 		tls10      bool
 		ip         string
-		repKind    string // "", "blacklist"
+		repKind    string // 取值 "", "blacklist"
 		rateMax    int
 		primeTo    int64
 		threshold  int
@@ -383,16 +385,16 @@ func TestBSAFiveTierDispositionsReachExpectedActions(t *testing.T) {
 	}
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // 二、硬指令：只要判断危险就不能放过去
-// ══════════════════════════════════════════════════════════════════════════
 
-// TestBSADangerousRequestMustNotPassThrough 危险来源覆盖：
-//   - 明确攻击工具 UA（uaToolSeverity ≥ dangerToolSeverityThreshold）
-//   - IP 名单命中（黑名单 / 自动封禁）
-//
-// 断言：必须终止（stop=true），action 至少为 challenge；低分危险请求
-// 不应被「一次打死」到 drop。
+/**
+ * TestBSADangerousRequestMustNotPassThrough 危险来源覆盖：
+ *   - 明确攻击工具 UA（uaToolSeverity ≥ dangerToolSeverityThreshold）
+ *   - IP 名单命中（黑名单 / 自动封禁）
+ *
+ * 断言：必须终止（stop=true），action 至少为 challenge；低分危险请求
+ * 不应被「一次打死」到 drop。
+ */
 func TestBSADangerousRequestMustNotPassThrough(t *testing.T) {
 	// severity 95 档：注入 / 爆破 / 利用框架 / 主动扫描器。
 	toolUAs := []string{
@@ -460,13 +462,15 @@ func TestBSADangerousRequestMustNotPassThrough(t *testing.T) {
 	})
 }
 
-// TestBSANonDangerousSignalsStayNonDangerous 防过度拦截：只有确定性证据
-// （明确攻击工具 UA、IP 名单命中）才置危险标记；采集类工具与所有弱信号
-// 一律不置危险。
-//
-// 采集/侦察/爬虫框架（severity 65：zgrab / crawler4j / Shodan / scrapy 等）
-// **不在**危险名单内——这是设计选择，本测试把它固化为回归护栏，防止后续
-// 误调 dangerToolSeverityThreshold 把采集类工具一并升级为危险。
+/**
+ * TestBSANonDangerousSignalsStayNonDangerous 防过度拦截：只有确定性证据
+ * （明确攻击工具 UA、IP 名单命中）才置危险标记；采集类工具与所有弱信号
+ * 一律不置危险。
+ *
+ * 采集/侦察/爬虫框架（severity 65：zgrab / crawler4j / Shodan / scrapy 等）
+ * **不在**危险名单内——这是设计选择，本测试把它固化为回归护栏，防止后续
+ * 误调 dangerToolSeverityThreshold 把采集类工具一并升级为危险。
+ */
 func TestBSANonDangerousSignalsStayNonDangerous(t *testing.T) {
 	t.Run("采集类工具不置危险", func(t *testing.T) {
 		for _, ua := range []string{"zgrab/0.x", "crawler4j", "Shodan", "python selenium"} {
@@ -521,17 +525,17 @@ func bsaLowerThanChallenge(a action.Type) bool {
 	}
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // 三、裁决第 3 条：常规自动化工具不得单独判死
-// ══════════════════════════════════════════════════════════════════════════
 
-// TestBSAAutomationToolsNeverFatal 双口径覆盖：
-//
-//	a) 诚实的最小头集（工具的真实形态）
-//	b) 全套浏览器头（伪装成浏览器）
-//
-// 两种形态下都不得落 drop/intercept。(b) 会被判为「伪装」而进入更高档位，
-// 这是设计意图（伪装本身是可疑信号），但仍不判死、且不得置危险。
+/**
+ * TestBSAAutomationToolsNeverFatal 双口径覆盖：
+ *
+ *	a) 诚实的最小头集（工具的真实形态）
+ *	b) 全套浏览器头（伪装成浏览器）
+ *
+ * 两种形态下都不得落 drop/intercept。(b) 会被判为「伪装」而进入更高档位，
+ * 这是设计意图（伪装本身是可疑信号），但仍不判死、且不得置危险。
+ */
 func TestBSAAutomationToolsNeverFatal(t *testing.T) {
 	tools := []string{
 		"curl/8.0", "curl/8.7.1", "wget/1.21",
@@ -561,15 +565,15 @@ func TestBSAAutomationToolsNeverFatal(t *testing.T) {
 	}
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // 四、双写分叉风险点：BotScoreInfo.Action 与 action.Result.Type 必须一致
-// ══════════════════════════════════════════════════════════════════════════
 
-// TestBSALoggedActionMatchesDisposition 覆盖五档全部边界：
-// 同一情形下 storeBotScore 写入日志的 Action 串与 verdictToResult 返回的
-// action.Result.Type 在 action.Normalize 归一化后必须相等。
-//
-// 这是主会话点名的「双写分叉风险点」：两处若各自维护映射表就会漂移。
+/**
+ * TestBSALoggedActionMatchesDisposition 覆盖五档全部边界：
+ * 同一情形下 storeBotScore 写入日志的 Action 串与 verdictToResult 返回的
+ * action.Result.Type 在 action.Normalize 归一化后必须相等。
+ *
+ * 这是主会话点名的「双写分叉风险点」：两处若各自维护映射表就会漂移。
+ */
 func TestBSALoggedActionMatchesDisposition(t *testing.T) {
 	highHeaders, highMethod, highPath, highTLS10 := bsaHighScoreRequest()
 
@@ -643,9 +647,7 @@ func TestBSALoggedActionMatchesDisposition(t *testing.T) {
 	}
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // 五、危险标记的传递与归因
-// ══════════════════════════════════════════════════════════════════════════
 
 // TestBSADangerFlagPropagatesToLog 断言落库的危险标记与判定一致，
 // 且非危险请求不带危险来源串。
@@ -676,9 +678,7 @@ func TestBSADangerFlagPropagatesToLog(t *testing.T) {
 	})
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // 六、行为模块接入：botPhase 的行为频率链路
-// ══════════════════════════════════════════════════════════════════════════
 
 // TestBSABehaviorWindowIsIsolatedFromRateLimiter 行为分使用独立窗口 key，
 // 不与限流阶段的计数叠加（否则限流阈值会被隐形减半）。
@@ -761,9 +761,7 @@ func TestBSABehaviorScoreAbsentWithoutLimiter(t *testing.T) {
 	})
 }
 
-// ══════════════════════════════════════════════════════════════════════════
 // 七、回归护栏：危险下界必须由真实链路带出，且不越界
-// ══════════════════════════════════════════════════════════════════════════
 
 // TestBSADangerFloorAppliesWithPlainConstructor 危险下界必须由
 // Execute → CheckBotTwoPhaseWithBehavior 这条真实链路带出，
@@ -801,13 +799,15 @@ func TestBSADangerFloorNeverExceedsChallengeAtLowScore(t *testing.T) {
 	}
 }
 
-// TestBSAThresholdGovernsDropBoundary 阈值决定 drop 边界：同一请求（89 分，
-// 无 GeoIP 命中），阈值 80 落 intercept，阈值 75 落 drop。这固化了
-// 「drop 档下界由 threshold 派生（9T/8）」这一契约。
-//
-// 注意：该样本不含 GeoIP 命中，89 分只是「无 GeoIP」这一子集的上限，
-// **不是**全局上限。含 GeoIP 命中的满分形态为 92 分，默认阈值即落 drop，
-// 见 TestBSADropReachableAtDefaultThreshold。
+/**
+ * TestBSAThresholdGovernsDropBoundary 阈值决定 drop 边界：同一请求（89 分，
+ * 无 GeoIP 命中），阈值 80 落 intercept，阈值 75 落 drop。这固化了
+ * 「drop 档下界由 threshold 派生（9T/8）」这一契约。
+ *
+ * 注意：该样本不含 GeoIP 命中，89 分只是「无 GeoIP」这一子集的上限，
+ * **不是**全局上限。含 GeoIP 命中的满分形态为 92 分，默认阈值即落 drop，
+ * 见 TestBSADropReachableAtDefaultThreshold。
+ */
 func TestBSAThresholdGovernsDropBoundary(t *testing.T) {
 	headers, method, path, tls10 := bsaHighScoreRequest()
 
@@ -845,15 +845,17 @@ func TestBSAThresholdGovernsDropBoundary(t *testing.T) {
 	}
 }
 
-// TestBSADropReachableAtDefaultThreshold 裁决第 4 条：默认阈值 80 下 drop 档可达。
-//
-// 【更正记录】此前本节断言「默认阈值下 drop 不可达」，该结论**有误**——漏算了
-// GeoIP 模块。ScoreIP 在同一 ASN 同时命中机房 ASN 与 VPN ASN 时可达 40 分
-// （25+15），再叠加高风险国家 20 分，模块上限 60；60×5% = 3 分。于是五模块
-// 满分形态为：UA 100×40%=40 + 指纹 100×25%=25 + 行为 100×15%=15
-// + GeoIP 60×5%=3 + 黑名单 IP 60×15%=9 = 92 ≥ 90 → TierDrop。
-//
-// 本测试用内嵌 GeoIP 夹具构造这一形态，断言默认阈值下的真实 drop 路径。
+/**
+ * TestBSADropReachableAtDefaultThreshold 裁决第 4 条：默认阈值 80 下 drop 档可达。
+ *
+ * 【更正记录】此前本节断言「默认阈值下 drop 不可达」，该结论**有误**——漏算了
+ * GeoIP 模块。ScoreIP 在同一 ASN 同时命中机房 ASN 与 VPN ASN 时可达 40 分
+ * （25+15），再叠加高风险国家 20 分，模块上限 60；60×5% = 3 分。于是五模块
+ * 满分形态为：UA 100×40%=40 + 指纹 100×25%=25 + 行为 100×15%=15
+ * + GeoIP 60×5%=3 + 黑名单 IP 60×15%=9 = 92 ≥ 90 → TierDrop。
+ *
+ * 本测试用内嵌 GeoIP 夹具构造这一形态，断言默认阈值下的真实 drop 路径。
+ */
 func TestBSADropReachableAtDefaultThreshold(t *testing.T) {
 	const ip = "8.8.8.8" // 夹具内唯一记录，同时命中 dcASN/vpnASN/高风险国家
 	geo := bsaGeoResolver(t)

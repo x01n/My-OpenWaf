@@ -1,6 +1,6 @@
 package store
 
-// SystemSettings is a generic key/value table for runtime configuration.
+// SystemSettings 是存放运行时配置的通用键值表。
 type SystemSettings struct {
 	ID    uint   `gorm:"primaryKey" json:"id"`
 	Key   string `gorm:"size:128;uniqueIndex;not null" json:"key"`
@@ -18,7 +18,7 @@ const (
 	SettingKeyHPKPReportOnlyValue = "hpkp_report_only_value"
 )
 
-// ConfigRevision is a monotonically increasing snapshot revision number.
+// ConfigRevision 是单调递增的快照修订号。
 type ConfigRevision struct {
 	ID       uint   `gorm:"primaryKey"`
 	Revision uint64 `gorm:"not null"`

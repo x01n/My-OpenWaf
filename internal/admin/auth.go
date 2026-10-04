@@ -14,8 +14,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// AuthDeps wires the dependencies needed by all auth-related handlers
-// (login/refresh/logout/me and session management).
+// AuthDeps 汇总全部认证相关 handler（login/refresh/logout/me 及会话管理）所需的依赖。
 type AuthDeps struct {
 	AccountRepo *repository.AdminAccountRepo
 	RTRepo      *repository.RefreshTokenRepo
@@ -47,7 +46,7 @@ func LoginHandler(d *AuthDeps) app.HandlerFunc {
 		clientIP := string(c.ClientIP())
 		userAgent := string(c.GetHeader("User-Agent"))
 
-		// Check brute force lockout.
+		// 检查暴力破解锁定。
 		if d.BruteForce != nil && d.BruteForce.IsLocked(clientIP, body.Username) {
 			remaining := d.BruteForce.LockoutRemaining(clientIP, body.Username)
 			c.JSON(429, map[string]any{
@@ -77,13 +76,13 @@ func LoginHandler(d *AuthDeps) app.HandlerFunc {
 			return
 		}
 
-		// Login successful — clear brute force counter.
+		// 登录成功——清除暴力破解计数。
 		if d.BruteForce != nil {
 			d.BruteForce.RecordSuccess(clientIP, body.Username)
 		}
 		recordLoginAttempt(d.DB, acct.Username, clientIP, userAgent, true)
 
-		// Determine role (default admin for backward compat if role column empty).
+		// 确定角色（role 列为空时按向后兼容默认 admin）。
 		role := acct.Role
 		if role == "" {
 			role = auth.RoleAdmin
@@ -265,8 +264,8 @@ func LogoutHandler(d *AuthDeps) app.HandlerFunc {
 			return
 		}
 
-		// Blacklist access token JTI.
-		// Logout is outside auth middleware, so parse the token here directly.
+		// 拉黑 access token 的 JTI。
+		// logout 不走认证中间件，因此这里直接解析令牌。
 		if d.TokenMgr != nil {
 			var blacklistErr error
 			if header := strings.TrimSpace(string(c.GetHeader("Authorization"))); header != "" {

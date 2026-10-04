@@ -82,15 +82,17 @@ func runShardAssembler(pageScript string) (captured string, err error) {
 	return caught, nil
 }
 
-// runOnOwnedLockedThread 在自持的独立 OS 线程上运行回调。
-// PageScript 每次运行都会新建 QuickJS 运行时，不需要像 jsplugin 的
-// 执行槽那样长期钉住同一条线程。
-//
-// 对本夹具的生命周期约定（由二分定位 crash 得出，勿改）：
-// quickjs-go v0.7.7 反复创建/回收 runtime 时，对 Eval 返回值、
-// 手建 window 对象调用 Free() 会触发 glibc "unaligned tcache chunk"
-// 崩溃；本夹具一律不手动 Free，交给 ctx.Close() 统一回收（Close
-// 内部会 Free 持有的 globals），24 轮实测稳定。
+/**
+ * runOnOwnedLockedThread 在自持的独立 OS 线程上运行回调。
+ * PageScript 每次运行都会新建 QuickJS 运行时，不需要像 jsplugin 的
+ * 执行槽那样长期钉住同一条线程。
+ *
+ * 对本夹具的生命周期约定（由二分定位 crash 得出，勿改）：
+ * quickjs-go v0.7.7 反复创建/回收 runtime 时，对 Eval 返回值、
+ * 手建 window 对象调用 Free() 会触发 glibc "unaligned tcache chunk"
+ * 崩溃；本夹具一律不手动 Free，交给 ctx.Close() 统一回收（Close
+ * 内部会 Free 持有的 globals），24 轮实测稳定。
+ */
 func runOnOwnedLockedThread(fn func()) {
 	done := make(chan struct{})
 	go func() {

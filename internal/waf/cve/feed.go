@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// CVEFeedManager manages background synchronisation of CVE data from external sources.
+// CVEFeedManager 管理从外部数据源后台同步 CVE 数据。
 type CVEFeedManager struct {
 	db                   *gorm.DB
 	detector             *CVEDetector
@@ -32,7 +32,7 @@ type CVEFeedManager struct {
 	syncing              bool
 }
 
-// CVERuleModel is the database model for CVE rules (auto-generated or user-created).
+// CVERuleModel 是 CVE 规则的数据库模型（自动生成或用户创建）。
 type CVERuleModel struct {
 	ID          uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt   time.Time      `json:"created_at"`
@@ -41,13 +41,13 @@ type CVERuleModel struct {
 	CVEID       string         `gorm:"size:32;index" json:"cve_id"`
 	Category    string         `gorm:"size:32" json:"category"`
 	Pattern     string         `gorm:"type:text" json:"pattern"`
-	Target      string         `gorm:"size:32" json:"target"` // url, body, header, cookie
+	Target      string         `gorm:"size:32" json:"target"` // 取值：url、body、header、cookie
 	Severity    string         `gorm:"size:16" json:"severity"`
 	Action      string         `gorm:"size:32;default:drop" json:"action"`
 	CaptchaType string         `gorm:"size:16" json:"captcha_type,omitempty"`
 	Enabled     bool           `gorm:"default:false" json:"enabled"`
 	Description string         `gorm:"type:text" json:"description"`
-	Source      string         `gorm:"size:32" json:"source"` // auto_generated, manual, nvd, github
+	Source      string         `gorm:"size:32" json:"source"` // 取值：auto_generated、manual、nvd、github
 	Approved    bool           `gorm:"default:false" json:"approved"`
 	CVSSScore   float64        `gorm:"default:0" json:"cvss_score"`
 	CWEType     string         `gorm:"size:32" json:"cwe_type"`
@@ -55,17 +55,17 @@ type CVERuleModel struct {
 	References string `gorm:"type:text" json:"references"`
 }
 
-// TableName for GORM.
+// TableName 指定 GORM 表名。
 func (CVERuleModel) TableName() string { return "cve_rules" }
 
-// SyncStatus reports the current state of the CVE feed sync.
+// SyncStatus 描述 CVE 订阅源同步的当前状态。
 type SyncStatus struct {
 	LastSync  time.Time `json:"last_sync"`
 	LastError string    `json:"last_error,omitempty"`
 	Syncing   bool      `json:"syncing"`
 }
 
-// NewCVEFeedManager creates a new feed manager.
+// NewCVEFeedManager 创建订阅源管理器。
 func NewCVEFeedManager(db *gorm.DB, detector *CVEDetector, interval time.Duration, nvdAPIKey string, autoApprove bool, log *slog.Logger) *CVEFeedManager {
 	return NewCVEFeedManagerWithFeed(db, detector, interval, nvdAPIKey, autoApprove, true, log)
 }
@@ -86,15 +86,15 @@ func NewCVEFeedManagerWithFeed(db *gorm.DB, detector *CVEDetector, interval time
 	}
 }
 
-// Start begins the background sync loop. Non-blocking.
+// Start 启动后台同步循环，不阻塞调用方。
 func (m *CVEFeedManager) Start() {
-	// Auto-migrate the table.
+	// 自动迁移建表
 	if err := m.db.AutoMigrate(&CVERuleModel{}); err != nil {
 		m.log.Error("cve_feed: failed to migrate cve_rules table", slog.String("error", err.Error()))
 		return
 	}
 
-	// Load existing rules into the detector.
+	// 把已有规则载入检测器
 	m.loadRulesIntoDetector()
 	if !m.feedEnabled {
 		m.log.Info("cve_feed: background sync disabled")
@@ -105,7 +105,7 @@ func (m *CVEFeedManager) Start() {
 	m.log.Info("cve_feed: started", slog.Duration("interval", m.syncInterval))
 }
 
-// Stop signals the background loop to exit.
+// Stop 通知后台循环退出。
 func (m *CVEFeedManager) Stop() {
 	if m == nil || !m.feedEnabled {
 		return
@@ -117,12 +117,12 @@ func (m *CVEFeedManager) Stop() {
 	})
 }
 
-// SyncNow triggers an immediate sync (blocking).
+// SyncNow 触发一次立即同步（阻塞）。
 func (m *CVEFeedManager) SyncNow() error {
 	return m.doSync()
 }
 
-// GetSyncStatus returns the current sync status.
+// GetSyncStatus 返回当前同步状态。
 func (m *CVEFeedManager) GetSyncStatus() SyncStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -138,7 +138,7 @@ func (m *CVEFeedManager) ReloadRules() {
 }
 
 func (m *CVEFeedManager) loop() {
-	// Run once at startup (non-fatal).
+	// 启动时先跑一次（失败不影响启动）
 	_ = m.doSync()
 
 	ticker := time.NewTicker(m.syncInterval)
@@ -180,7 +180,7 @@ func (m *CVEFeedManager) doSync() error {
 		errs = append(errs, "github: "+err.Error())
 	}
 
-	// Reload rules into the detector.
+	// 把规则重新载入检测器
 	m.loadRulesIntoDetector()
 
 	m.mu.Lock()
@@ -412,10 +412,10 @@ func (m *CVEFeedManager) fetchNVDPage(client *http.Client, apiURL string, startI
 }
 
 func (m *CVEFeedManager) processNVDCVE(cve nvdCVE) bool {
-	// Check if rule already exists.
+	// 查重：规则是否已存在
 	var existing CVERuleModel
 	if err := m.db.Where("cve_id = ? AND source = ?", cve.ID, "nvd").First(&existing).Error; err == nil {
-		return false // already exists
+		return false // 已存在
 	}
 
 	desc := ""
@@ -562,7 +562,7 @@ func (m *CVEFeedManager) fetchFromGitHubAdvisory() error {
 		if adv.CVEID == "" {
 			continue
 		}
-		// Only process web-related ecosystems.
+		// 只处理与 Web 相关的包生态
 		relevant := false
 		for _, v := range adv.Vulnerabilities {
 			eco := strings.ToLower(v.Package.Ecosystem)
@@ -575,7 +575,7 @@ func (m *CVEFeedManager) fetchFromGitHubAdvisory() error {
 			continue
 		}
 
-		// Check if already exists.
+		// 查重：是否已存在
 		var existing CVERuleModel
 		if err := m.db.Where("cve_id = ? AND source = ?", adv.CVEID, "github").First(&existing).Error; err == nil {
 			continue
@@ -604,7 +604,7 @@ func (m *CVEFeedManager) fetchFromGitHubAdvisory() error {
 	return nil
 }
 
-// generateRule creates a CVERuleModel from CVE metadata by mapping CWE to detection patterns.
+// generateRule 由 CVE 元信息生成 CVERuleModel，把 CWE 类型映射为检测正则。
 func (m *CVEFeedManager) generateRule(cveID, description string, cvssScore float64, cweType string) *CVERuleModel {
 	pattern, target, category := cweToPattern(cweType, description)
 	if pattern == "" {
@@ -636,36 +636,36 @@ func (m *CVEFeedManager) generateRule(cveID, description string, cvssScore float
 	}
 }
 
-// cweToPattern maps CWE types to generic detection regex patterns.
+// cweToPattern 把 CWE 类型映射为通用检测正则。
 func cweToPattern(cweType, description string) (pattern, target, category string) {
 	switch cweType {
-	case "CWE-89": // SQL Injection
+	case "CWE-89": // SQL 注入
 		return `(?i)(\b(union|select|insert|update|delete|drop)\b.*\b(from|into|table|where)\b)`, "all", "general"
 	case "CWE-79": // XSS
 		return `(?i)(<script[^>]*>|javascript:|on\w+\s*=)`, "all", "general"
-	case "CWE-78", "CWE-77": // OS Command Injection
+	case "CWE-78", "CWE-77": // OS 命令注入
 		return `(?i)(;\s*(ls|cat|id|whoami|uname|rm|wget|curl)\b|\|\s*(cat|id|whoami))`, "all", "general"
-	case "CWE-22": // Path Traversal
+	case "CWE-22": // 路径遍历
 		return `(?i)(\.\.(/|\\|%2[fF]|%5[cC])){2,}`, "url", "general"
 	case "CWE-611": // XXE
 		return `(?i)(<!DOCTYPE\s.*<!ENTITY\s|SYSTEM\s+["']file://)`, "body", "general"
 	case "CWE-918": // SSRF
 		return `(?i)(https?://(10\.\d|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.0\.0\.|169\.254\.169\.254|localhost))`, "all", "general"
-	case "CWE-502": // Deserialization
+	case "CWE-502": // 反序列化
 		return `(?i)(O:\d+:"|@type|java\.lang\.Runtime|__proto__)`, "all", "general"
-	case "CWE-94", "CWE-95": // Code Injection
+	case "CWE-94", "CWE-95": // 代码注入
 		return `(?i)(eval\s*\(|exec\s*\(|system\s*\(|child_process)`, "all", "general"
-	case "CWE-113": // CRLF Injection
+	case "CWE-113": // CRLF 注入
 		return `(?i)(%0[dD]%0[aA])`, "all", "general"
-	case "CWE-352": // CSRF (less useful for WAF but can flag)
+	case "CWE-352": // CSRF（对 WAF 价值有限，但仍可标记）
 		return "", "", ""
 	default:
-		// Try to extract patterns from the description keywords.
+		// 退回按描述关键词提取特征
 		return descriptionToPattern(description)
 	}
 }
 
-// descriptionToPattern attempts to generate a detection pattern from CVE description text.
+// descriptionToPattern 尝试从 CVE 描述文本生成检测正则。
 func descriptionToPattern(desc string) (pattern, target, category string) {
 	dl := strings.ToLower(desc)
 	switch {
@@ -682,7 +682,7 @@ func descriptionToPattern(desc string) (pattern, target, category string) {
 	case strings.Contains(dl, "deserialization"):
 		return `(?i)(O:\d+:"|@type|java\.lang\.Runtime)`, "all", "general"
 	default:
-		return "", "", "" // Cannot generate a useful pattern.
+		return "", "", "" // 无法生成可用的正则
 	}
 }
 

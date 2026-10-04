@@ -9,9 +9,9 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// AutoMigrate applies schema for all domain models.
+// AutoMigrate 为全部领域模型应用表结构。
 func AutoMigrate(db *gorm.DB) error {
-	// Run data migrations first
+	// 先跑数据迁移
 	if err := migrations.V2MigrateSingleSite(db); err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
-	// Then apply schema migrations
+	// 再应用表结构迁移
 	if err := db.AutoMigrate(
 		&Certificate{},
 		&Policy{},
@@ -102,9 +102,9 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
-	// V6 and V11 need both legacy sites and the system_settings marker table.
-	// Running them again after schema migration handles older databases that did
-	// not yet have system_settings when the pre-schema data migrations ran.
+	// V6 与 V11 同时依赖 legacy sites 表和 system_settings 标记表。
+	// 在表结构迁移之后再跑一次，可覆盖那些在「表结构迁移之前的数据迁移」
+	// 阶段还没有 system_settings 的旧库。
 	if err := migrations.V6MigrateSiteTLSMinVersionInheritance(db); err != nil {
 		return err
 	}

@@ -151,13 +151,15 @@ func asmPlaceholderSyntheticLegacy() string {
 	return "(0,eval)(code);"
 }
 
-// applyAssetURLs 把引导脚本里的资产 URL 占位符替换为带内容派生版本串的
-// 真实 URL（见 powdata 包）。
-//
-// 为什么不在 const 里写死 URL：`/__owaf/pow.wasm` 与 `/__owaf/pow_glue.js`
-// 用 immutable 下发，URL 必须随资产内容变，否则换资产后老访客会继续用旧文件。
-// 为什么用占位符 + 渲染期替换：本文件是 const 拼接（无 Sprintf 槽位），
-// 而版本串要在运行时取。
+/**
+ * applyAssetURLs 把引导脚本里的资产 URL 占位符替换为带内容派生版本串的
+ * 真实 URL（见 powdata 包）。
+ *
+ * 为什么不在 const 里写死 URL：`/__owaf/pow.wasm` 与 `/__owaf/pow_glue.js`
+ * 用 immutable 下发，URL 必须随资产内容变，否则换资产后老访客会继续用旧文件。
+ * 为什么用占位符 + 渲染期替换：本文件是 const 拼接（无 Sprintf 槽位），
+ * 而版本串要在运行时取。
+ */
 func applyAssetURLs(script string) string {
 	r := strings.NewReplacer(
 		"__OWAF_WASM_URL__", challenge.PowWasmURL(),

@@ -70,11 +70,13 @@ func TestSmugglingSniffVectors(t *testing.T) {
 	}
 }
 
-// TestRequestSmugglingSniffParsedResidualWritesEvent 覆盖解析层残留形态的
-// 事件断言：hertz Set("Content-Length", <非法>) 会把非法值静默吞掉（CL 归 0、
-// 行不枚举），VisitAll 无法重现该类残留；因此以 TE 畸形值这一残留模拟验证
-// 接线与写入。真实线上这些形态同样会被解析层拒绝，测试只证明「若漏入
-// handler 必留下审计证据」这一兜底契约。
+/**
+ * TestRequestSmugglingSniffParsedResidualWritesEvent 覆盖解析层残留形态的
+ * 事件断言：hertz Set("Content-Length", <非法>) 会把非法值静默吞掉（CL 归 0、
+ * 行不枚举），VisitAll 无法重现该类残留；因此以 TE 畸形值这一残留模拟验证
+ * 接线与写入。真实线上这些形态同样会被解析层拒绝，测试只证明「若漏入
+ * handler 必留下审计证据」这一兜底契约。
+ */
 func TestRequestSmugglingSniffParsedResidualWritesEvent(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -210,8 +212,10 @@ func TestRequestHasSmugglingRelevantHeadersMatchesReplay(t *testing.T) {
 	}
 }
 
-// replayedLinesContainCLTE 逐行判断重演结果是否含 Content-Length 或
-// Transfer-Encoding 行，是走私类型覆盖分析的独立实现。
+/**
+ * replayedLinesContainCLTE 逐行判断重演结果是否含 Content-Length 或
+ * Transfer-Encoding 行，是走私类型覆盖分析的独立实现。
+ */
 func replayedLinesContainCLTE(lines string) bool {
 	for _, line := range strings.Split(lines, "\n") {
 		colon := strings.IndexByte(line, ':')

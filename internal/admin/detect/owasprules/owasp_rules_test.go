@@ -243,32 +243,32 @@ func TestShouldSkipRuleBoundary(t *testing.T) {
 		"owasp:sqli:003":   {Enabled: &truePtr},
 	}
 
-	// disabled rule should skip
+	// 停用的规则应跳过
 	if !owasp.ShouldSkipRule("owasp:upload:001", "/admin", overrides) {
 		t.Error("disabled rule should skip")
 	}
 
-	// whitelisted path should skip
+	// 白名单路径应跳过
 	if !owasp.ShouldSkipRule("owasp:upload:003", "/safe", overrides) {
 		t.Error("whitelisted path should skip")
 	}
 
-	// non-whitelisted non-disabled should not skip
+	// 既未白名单也未停用的不应跳过
 	if owasp.ShouldSkipRule("owasp:upload:003", "/admin", overrides) {
 		t.Error("non-whitelisted should not skip")
 	}
 
-	// enabled rule with no whitelist should not skip
+	// 启用且无白名单的规则不应跳过
 	if owasp.ShouldSkipRule("owasp:sqli:003", "/admin", overrides) {
 		t.Error("enabled rule should not skip")
 	}
 
-	// test wildcard *
+	// 测试通配符 *
 	if !owasp.ShouldSkipRule("owasp:upload:003", "/anything", map[string]owasp.OWASPRuleOverride{"owasp:upload:003": {Whitelist: []string{"*"}}}) {
 		t.Error("wildcard whitelist should skip")
 	}
 
-	// test exact path match
+	// 测试精确路径匹配
 	exactOverrides := map[string]owasp.OWASPRuleOverride{"owasp:upload:003": {Whitelist: []string{"/exact"}}}
 	if !owasp.ShouldSkipRule("owasp:upload:003", "/exact", exactOverrides) {
 		t.Error("exact path whitelist should skip")
@@ -277,7 +277,7 @@ func TestShouldSkipRuleBoundary(t *testing.T) {
 		t.Error("exact path whitelist should not skip subpath")
 	}
 
-	// test prefix match (use /prefix* to indicate wildcard prefix)
+	// 测试前缀匹配（用 /prefix* 表示通配前缀）
 	prefixOverrides := map[string]owasp.OWASPRuleOverride{"owasp:upload:003": {Whitelist: []string{"/prefix*"}}}
 	if !owasp.ShouldSkipRule("owasp:upload:003", "/prefix/sub", prefixOverrides) {
 		t.Error("prefix whitelist should skip subpath")

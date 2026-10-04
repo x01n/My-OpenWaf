@@ -16,8 +16,10 @@ import (
 	"github.com/x01n/http2/hpack"
 )
 
-// TestIsH2ExtendedWebSocketConnect 验证扩展 CONNECT 识别只看
-// CONNECT 方法与 ":protocol" 伪头，不依赖 Upgrade/Connection 残留。
+/**
+ * TestIsH2ExtendedWebSocketConnect 验证扩展 CONNECT 识别只看
+ * CONNECT 方法与 ":protocol" 伪头，不依赖 Upgrade/Connection 残留。
+ */
 func TestIsH2ExtendedWebSocketConnect(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -94,8 +96,10 @@ func TestH2DirectUpstreamTarget(t *testing.T) {
 	}
 }
 
-// TestSanitizeWebSocketUpgradeResponseHeadersKeepsSecHeaders 验证畸形握手
-// 净化：hop-by-hop 被剔除、Sec-* 保留。
+/**
+ * TestSanitizeWebSocketUpgradeResponseHeadersKeepsSecHeaders 验证畸形握手
+ * 净化：hop-by-hop 被剔除、Sec-* 保留。
+ */
 func TestSanitizeWebSocketUpgradeResponseHeadersKeepsSecHeaders(t *testing.T) {
 	raw := "Sec-WebSocket-Accept: abc\r\n" +
 		"Sec-WebSocket-Protocol: chat\r\n" +
@@ -122,9 +126,11 @@ func TestSanitizeWebSocketUpgradeResponseHeadersKeepsSecHeaders(t *testing.T) {
 	}
 }
 
-// TestDialH2CExtendedConnectHandshakeAndBidirectionalData 在 dataplane 层
-// 直接驱动 h2c 直通帧流：mock 上游负责 SETTINGS 与响应头，验证握手与
-// 双向 DATA 字节一致。
+/**
+ * TestDialH2CExtendedConnectHandshakeAndBidirectionalData 在 dataplane 层
+ * 直接驱动 h2c 直通帧流：mock 上游负责 SETTINGS 与响应头，验证握手与
+ * 双向 DATA 字节一致。
+ */
 func TestDialH2CExtendedConnectHandshakeAndBidirectionalData(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

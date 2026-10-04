@@ -1133,8 +1133,8 @@ func TestDualIdemWindowCrossRotationHasNoEffect(t *testing.T) {
  * setSecureFetchHeaders 把一组 Sec-Fetch-* 头写入请求，模拟浏览器/脚本上下文。
  * 取值为实测所得（真实 Chromium 抓头）：
  *
- *	fetch/XHR          -> Dest: empty, Mode: cors
- *	表单 POST / reload -> Dest: document, Mode: navigate
+ *   fetch/XHR          -> Dest: empty, Mode: cors
+ *   表单 POST / reload -> Dest: document, Mode: navigate
  */
 func setSecureFetchHeaders(c *app.RequestContext, dest, mode string) {
 	if dest != "" {

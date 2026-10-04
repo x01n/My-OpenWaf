@@ -136,7 +136,7 @@ func TestRedisKVIncrUsesFixedWindowTTL(t *testing.T) {
 	}
 }
 
-// newKVTestClient constructs a rueidis test client for the given address.
+// newKVTestClient 为给定地址构造一个 rueidis 测试客户端。
 func newKVTestClient(t *testing.T, addr string) rueidis.Client {
 	t.Helper()
 	client, err := rueidis.NewClient(rueidis.ClientOption{

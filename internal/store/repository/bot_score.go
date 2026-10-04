@@ -14,7 +14,7 @@ func NewBotScoreRepo(db *gorm.DB) *BotScoreRepo {
 	return &BotScoreRepo{db: db}
 }
 
-// BotScoreFilter holds query filters for listing bot score logs.
+// BotScoreFilter 保存列出 Bot 评分日志所用的查询过滤条件。
 type BotScoreFilter struct {
 	ClientIP  string
 	Host      string
@@ -35,7 +35,7 @@ func (r *BotScoreRepo) Create(item *store.BotScoreLog) error {
 	return r.db.Create(item).Error
 }
 
-// BatchCreate inserts multiple bot score logs in a single transaction.
+// BatchCreate 在单个事务中插入多条 Bot 评分日志。
 func (r *BotScoreRepo) BatchCreate(items []store.BotScoreLog) error {
 	if len(items) == 0 {
 		return nil
@@ -59,7 +59,7 @@ func (r *BotScoreRepo) List(offset, limit int, f BotScoreFilter) ([]store.BotSco
 	return items, total, nil
 }
 
-// BotScoreStats holds aggregated bot detection statistics.
+// BotScoreStats 保存聚合后的 Bot 检测统计。
 type BotScoreStats struct {
 	Total24h    int64   `json:"total_24h"`
 	Blocked24h  int64   `json:"blocked_24h"`

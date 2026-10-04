@@ -6,8 +6,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// V4MigrateRecordedResourceQueryString expands the recorded resource identity
-// from method+host+path to method+host+path+query_string.
+// V4MigrateRecordedResourceQueryString 把已记录资源的身份标识
+// 由 method+host+path 扩展为 method+host+path+query_string。
 func V4MigrateRecordedResourceQueryString(db *gorm.DB) error {
 	if !db.Migrator().HasTable(&recordedResourceTable{}) {
 		return nil

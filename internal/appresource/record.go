@@ -7,7 +7,7 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// Record field length limits aligned with store schema sizes.
+// Record 各字段长度上限，与 store 库表尺寸对齐。
 const (
 	recordQueryStringLimit    = 2048
 	recordContentTypeLimit    = 256
@@ -20,7 +20,16 @@ const (
 	recordMatchedRuleIDsLimit = 512
 )
 
-// BuildRecordedResource builds a persistence row from matched rule ids and material.
+/**
+ * BuildRecordedResource 由命中的规则 ID 与 material 构建一条落库记录。
+ *
+ * 命中列表中的首个 ID 另存为 primaryRuleID，便于按主规则归因。
+ *
+ * @param siteID 站点 ID。
+ * @param matched 命中的规则 ID 列表。
+ * @param m 请求/响应提取出的 material；为 nil 时返回 nil。
+ * @return 待持久化的资源记录。
+ */
 func BuildRecordedResource(siteID uint, matched []uint, m *Material) *store.RecordedResource {
 	if m == nil {
 		return nil

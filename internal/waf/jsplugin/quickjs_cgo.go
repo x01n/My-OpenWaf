@@ -22,13 +22,23 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// RuntimeBackend reports the JavaScript executor compiled into this binary.
+// RuntimeBackend 报告本二进制编译进的 JavaScript 执行器后端。
 func RuntimeBackend() string { return BackendQuickJS }
 
-// RuntimeAvailable reports whether this build can create a JavaScript executor.
+// RuntimeAvailable 报告本构建能否创建 JavaScript 执行器。
 func RuntimeAvailable() bool { return true }
 
-// Compile validates a QuickJS plugin and returns an immutable script descriptor.
+/**
+ * Compile 编译校验一个 QuickJS 插件，返回不可变的脚本描述符。
+ *
+ * 编译期即拒绝空源码、超限源码、语法错误与缺少默认导出的模块，
+ * 让配置错误在保存时暴露，而不是等到数据面请求才失败。
+ *
+ * @param name 脚本名；opts.Name 为空时作为兜底名称。
+ * @param source 脚本源码，须是单个默认导出的 ES module。
+ * @param opts 资源上限与站点作用域等运行选项。
+ * @return 不可变的 Script；校验失败时返回错误。
+ */
 func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 	if opts.Name == "" {
 		opts.Name = name
@@ -69,8 +79,8 @@ func Compile(name, source string, opts ScriptOptions) (*Script, error) {
 func validateSource(source, transformed string, memoryLimit, stackLimit uint64, validationTimeout time.Duration) error {
 	var result error
 	runOnThread(func() {
-		// runOnThread owns all native handles on one pinned goroutine. The library's
-		// stack-based owner check is redundant here and dominates short executions.
+		// runOnThread 把全部原生句柄收拢到同一条固定 goroutine 上；库自带的
+		// 调用栈属主检查在这里是多余的，且开销盖过了短执行本身。
 		rt := quickjs.NewRuntime(
 			quickjs.WithMemoryLimit(memoryLimit),
 			quickjs.WithMaxStackSize(stackLimit),
@@ -201,15 +211,22 @@ func transformedSource(source string) (string, error) {
 	return transformed.String(), nil
 }
 
-// NewEngine creates a bounded pool of owner-goroutine QuickJS execution slots.
+/**
+ * NewEngine 创建一个有界的、由属主 goroutine 独占的 QuickJS 执行槽池。
+ *
+ * @param opts 槽池大小、编译缓存容量与单脚本资源上限。
+ * @return 就绪的 Engine；任一槽初始化失败时返回错误。
+ */
 func NewEngine(opts EngineOptions) (*Engine, error) {
 	return NewEngineWithLogger(opts, nil)
 }
 
-// NewEngineWithLogger 与 NewEngine 相同，额外指定脚本失败日志的落点。
-//
-// logger 为 nil 时回退 slog 默认 logger；失败汇总表始终创建，管理端因此
-// 在任何装配路径下都能读到「脚本上次执行错误」。
+/**
+ * NewEngineWithLogger 与 NewEngine 相同，额外指定脚本失败日志的落点。
+ *
+ * logger 为 nil 时回退 slog 默认 logger；失败汇总表始终创建，管理端因此
+ * 在任何装配路径下都能读到「脚本上次执行错误」。
+ */
 func NewEngineWithLogger(opts EngineOptions, log *slog.Logger) (*Engine, error) {
 	normalized, err := opts.normalized()
 	if err != nil {
@@ -231,7 +248,11 @@ func NewEngineWithLogger(opts EngineOptions, log *slog.Logger) (*Engine, error) 
 	return e, nil
 }
 
-// Engine executes scripts through a bounded QuickJS slot pool.
+/**
+ * Engine 通过有界的 QuickJS 槽池执行脚本。
+ *
+ * 每个槽独占一条锁定 OS 线程，原生 QuickJS 句柄因此不跨 goroutine 共享。
+ */
 type Engine struct {
 	opts      EngineOptions
 	slots     []*executionSlot
@@ -280,8 +301,8 @@ type compiledScript struct {
 func (s *executionSlot) run(opts EngineOptions) {
 	goruntime.LockOSThread()
 	defer goruntime.UnlockOSThread()
-	// The slot goroutine owns this locked OS thread for its full lifetime, so
-	// native QuickJS access cannot race across goroutines.
+	// 槽 goroutine 终生独占这条锁定的 OS 线程，原生 QuickJS 访问因此
+	// 不可能跨 goroutine 竞争。
 	s.rt = quickjs.NewRuntime(
 		quickjs.WithMemoryLimit(opts.MemoryLimit),
 		quickjs.WithMaxStackSize(opts.StackLimit),
@@ -321,8 +342,8 @@ func (s *executionSlot) run(opts EngineOptions) {
 		}
 		select {
 		case request := <-s.requests:
-			// Close may race with receiving a queued request. Never start a
-			// request after the slot has entered its shutdown state.
+			// Close 可能与本槽接收排队请求竞争：槽一旦进入关闭状态，
+			// 就绝不再启动新请求。
 			select {
 			case <-s.stop:
 				request.result <- executionResult{err: ErrEngineClosed}
@@ -595,34 +616,34 @@ func validateMutationPlanResultShape(result *quickjs.Value, isResponse bool) err
 
 // allowedMutationPlanField 见 plan_contract.go，与 mutationPlanAliases 同表同源。
 
-// Execute implements Executor for the QuickJS engine.
+// Execute 为 QuickJS 引擎实现 Executor 接口。
 func (e *Engine) Execute(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
 	return e.Evaluate(ctx, script, req)
 }
 
-// Evaluate executes one request, returning an empty plan on every error.
+// Evaluate 执行一次请求执行；任何错误都返回空计划。
 func (e *Engine) Evaluate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
 	return e.evaluate(ctx, script, req, store.JSStageRequest, true)
 }
 
-// Validate executes a compiled script with production limits without changing
-// request-runtime counters. Snapshot and admin validation use this path.
+// Validate 以生产限额执行已编译脚本，但不改动请求期运行统计。
+// 快照期与管理端校验走这条路径。
 func (e *Engine) Validate(ctx context.Context, script *Script, req RequestSnapshot) (MutationPlan, error) {
 	return e.evaluate(ctx, script, req, store.JSStageRequest, false)
 }
 
-// ExecuteResponse implements ResponseExecutor for the QuickJS engine.
+// ExecuteResponse 为 QuickJS 引擎实现 ResponseExecutor 接口。
 func (e *Engine) ExecuteResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
 	return e.EvaluateResponse(ctx, script, resp)
 }
 
-// EvaluateResponse executes one response, returning an empty plan on every error.
+// EvaluateResponse 执行一次响应执行；任何错误都返回空计划。
 func (e *Engine) EvaluateResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
 	return e.evaluateResponse(ctx, script, resp, true)
 }
 
-// ValidateResponse executes a compiled response script with production limits
-// without changing request-runtime counters. Snapshot and admin validation use this path.
+// ValidateResponse 以生产限额执行已编译的响应脚本，但不改动请求期运行统计。
+// 快照期与管理端校验走这条路径。
 func (e *Engine) ValidateResponse(ctx context.Context, script *Script, resp ResponseSnapshot) (ResponseMutationPlan, error) {
 	return e.evaluateResponse(ctx, script, resp, false)
 }
@@ -726,7 +747,11 @@ func applyResponseExecutionResult(result executionResult) (ResponseMutationPlan,
 	return result.respPlan, result.err
 }
 
-// Close stops all execution slots and releases every native QuickJS handle.
+/**
+ * Close 停止所有执行槽并释放全部原生 QuickJS 句柄。
+ *
+ * 通过 closeOnce 保证只执行一次；对 nil 引擎调用是安全的空操作。
+ */
 func (e *Engine) Close() error {
 	if e == nil {
 		return nil

@@ -6,11 +6,13 @@ import (
 	"testing"
 )
 
-// TestSensitiveLogValueHintsCoverPattern 是防漏改回归：
-// sanitizeLogText 用 sensitiveLogValueHints 做前置短路，一旦正则新增了关键字
-// 而 hints 未同步，该关键字的取值将不再被遮蔽——属于静默的凭据泄漏。
-//
-// 这里对正则首个捕获组中的每个字面量构造样本，逐一验证仍会被脱敏。
+/**
+ * TestSensitiveLogValueHintsCoverPattern 是防漏改回归：
+ * sanitizeLogText 用 sensitiveLogValueHints 做前置短路，一旦正则新增了关键字
+ * 而 hints 未同步，该关键字的取值将不再被遮蔽——属于静默的凭据泄漏。
+ *
+ * 这里对正则首个捕获组中的每个字面量构造样本，逐一验证仍会被脱敏。
+ */
 func TestSensitiveLogValueHintsCoverPattern(t *testing.T) {
 	// 与 sensitiveLogValuePattern 首个捕获组一致的关键字清单。
 	// api[_-]?key 与 auth[_-]?token 展开为各自的三种写法。
@@ -62,8 +64,10 @@ func TestSanitizeLogTextLeavesPlainTextUntouched(t *testing.T) {
 	}
 }
 
-// TestSanitizeLogTextRedactsOnlyValue 验证只遮蔽取值，保留键名与分隔符，
-// 便于排障时仍能看出出现过哪个字段。
+/**
+ * TestSanitizeLogTextRedactsOnlyValue 验证只遮蔽取值，保留键名与分隔符，
+ * 便于排障时仍能看出出现过哪个字段。
+ */
 func TestSanitizeLogTextRedactsOnlyValue(t *testing.T) {
 	got := sanitizeLogText("user=admin&password=hunter2&page=1")
 	if !strings.Contains(got, "user=admin") {
@@ -93,8 +97,10 @@ func TestSanitizeLogTextRedactsWhitespaceDelimitedOpaqueValue(t *testing.T) {
 	}
 }
 
-// TestIsSensitiveLogKeyLoweredMatchesWrapper 验证两个版本判定一致，
-// 且 Lowered 版对已小写输入免去重复转换。
+/**
+ * TestIsSensitiveLogKeyLoweredMatchesWrapper 验证两个版本判定一致，
+ * 且 Lowered 版对已小写输入免去重复转换。
+ */
 func TestIsSensitiveLogKeyLoweredMatchesWrapper(t *testing.T) {
 	cases := []struct {
 		key  string
@@ -121,8 +127,10 @@ func TestIsSensitiveLogKeyLoweredMatchesWrapper(t *testing.T) {
 	}
 }
 
-// TestContainsSensitiveLogHintFoldMatchesOldSemantics 把新扫描器与
-// 旧「ToLower + Contains」语义做逐用例等价对照，防止快路径引入漏判。
+/**
+ * TestContainsSensitiveLogHintFoldMatchesOldSemantics 把新扫描器与
+ * 旧「ToLower + Contains」语义做逐用例等价对照，防止快路径引入漏判。
+ */
 func TestContainsSensitiveLogHintFoldMatchesOldSemantics(t *testing.T) {
 	oldStyle := func(value string) bool {
 		if value == "" {

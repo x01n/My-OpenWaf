@@ -40,7 +40,7 @@ const (
 	hotCacheFailureBackoff = 5 * time.Second
 )
 
-// NewHotCache creates a Redis-backed hot data cache. Returns a no-op instance if redis is nil.
+// NewHotCache 创建 Redis 支撑的热数据缓存；redis 为 nil 时返回空操作实例。
 func NewHotCache(redis rueidis.Client, log *slog.Logger) *HotCache {
 	if log == nil {
 		log = slog.Default()
@@ -73,7 +73,7 @@ func (h *HotCache) SetRedis(redis rueidis.Client) {
 	h.mu.Unlock()
 }
 
-// Get retrieves a cached JSON value. Returns false on miss or when Redis is unavailable.
+// Get 取出缓存的 JSON 值；未命中或 Redis 不可用时返回 false。
 func (h *HotCache) Get(key string, dest any) bool {
 	if !h.Available() {
 		return false
@@ -168,7 +168,7 @@ func (h *HotCache) ErrorCount() int64 {
 	return h.errs.Load()
 }
 
-// Set stores a value as JSON with the given TTL.
+// Set 按给定 TTL 以 JSON 形式写入一个值。
 func (h *HotCache) Set(key string, value any, ttl time.Duration) {
 	if !h.Available() {
 		return
@@ -190,7 +190,7 @@ func (h *HotCache) Set(key string, value any, ttl time.Duration) {
 	h.noteHealthy(client)
 }
 
-// SetBytes stores raw bytes with the given TTL (for pre-serialized data).
+// SetBytes 按给定 TTL 写入原始字节（用于已预先序列化的数据）。
 func (h *HotCache) SetBytes(key string, data []byte, ttl time.Duration) {
 	if !h.Available() {
 		return
@@ -208,7 +208,7 @@ func (h *HotCache) SetBytes(key string, data []byte, ttl time.Duration) {
 	h.noteHealthy(client)
 }
 
-// GetBytes retrieves raw bytes. Returns nil on miss.
+// GetBytes 取出原始字节；未命中返回 nil。
 func (h *HotCache) GetBytes(key string) []byte {
 	if !h.Available() {
 		return nil
@@ -231,7 +231,7 @@ func (h *HotCache) GetBytes(key string) []byte {
 	return data
 }
 
-// Invalidate removes a specific cache key.
+// Invalidate 删除指定缓存键。
 func (h *HotCache) Invalidate(key string) {
 	client := h.redisClient()
 	if client == nil {
@@ -242,8 +242,11 @@ func (h *HotCache) Invalidate(key string) {
 	client.Do(ctx, client.B().Del().Key(h.prefix+key).Build())
 }
 
-// InvalidatePattern removes all keys matching the glob pattern.
-// Use with caution — SCAN-based deletion can be expensive on large keyspaces.
+/**
+ * InvalidatePattern 删除所有匹配 glob 模式的键。
+ *
+ * 慎用：在大 keyspace 上基于 SCAN 的删除开销很高。
+ */
 func (h *HotCache) InvalidatePattern(pattern string) {
 	client := h.redisClient()
 	if client == nil {
@@ -268,7 +271,7 @@ func (h *HotCache) InvalidatePattern(pattern string) {
 	}
 }
 
-// Available returns true if Redis is connected.
+// Available 报告 Redis 当前是否可用。
 func (h *HotCache) Available() bool {
 	if h.redisClient() == nil {
 		return false
@@ -277,11 +280,13 @@ func (h *HotCache) Available() bool {
 	return until == 0 || time.Now().UnixNano() >= until
 }
 
-// GetOrLoad implements the read-through pattern: try cache first, on miss call loader,
-// cache the result, and return it. If loader returns an error, the cache is not populated.
-//
-// 并发同 key 的回源加载通过 singleflight 合并，避免缓存击穿：只有一个 goroutine
-// 真正执行 loader，其余共享其结果，再各自 json 反序列化到自己的 dest。
+/**
+ * GetOrLoad 实现读穿（read-through）模式：先查缓存，未命中则调用 loader，
+ * 把结果写入缓存后返回；loader 返回错误时不写缓存。
+ *
+ * 并发同 key 的回源加载通过 singleflight 合并，避免缓存击穿：只有一个 goroutine
+ * 真正执行 loader，其余共享其结果，再各自 json 反序列化到自己的 dest。
+ */
 func (h *HotCache) GetOrLoad(key string, dest any, ttl time.Duration, loader func() (any, error)) error {
 	if h.Get(key, dest) {
 		return nil
@@ -310,15 +315,21 @@ func (h *HotCache) GetOrLoad(key string, dest any, ttl time.Duration, loader fun
 	return json.Unmarshal(raw.([]byte), dest)
 }
 
-// ListCache stores paginated list results in Redis with short TTL.
-// Suitable for large query results like security events and access logs.
+/**
+ * ListCacheEntry 是写入 Redis 的分页列表结果，使用短 TTL。
+ *
+ * 适合安全事件、访问日志这类大结果集。
+ */
 type ListCacheEntry struct {
 	Items json.RawMessage `json:"items"`
 	Total int64           `json:"total"`
 }
 
-// GetListRaw retrieves a cached list result as raw bytes + total count.
-// This method satisfies the repository.HotCacheBackend interface without cross-package types.
+/**
+ * GetListRaw 以原始字节 + 总数取出缓存的列表结果。
+ *
+ * 该方法满足 repository.HotCacheBackend 接口，且不引入跨包类型。
+ */
 func (h *HotCache) GetListRaw(key string) (items []byte, total int64, ok bool) {
 	if !h.Available() {
 		return nil, 0, false
@@ -330,7 +341,7 @@ func (h *HotCache) GetListRaw(key string) (items []byte, total int64, ok bool) {
 	return nil, 0, false
 }
 
-// GetList retrieves a cached list result.
+// GetList 取出缓存的列表结果。
 func (h *HotCache) GetList(key string) (*ListCacheEntry, bool) {
 	if !h.Available() {
 		return nil, false
@@ -342,7 +353,7 @@ func (h *HotCache) GetList(key string) (*ListCacheEntry, bool) {
 	return nil, false
 }
 
-// SetList stores a list result with TTL.
+// SetList 按 TTL 写入一个列表结果。
 func (h *HotCache) SetList(key string, items any, total int64, ttl time.Duration) {
 	if !h.Available() {
 		return

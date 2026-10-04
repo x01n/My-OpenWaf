@@ -142,12 +142,16 @@ loadWasm().then(function(){
 </script></body>
 </html>`
 
-// @param c Hertz 请求上下文
-// @param reqID 请求 ID
-// @param rt 站点运行时；nil 时仍可渲染默认品牌
-// @param sn 当前快照；nil 或缺少页面配置时用默认品牌
-// @param statusCode 状态码（调用方传 412 = StatusPreconditionFailed）
-// @param seed 服务端签发的 C2 种子；出参为空串时页面走「重载重签」回退路径
+/**
+ * WriteCookieRenewPage 渲染 C2 续期页并写入响应（诊断头为 X-OWAF-Probe: renew）。
+ *
+ * @param c Hertz 请求上下文
+ * @param reqID 请求 ID
+ * @param rt 站点运行时；nil 时仍可渲染默认品牌
+ * @param sn 当前快照；nil 或缺少页面配置时用默认品牌
+ * @param statusCode 状态码（调用方传 412 = StatusPreconditionFailed）
+ * @param seed 服务端签发的 C2 种子；出参为空串时页面走「重载重签」回退路径
+ */
 func WriteCookieRenewPage(c *app.RequestContext, reqID string, rt *snapshot.SiteRuntime, sn *snapshot.Snapshot, statusCode int, seed CookieRenewSeed) {
 	c.Response.Header.Set("X-Request-ID", reqID)
 	c.Response.Header.Del("Server")

@@ -26,13 +26,13 @@ const (
 	adminHPKPReportOnlyHeaderName = "Public-Key-Pins-Report-Only"
 )
 
-// AuthMiddleware supports JWT (Bearer) or API Key authentication.
-// Whitelisted paths are skipped (health, auth endpoints).
+// AuthMiddleware 支持 JWT（Bearer）或 API Key 两种认证方式。
+// 白名单路径会被跳过（健康检查、认证端点）。
 func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, sessionMgr *auth.SessionManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		path := string(c.Path())
 
-		// Whitelist: health + auth endpoints (login/refresh/logout).
+		// 白名单：健康检查 + 认证端点（login/refresh/logout）。
 		if path == "/api/v1/health" ||
 			path == "/api/v1/auth/login" ||
 			path == "/api/v1/auth/refresh" ||
@@ -55,7 +55,7 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 			return
 		}
 
-		// Try JWT first (via TokenManager with key rotation + blacklist support).
+		// 先试 JWT（经 TokenManager，带密钥轮换与黑名单支持）。
 		if tm != nil {
 			if claims, err := tm.VerifyAccessToken(token); err == nil {
 				c.Set("auth_user", claims.Username)
@@ -63,7 +63,7 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 				c.Set("auth_role", claims.Role)
 				c.Set("auth_jti", claims.ID)
 
-				// Update session last active time.
+				// 更新会话最后活跃时间。
 				if claims.ID != "" && sessionMgr != nil {
 					sessionMgr.UpdateLastActive(claims.ID)
 				}
@@ -77,7 +77,7 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 			}
 		}
 
-		// Fallback: API Key.
+		// 回退：API Key。
 		var key *store.AdminAPIKey
 		ok := false
 		if keyRepo != nil {
@@ -91,13 +91,13 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 		c.Set("auth_user", key.Name)
 		c.Set("auth_method", "api_key")
 		c.Set("api_key_id", key.ID)
-		c.Set("auth_role", auth.RoleAdmin) // API keys get admin role by default.
+		c.Set("auth_role", auth.RoleAdmin) // API Key 默认赋予 admin 角色。
 		c.Next(ctx)
 	}
 }
 
-// RequireRole returns a middleware that checks if the authenticated user has one of the allowed roles.
-// Usage: api.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator))
+// RequireRole 返回一个中间件，校验已认证用户是否具备允许角色之一。
+// 用法：api.Use(RequireRole(auth.RoleAdmin, auth.RoleOperator))
 func RequireRole(allowedRoles ...string) app.HandlerFunc {
 	roleSet := make(map[string]bool, len(allowedRoles))
 	for _, r := range allowedRoles {
@@ -120,7 +120,7 @@ func RequireRole(allowedRoles ...string) app.HandlerFunc {
 	}
 }
 
-// AccessLog logs each admin API request with unified format.
+// AccessLog 以统一格式记录每次管理 API 请求。
 func AccessLog(log *slog.Logger) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		reqID := uuid.NewString()

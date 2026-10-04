@@ -26,8 +26,8 @@ func (r *FalsePositiveRepo) Create(rec *store.FalsePositiveReport) error {
 	return r.db.Create(rec).Error
 }
 
-// CreateOrGetBySourceEvent creates one feedback record for a source security event.
-// A repeated submission returns the existing record instead of duplicating the feedback.
+// CreateOrGetBySourceEvent 为一条源安全事件创建反馈记录。
+// 重复提交会返回既有记录，而不是重复写入同一条反馈。
 func (r *FalsePositiveRepo) CreateOrGetBySourceEvent(rec *store.FalsePositiveReport) (*store.FalsePositiveReport, bool, error) {
 	if rec == nil || rec.SourceEventKey == nil || *rec.SourceEventKey == "" {
 		return nil, false, errors.New("source event key required")
@@ -96,8 +96,8 @@ func (r *FalsePositiveRepo) UpdateStatus(id uint, status string) error {
 	return nil
 }
 
-// Delete deletes a feedback record and clears its idempotency key first.
-// The cleared key permits a newly submitted feedback record for the same source event.
+// Delete 删除一条反馈记录，并先清空它的幂等键。
+// 键被清空后，同一条源安全事件才允许再次提交新的反馈记录。
 // 记录不存在时返回 gorm.ErrRecordNotFound，此时整个事务回滚，置空操作不留痕迹。
 func (r *FalsePositiveRepo) Delete(id uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {

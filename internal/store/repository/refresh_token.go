@@ -84,7 +84,7 @@ func (r *RefreshTokenRepo) RevokeFamily(jti string) error {
 	})
 }
 
-// Rotate atomically consumes an active refresh token and creates its replacement.
+// Rotate 原子地消费一个活跃 refresh token，并创建它的替代者。
 func (r *RefreshTokenRepo) Rotate(oldJTI, newJTI, tokenHash, username, role string, expiresAt time.Time) (*store.RefreshToken, error) {
 	next := &store.RefreshToken{
 		JTI:       newJTI,
@@ -114,7 +114,7 @@ func (r *RefreshTokenRepo) Rotate(oldJTI, newJTI, tokenHash, username, role stri
 	return next, nil
 }
 
-// RevokeByUsername revokes every active refresh token owned by one account.
+// RevokeByUsername 吊销某个账号名下的全部活跃 refresh token。
 func (r *RefreshTokenRepo) RevokeByUsername(username string) error {
 	query := r.db.Model(&store.RefreshToken{})
 	if username == "admin" {

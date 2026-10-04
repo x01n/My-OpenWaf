@@ -10,11 +10,13 @@ import (
 	"My-OpenWaf/internal/waf/luaplugin"
 )
 
-// TestPostLuaSeesRuntimePhase 验证后置脚本读到的是 post 阶段，而不是 pre。
-//
-// 后置脚本由 applyPostLuaDecision 在管道之外执行，走的是独立于 luaPhase 的
-// 路径：若这里忘了覆盖 Runtime，脚本会拿到前置阶段留下的 lua_pre 标注——
-// 它据此判断「内置判定已经跑过了」就必然是错的。
+/**
+ * TestPostLuaSeesRuntimePhase 验证后置脚本读到的是 post 阶段，而不是 pre。
+ *
+ * 后置脚本由 applyPostLuaDecision 在管道之外执行，走的是独立于 luaPhase 的
+ * 路径：若这里忘了覆盖 Runtime，脚本会拿到前置阶段留下的 lua_pre 标注——
+ * 它据此判断「内置判定已经跑过了」就必然是错的。
+ */
 func TestPostLuaSeesRuntimePhase(t *testing.T) {
 	lp := luaEngineWith(t, luaplugin.StagePost, `
 function handle(ctx)
@@ -48,12 +50,15 @@ end`)
 	}
 }
 
-// TestPrePhaseRuntimeReachesScript 验证前置脚本经完整管道装配后仍读得到 runtime。
-//
-// 前置路径的视图由 rules.BuildLuaRequestView 构造，本用例经 Process 走完整
-// 装配，确认字段没有在中途被丢弃。
-// 脚本对错误取值返回 drop、对正确取值返回 intercept：两种结果都是终止动作，
-// 「读不到字段」与「字段正确」因此不会被同样的空结果掩盖。
+/**
+ * TestPrePhaseRuntimeReachesScript 验证前置脚本经完整管道装配后仍读得到 runtime。
+ *
+ * 前置路径的视图由 rules.BuildLuaRequestView 构造，本用例经 Process 走完整
+ * 装配，确认字段没有在中途被丢弃。
+ *
+ * 脚本对错误取值返回 drop、对正确取值返回 intercept：两种结果都是终止动作，
+ * 「读不到字段」与「字段正确」因此不会被同样的空结果掩盖。
+ */
 func TestPrePhaseRuntimeReachesScript(t *testing.T) {
 	holder := newTestHolder(store.DefaultProtectionConfig(), nil)
 	eng := New(holder, nil, nil, nil)

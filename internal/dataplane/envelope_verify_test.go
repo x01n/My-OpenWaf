@@ -23,10 +23,12 @@ import (
 的典型形态。新增验签相关用例时，请指明它属于哪一类。
 */
 
-// TestEnvelopeVerifierVerifiesIssuedEnvelopes 锁定 B3 密码学层的对外契约：
-// 服务端签发的 0x06 信封必须验签通过，篡改/换密钥/空公钥必须拒绝。
-//
-// 注意：本用例的篡改分支锁的是**完整性**（SM3），不是签名 —— 见文件头说明。
+/**
+ * TestEnvelopeVerifierVerifiesIssuedEnvelopes 锁定 B3 密码学层的对外契约：
+ * 服务端签发的 0x06 信封必须验签通过，篡改/换密钥/空公钥必须拒绝。
+ *
+ * 注意：本用例的篡改分支锁的是**完整性**（SM3），不是签名 —— 见文件头说明。
+ */
 func TestEnvelopeVerifierVerifiesIssuedEnvelopes(t *testing.T) {
 	challenge.SetChallengeSecret([]byte("0123456789abcdef0123456789abcdef"))
 	v := NewEnvelopeVerifier(nil)
@@ -67,15 +69,17 @@ func TestEnvelopeVerifierVerifiesIssuedEnvelopes(t *testing.T) {
 	}
 }
 
-// TestEnvelopeVerifierRejectsForeignDomain 锁定「域必须为 0x06」：用别的域
-// 签出的信封不得通过。
-//
-// **本用例同时是本文件里唯一真正锁「签名」的那条**：域参与 SM2 签名覆盖
-// 范围，而 SM3 整体校验不涉及域语义，因此把 verifySig 关掉时只有这条会红
-// （实测确认）。详见文件头说明。
-//
-// 这条防的是「跨用途信封互换」，而 0x06 域内多用途的隔离只靠密钥不同
-// （AAD 不参与认证 —— 见 pow_shard.go 的 powShardsAAD 注释）。
+/**
+ * TestEnvelopeVerifierRejectsForeignDomain 锁定「域必须为 0x06」：用别的域
+ * 签出的信封不得通过。
+ *
+ * **本用例同时是本文件里唯一真正锁「签名」的那条**：域参与 SM2 签名覆盖
+ * 范围，而 SM3 整体校验不涉及域语义，因此把 verifySig 关掉时只有这条会红
+ * （实测确认）。详见文件头说明。
+ *
+ * 这条防的是「跨用途信封互换」，而 0x06 域内多用途的隔离只靠密钥不同
+ * （AAD 不参与认证 —— 见 pow_shard.go 的 powShardsAAD 注释）。
+ */
 func TestEnvelopeVerifierRejectsForeignDomain(t *testing.T) {
 	challenge.SetChallengeSecret([]byte("0123456789abcdef0123456789abcdef"))
 	v := NewEnvelopeVerifier(nil)

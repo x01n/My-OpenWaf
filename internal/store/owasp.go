@@ -19,7 +19,7 @@ type OWASPRuleCatalog struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
-// PolicyOWASPRuleConfig stores nullable per-policy overrides for one built-in rule.
+// PolicyOWASPRuleConfig 存储单条内置规则的按策略可空覆盖。
 type PolicyOWASPRuleConfig struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
 	PolicyID    uint      `gorm:"not null;uniqueIndex:ux_policy_owasp_rule" json:"policy_id"`

@@ -11,14 +11,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// Checker provides liveness and readiness probes.
+// Checker 提供存活与就绪探针。
 type Checker struct {
 	db     *gorm.DB
 	holder *snapshot.Holder
 	ready  func() bool
 }
 
-// New creates a health checker.
+// New 创建健康检查器。
 func New(db *gorm.DB, holder *snapshot.Holder) *Checker {
 	return &Checker{db: db, holder: holder}
 }
@@ -28,7 +28,7 @@ func (c *Checker) SetReadyFunc(ready func() bool) {
 }
 func (c *Checker) Alive() bool { return true }
 
-// Ready returns true when DB is reachable and a snapshot is loaded.
+// Ready 在数据库可达且已加载快照时返回 true。
 func (c *Checker) Ready() bool {
 	if c.holder.Load() == nil {
 		return false
@@ -43,7 +43,7 @@ func (c *Checker) Ready() bool {
 	return sqlDB.Ping() == nil
 }
 
-// LivenessHandler returns a Hertz handler for /healthz.
+// LivenessHandler 返回 /healthz 的 Hertz 处理器。
 func (c *Checker) LivenessHandler() app.HandlerFunc {
 	return func(ctx context.Context, rc *app.RequestContext) {
 		if c.Alive() {
@@ -54,7 +54,7 @@ func (c *Checker) LivenessHandler() app.HandlerFunc {
 	}
 }
 
-// ReadinessHandler returns a Hertz handler for /readyz.
+// ReadinessHandler 返回 /readyz 的 Hertz 处理器。
 func (c *Checker) ReadinessHandler() app.HandlerFunc {
 	return func(ctx context.Context, rc *app.RequestContext) {
 		if c.Ready() {
@@ -65,7 +65,7 @@ func (c *Checker) ReadinessHandler() app.HandlerFunc {
 	}
 }
 
-// StatusHandler returns a Hertz handler for /status with runtime info.
+// StatusHandler 返回 /status 的 Hertz 处理器，输出运行时信息。
 func (c *Checker) StatusHandler() app.HandlerFunc {
 	return func(ctx context.Context, rc *app.RequestContext) {
 		rc.JSON(200, c.StatusSnapshot())

@@ -14,7 +14,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// newFeedTestDB opens an in-memory SQLite database with the cve_rules table migrated.
+// newFeedTestDB 打开内存 SQLite 库并迁移出 cve_rules 表。
 func newFeedTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -27,8 +27,8 @@ func newFeedTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-// newFeedTestManager builds a feed manager pointed at the httptest server with a
-// tiny page delay so pagination runs fast and never touches the real NVD.
+// newFeedTestManager 构造指向 httptest 服务端的订阅源管理器，并把页间延时
+// 压到极小，使分页测试跑得快且绝不访问真实 NVD。
 func newFeedTestManager(db *gorm.DB, baseURL string) *CVEFeedManager {
 	return &CVEFeedManager{
 		db:                   db,
@@ -40,7 +40,7 @@ func newFeedTestManager(db *gorm.DB, baseURL string) *CVEFeedManager {
 	}
 }
 
-// nvdTestPage renders one NVD API 2.0 style response page.
+// nvdTestPage 渲染一页 NVD API 2.0 风格的响应。
 func nvdTestPage(startIndex, totalResults int, vulns []nvdVuln) string {
 	if vulns == nil {
 		vulns = []nvdVuln{}
@@ -58,7 +58,7 @@ func nvdTestPage(startIndex, totalResults int, vulns []nvdVuln) string {
 	return string(b)
 }
 
-// nvdTestVuln builds one CVE that maps to a non-empty rule pattern (CWE-89 -> SQL injection).
+// nvdTestVuln 构造一条能映射出非空正则的 CVE（CWE-89 → SQL 注入）。
 func nvdTestVuln(id string) nvdVuln {
 	return nvdVuln{CVE: nvdCVE{
 		ID: id,
@@ -75,7 +75,7 @@ func nvdTestVuln(id string) nvdVuln {
 	}}
 }
 
-// nvdTestVulns generates n distinct CVEs sharing the given ID prefix.
+// nvdTestVulns 生成 n 条共享同一 ID 前缀的不同 CVE。
 func nvdTestVulns(prefix string, n int) []nvdVuln {
 	vulns := make([]nvdVuln, n)
 	for i := range vulns {
@@ -84,8 +84,8 @@ func nvdTestVulns(prefix string, n int) []nvdVuln {
 	return vulns
 }
 
-// TestFetchFromNVDPaginatesAllPages verifies that a 2-page feed is fully ingested,
-// the startIndex cursor advances 0 -> 50, and each request carries the fixed page size.
+// TestFetchFromNVDPaginatesAllPages 验证两页订阅源被完整摄入：startIndex 游标
+// 按 0 -> 50 递进，且每个请求都带上固定的分页大小。
 func TestFetchFromNVDPaginatesAllPages(t *testing.T) {
 	all := nvdTestVulns("CVE-2026-PAGE-", 80)
 	var starts []int
@@ -140,8 +140,8 @@ func TestFetchFromNVDPaginatesAllPages(t *testing.T) {
 	}
 }
 
-// TestFetchFromNVDPropagatesMidPageErrors verifies that a failing second page
-// surfaces as an error instead of silently dropping the page.
+// TestFetchFromNVDPropagatesMidPageErrors 验证第二页失败会作为错误上抛，
+// 而不是被静默丢弃。
 func TestFetchFromNVDPropagatesMidPageErrors(t *testing.T) {
 	all := nvdTestVulns("CVE-2026-ERR-", 60)
 	calls := 0
@@ -176,9 +176,8 @@ func TestFetchFromNVDPropagatesMidPageErrors(t *testing.T) {
 	}
 }
 
-// TestFetchFromNVDStopsOnShortLastPageWithoutTotal verifies that a response
-// without totalResults stops as soon as a short page arrives, so pagination
-// does not spin on legacy-style responses.
+// TestFetchFromNVDStopsOnShortLastPageWithoutTotal 验证缺失 totalResults 的响应
+// 在遇到不足一页时立即停止，避免对旧版响应无限翻页。
 func TestFetchFromNVDStopsOnShortLastPageWithoutTotal(t *testing.T) {
 	first := nvdTestVulns("CVE-2026-SHORT-", 7)
 	calls := 0
@@ -211,7 +210,7 @@ func TestFetchFromNVDStopsOnShortLastPageWithoutTotal(t *testing.T) {
 	}
 }
 
-// TestFetchFromNVDSetsAPIKeyHeader verifies the apiKey header is sent only when configured.
+// TestFetchFromNVDSetsAPIKeyHeader 验证仅在配置了 API key 时才发送 apiKey 请求头。
 func TestFetchFromNVDSetsAPIKeyHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()

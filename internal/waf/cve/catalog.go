@@ -10,10 +10,10 @@ import (
 
 const builtinCatalogSource = "catalog"
 
-// ReconcileBuiltinCatalog synchronizes executable built-in rule metadata into
-// cve_rules. Existing duplicate rows are preserved because scope overrides
-// reference their numeric IDs; reconciliation only makes their metadata
-// consistent with the current executable registry.
+// ReconcileBuiltinCatalog 把内置可执行规则的元信息同步进 cve_rules 表。
+//
+// 已存在的重复行会保留：作用域覆盖（scope override）按数字 ID 引用它们，
+// 因此本函数只把元信息对齐到当前的可执行注册表，不做去重或删除。
 func ReconcileBuiltinCatalog(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("reconcile CVE catalog: nil database")

@@ -13,7 +13,6 @@ import (
  * 即签名/自定义两相之上的请求共享语义没有被 MatchCtx 拷贝破坏。
  *
  * @param t 测试句柄
- * @return void
  */
 func TestQueryParamJSONPathMatcherSharedCaches(t *testing.T) {
 	ctx := pipeline.AcquireCtx()
@@ -54,7 +53,6 @@ var benchRulesSink bool
  * MatchCtx（回归路径，每条规则各自 url.ParseQuery）。
  *
  * @param b 基准句柄
- * @return void
  */
 func BenchmarkQueryParamMatchersSharedCtx(b *testing.B) {
 	rules := Compile([]store.Rule{
@@ -175,7 +173,6 @@ func BenchmarkBodyJSONPathMatcherSingleValueCtx(b *testing.B) {
  * 改写后单次解析共享。
  *
  * @param b 基准句柄
- * @return void
  */
 func BenchmarkCustomPhaseQueryParamRules(b *testing.B) {
 	phase := NewCustomPhasePrecompiled(Compile([]store.Rule{

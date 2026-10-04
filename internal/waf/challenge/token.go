@@ -19,12 +19,12 @@ import (
 	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
-// NonceKey is the cookie name used for anti-replay nonces.
+// NonceKey 是承载防重放 nonce 的 cookie 名。
 const NonceKey = "__waf_nonce"
 const NoncePairKey = "__waf_nonce2"
 const ChallengePassCookieName = "__waf_passed"
 
-// DynamicProtectionSessionCookieName is the cookie name for dynamic protection bypass sessions.
+// DynamicProtectionSessionCookieName 是动态保护绕过会话的 cookie 名。
 const DynamicProtectionSessionCookieName = "__owaf_dp_session"
 
 var challengeSecret atomic.Pointer[[]byte]
@@ -50,26 +50,28 @@ func loadChallengeSecret() []byte {
 	return nil
 }
 
-// SetChallengeSecret allows overriding the secret (e.g. from JWT secret for consistency across restarts).
-// 同时装载 gm 包 SM2 签名身份：公钥随挑战页下发，由浏览器侧验签（b2）使用。
-//
-// ⚠️ 已知行为（有意保留，勿"顺手修"）：
-//
-//	内门条件 len(secret) == 32 在真实路径上**恒假** —— 唯一调用点
-//	internal/app/server.go 传入的是 resolveJWTSecret 的返回值，而该函数
-//	生成路径是 rand(32 字节) -> hex.EncodeToString，即 **64 字符**（环境变量
-//	与 DB 记录路径同样是原样字符串）。因此 gm.LoadIdentity 从未由本函数
-//	调用，SM2 身份实际来自本包 init() 的随机 32 字节（见上方 init）。
-//
-//	后果：**签名身份随进程重启变化**。
-//	  - 当前无影响：签名验证全部在同进程内完成（gm.Open(verifySig=true) 走
-//	    进程内 signIdent），信封不跨重启存活。
-//	  - 因此本注释首句承诺的 "consistency across restarts" 从未生效。
-//
-//	何时必须修：将来需要**跨重启验签**时（持久化信封、离线校验等）。
-//	修时注意：把身份绑定到持久 secret 会让「改 MY_OPENWAF_JWT_SECRET 即换
-//	签名身份」——这个副作用比现状更隐蔽（改 secret 的人不会知道它还兼作
-//	SM2 身份种子），需要一并解决。详见 devlog.md 的 r7.61 待办记录。
+/**
+ * SetChallengeSecret 允许覆盖挑战密钥（例如取自 JWT secret，以求跨重启一致）。
+ * 同时装载 gm 包 SM2 签名身份：公钥随挑战页下发，由浏览器侧验签（b2）使用。
+ *
+ * ⚠️ 已知行为（有意保留，勿"顺手修"）：
+ *
+ *	内门条件 len(secret) == 32 在真实路径上**恒假** —— 唯一调用点
+ *	internal/app/server.go 传入的是 resolveJWTSecret 的返回值，而该函数
+ *	生成路径是 rand(32 字节) -> hex.EncodeToString，即 **64 字符**（环境变量
+ *	与 DB 记录路径同样是原样字符串）。因此 gm.LoadIdentity 从未由本函数
+ *	调用，SM2 身份实际来自本包 init() 的随机 32 字节（见上方 init）。
+ *
+ *	后果：**签名身份随进程重启变化**。
+ *	  - 当前无影响：签名验证全部在同进程内完成（gm.Open(verifySig=true) 走
+ *	    进程内 signIdent），信封不跨重启存活。
+ *	  - 因此本注释首句承诺的「跨重启一致」从未生效。
+ *
+ *	何时必须修：将来需要**跨重启验签**时（持久化信封、离线校验等）。
+ *	修时注意：把身份绑定到持久 secret 会让「改 MY_OPENWAF_JWT_SECRET 即换
+ *	签名身份」——这个副作用比现状更隐蔽（改 secret 的人不会知道它还兼作
+ *	SM2 身份种子），需要一并解决。详见 devlog.md 的 r7.61 待办记录。
+ */
 func SetChallengeSecret(secret []byte) {
 	if len(secret) >= 16 {
 		clone := append([]byte(nil), secret...)
@@ -89,9 +91,8 @@ type ChallengeTokenClaims struct {
 	SiteID    uint
 }
 
-// ChallengeSessionBinding identifies the matched site that issued a server-side
-// challenge session. The fields are persisted with every captcha, shield, and
-// chain session and are checked before the session is consumed or advanced.
+// ChallengeSessionBinding 标识签发服务端挑战会话的匹配站点。这些字段随每个
+// captcha、shield、chain 会话一并持久化，并在会话被消费或推进之前校验。
 type ChallengeSessionBinding struct {
 	SiteID   uint   `json:"site_id"`
 	Host     string `json:"host"`
@@ -131,23 +132,25 @@ func signChallengeToken(reqID, ts string, claims ChallengeTokenClaims) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// GenerateChallengeTokenPairWithClaims creates a timestamp and HMAC token bound to the
-// requesting client for JS challenge pages.
-// This is used by the pages subpackage to render challenge HTML without direct access to challengeSecret.
+// GenerateChallengeTokenPairWithClaims 为 JS 挑战页生成时间戳与绑定请求客户端的
+// HMAC 令牌。
+// 供 pages 子包在没有 challengeSecret 直接访问权的情况下渲染挑战 HTML。
 func GenerateChallengeTokenPairWithClaims(reqID string, claims ChallengeTokenClaims) (ts, token string) {
 	ts = strconv.FormatInt(time.Now().Unix(), 10)
 	return ts, signChallengeToken(reqID, ts, claims)
 }
 
-// VerifyChallengeTokenWithClaims 校验 JS 挑战应答 token。
-//
-// 校验包含四项约束：
-//  1. HMAC 必须匹配，且签名覆盖客户端 IP/UA/Host/SiteID——其他客户端无法复用；
-//  2. 时间戳必须在 maxAge 内，且不能来自未来（防止预签发的长期 token）；
-//  3. token 必须此前未被兑换过——同一份挑战页只能换取一次通行凭证。
-//
-// 一次性约束由进程内的重放守卫实现：仅在 HMAC 与时效校验通过后才登记，
-// 因此攻击者无法用伪造 token 撑爆守卫的内存。
+/**
+ * VerifyChallengeTokenWithClaims 校验 JS 挑战应答 token。
+ *
+ * 校验包含四项约束：
+ *  1. HMAC 必须匹配，且签名覆盖客户端 IP/UA/Host/SiteID——其他客户端无法复用；
+ *  2. 时间戳必须在 maxAge 内，且不能来自未来（防止预签发的长期 token）；
+ *  3. token 必须此前未被兑换过——同一份挑战页只能换取一次通行凭证。
+ *
+ * 一次性约束由进程内的重放守卫实现：仅在 HMAC 与时效校验通过后才登记，
+ * 因此攻击者无法用伪造 token 撑爆守卫的内存。
+ */
 func VerifyChallengeTokenWithClaims(reqID, ts, token string, claims ChallengeTokenClaims, maxAge time.Duration) bool {
 	expected := signChallengeToken(reqID, ts, claims)
 	if !gm.ConstTimeEqual([]byte(token), []byte(expected)) {

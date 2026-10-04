@@ -1384,9 +1384,12 @@ func TestALPNProtocolStringCanonicalNames(t *testing.T) {
 	}
 }
 
-// TestALPNRawSurvivesNegotiation covers the mixed-mode contract: the ALPN list
-// parsed from the ClientHello must survive a later SetNegotiatedALPN call from
-// the handshake callback, so "declared h2 but negotiated http/1.1" stays visible.
+/**
+ * TestALPNRawSurvivesNegotiation 覆盖混合模式契约：
+ * 从 ClientHello 解析出的 ALPN 声明列表必须在握手回调调用
+ * SetNegotiatedALPN 之后依然可见，使「声明 h2 但协商 http/1.1」
+ * 这一差异不会被覆写掩盖。
+ */
 func TestALPNRawSurvivesNegotiation(t *testing.T) {
 	fp, err := parseTLSClientHelloRaw(clientHelloRecordForTest(t))
 	if err != nil {
@@ -1418,9 +1421,11 @@ func TestALPNRawSurvivesNegotiation(t *testing.T) {
 	}
 }
 
-// TestSetNegotiatedALPNBackfillsEmptyRaw covers the exemption path where the
-// listener never peeks the ClientHello: the pre-overwrite ALPN is preserved
-// into ALPNRaw instead of being dropped.
+/**
+ * TestSetNegotiatedALPNBackfillsEmptyRaw 覆盖免窃读路径：
+ * 监听器未窃读 ClientHello 时，覆写前的 ALPN 会被回填进
+ * ALPNRaw，而不是被直接丢弃。
+ */
 func TestSetNegotiatedALPNBackfillsEmptyRaw(t *testing.T) {
 	fp := TLSClientFingerprint{TLSVersion: "TLS13", ALPN: []string{"h2", "http/1.1"}}
 
@@ -1440,8 +1445,10 @@ func TestSetNegotiatedALPNBackfillsEmptyRaw(t *testing.T) {
 	}
 }
 
-// TestDeclaredALPNFallsBackToALPN keeps the declaration list readable when a
-// caller only ever populated the negotiated field.
+/**
+ * TestDeclaredALPNFallsBackToALPN 保证调用方只填过协商字段时，
+ * 声明列表仍有可读值。
+ */
 func TestDeclaredALPNFallsBackToALPN(t *testing.T) {
 	fp := TLSClientFingerprint{ALPN: []string{"h3"}}
 	if got := fp.DeclaredALPN(); !reflect.DeepEqual(got, []string{"h3"}) {

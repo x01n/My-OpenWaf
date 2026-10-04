@@ -41,8 +41,9 @@ func (s *Script) Name() string {
 	return s.name
 }
 
-// ScriptMetadata 描述脚本的 snapshot 只读元数据。
-// ScriptMetadata 描述脚本的 snapshot 只读元数据。
+/**
+ * ScriptMetadata 描述脚本的 snapshot 只读元数据。
+ */
 type ScriptMetadata struct {
 	ID          uint
 	Stage       string
@@ -127,7 +128,7 @@ func (s *Script) Metadata() map[string]any {
 	return metadata
 }
 
-// ID returns the DB record ID (for stats and frontend display).
+// ID 返回数据库记录 ID（供统计与管理端展示）。
 func (s *Script) ID() uint {
 	if s == nil {
 		return 0
@@ -149,16 +150,31 @@ func (s *Script) Stats() (runs, failures, timeouts int64, average time.Duration)
 	return
 }
 
-// ValidateExecutionStage 在脚本进入执行器前校验阶段与执行入口的一致性。
-// 没有元数据的脚本仍可用于 dry-run 和接口级测试。
+/**
+ * ValidateExecutionStage 在脚本进入执行器前校验阶段与执行入口的一致性。
+ *
+ * 没有元数据的脚本仍可用于 dry-run 和接口级测试。
+ *
+ * @param script 待执行的脚本。
+ * @param wantStage 本次执行入口对应的阶段。
+ * @return 阶段不匹配时返回错误。
+ */
 func ValidateExecutionStage(script *Script, wantStage string) error {
 	return validateExecutionStage(script, wantStage)
 }
 
-// NewScriptForTest 构造只带元数据的脚本，供无 QuickJS 的构建验证接口层行为。
-//
-// 正常路径应使用 Compile / CompileWithMetadata；这里不校验源码，调用方
-// 只应把它用于失败记录、统计与元数据相关的测试。
+/**
+ * NewScriptForTest 构造只带元数据的脚本，供无 QuickJS 的构建验证接口层行为。
+ *
+ * 正常路径应使用 Compile / CompileWithMetadata；这里不校验源码，调用方
+ * 只应把它用于失败记录、统计与元数据相关的测试。
+ *
+ * @param id 持久化插件标识。
+ * @param name 脚本名。
+ * @param stage 执行阶段。
+ * @param failureMode 失败处理方式。
+ * @return 仅带元数据的 Script。
+ */
 func NewScriptForTest(id uint, name, stage, failureMode string) *Script {
 	script := &Script{name: name}
 	script.id = id
@@ -167,8 +183,15 @@ func NewScriptForTest(id uint, name, stage, failureMode string) *Script {
 	return script
 }
 
-// validateExecutionStage 在脚本进入执行器前校验阶段与执行入口的一致性。
-// 没有元数据的脚本仍可用于 dry-run 和接口级测试。
+/**
+ * validateExecutionStage 在脚本进入执行器前校验阶段与执行入口的一致性。
+ *
+ * 没有元数据的脚本仍可用于 dry-run 和接口级测试。
+ *
+ * @param script 待执行的脚本。
+ * @param wantStage 本次执行入口对应的阶段。
+ * @return 阶段不匹配时返回错误。
+ */
 func validateExecutionStage(script *Script, wantStage string) error {
 	if script != nil && script.Stage() != "" && script.Stage() != wantStage {
 		return fmt.Errorf("jsplugin: stage %s script cannot use the %s executor", script.Stage(), wantStage)

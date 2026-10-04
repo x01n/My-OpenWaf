@@ -23,7 +23,19 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Build loads DB into an immutable Snapshot.
+/**
+ * Build 从数据库加载全部运行期配置，构建一个不可变快照。
+ *
+ * 这是配置生效的唯一入口：站点、监听、证书、规则、策略、访问控制、动态防护与各类
+ * 保护设置都在这里一次性读取并编译。构建期发现的问题按严重程度分流——致命错误直接
+ * 返回 error 让 reload 失败，可跳过的无效项记入 ConfigDiagnostics 随快照一起发布，
+ * 由管理端展示。
+ *
+ * @param db 主库句柄。
+ * @param rev 本次快照的配置修订号，用于 Holder 的 StoreIfNewer 比较。
+ * @param dynamicKeyBase 动态防护加密密钥的基值。
+ * @return 构建完成的快照。
+ */
 func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	var sites []store.Site
 	if err := db.Where("enabled = ?", true).Find(&sites).Error; err != nil {
@@ -122,7 +134,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		rulesByPolicy[pid] = rs
 	}
 
-	// Load application route rules and compile per-site.
+	// 加载应用路由规则并按站点编译。
 	var appRulesRaw []store.ApplicationRouteRule
 	if err := db.Where("enabled = ?", true).Find(&appRulesRaw).Error; err != nil {
 		return nil, fmt.Errorf("load app route rules: %w", err)
@@ -145,7 +157,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	dynamicProtection.EncryptionKeyBase = append([]byte(nil), dynamicKeyBase...)
 	excludeRecordHeaders := parseExcludeRecordHeaders(botSettingsJSON)
 
-	// Load access control configs per site.
+	// 加载各站点的访问控制配置。
 	accessControlBySite, err := loadAccessControlConfigs(db)
 	if err != nil {
 		return nil, fmt.Errorf("load access control configs: %w", err)
@@ -232,7 +244,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		}
 		compiled := append(compileRules(rulesByPolicy[policyID]), siteCCRules(s, ccRules)...)
 
-		// Build protection configs from site fields
+		// 由站点字段构建保护配置
 		botProtection := store.BotProtectionConfig{
 			Enabled: s.BotProtectionEnabled != nil && *s.BotProtectionEnabled,
 			Level:   s.BotProtectionLevel,
@@ -253,7 +265,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 			attackProtection.OWASPSensitivity = "medium"
 		}
 
-		// Get forwarding settings from site
+		// 从站点取转发设置
 		xffMode := s.XFFMode
 		if xffMode == "" {
 			xffMode = store.XFFModeStrip
@@ -430,10 +442,10 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 				return nil, err
 			}
 		}
-		// EffectiveProtection is computed later once global protection is loaded.
+		// EffectiveProtection 的合并要等全局保护配置加载完之后再做。
 	}
 
-	// Compute effective per-site protection by merging site overrides onto global config.
+	// 把站点覆盖值叠加到全局配置上，算出每站点的生效保护配置。
 	for _, rt := range siteMap {
 		ep := mergeProtection(protection, rt.Site)
 		if raw, ok := owaspConfigsByPolicy[rt.PolicyID]; ok {
@@ -503,8 +515,6 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	}, nil
 }
 
-// mergeProtection creates a ProtectionConfig for a site by overlaying
-// per-site overrides onto the global config. nil = inherit global.
 func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, []SnapshotConfigDiagnostic, error) {
 	result := make(map[uint]string)
 	diagnostics := make([]SnapshotConfigDiagnostic, 0)
@@ -643,15 +653,25 @@ func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (
 	return result, nil
 }
 
+/**
+ * mergeProtection 把站点的覆盖值叠加到全局配置上，生成该站点的生效保护配置。
+ *
+ * 站点字段是「可空覆盖」语义：nil 表示继承全局，非 nil 才覆盖，
+ * 因此这里逐字段判空，而不是整体替换。
+ *
+ * @param global 全局保护配置。
+ * @param site 站点模型（含可空覆盖字段）。
+ * @return 合并后的保护配置。
+ */
 func mergeProtection(global store.ProtectionConfig, site store.Site) store.ProtectionConfig {
 	p := global // shallow copy
 
-	// Bot detection: per-site override
+	// bot 检测：站点级覆盖
 	if site.BotProtectionEnabled != nil {
 		p.BotDetectionEnabled = *site.BotProtectionEnabled
 	}
 
-	// Anti-replay: nil inherits the global switch; non-nil is an explicit override.
+	// 防重放：nil 表示继承全局开关；非 nil 才是显式覆盖。
 	if site.AntiReplayEnabled != nil {
 		p.AntiReplayEnabled = *site.AntiReplayEnabled
 	}
@@ -661,7 +681,7 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 	}
 	p.AntiReplayCookieMode = NormalizeAntiReplayCookieMode(p.AntiReplayCookieMode)
 
-	// OWASP override
+	// OWASP 覆盖
 	if site.OWASPEnabled != nil {
 		p.OWASPEnabled = *site.OWASPEnabled
 		if site.OWASPSensitivity != "" {
@@ -672,7 +692,7 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 		}
 	}
 
-	// CVE override
+	// CVE 覆盖
 	if site.CVEEnabled != nil {
 		p.CVEEnabled = *site.CVEEnabled
 		if site.CVEAction != "" {
@@ -684,7 +704,7 @@ func mergeProtection(global store.ProtectionConfig, site store.Site) store.Prote
 		}
 	}
 
-	// Rate limit override
+	// 请求频率限制覆盖
 	if site.RateLimitEnabled != nil {
 		p.RequestRateLimitEnabled = *site.RateLimitEnabled
 		if site.RateLimitWindow > 0 {
@@ -723,8 +743,6 @@ func NormalizeAntiReplayCookieMode(raw string) string {
 	return "standard"
 }
 
-// splitHosts splits a host field by comma, supporting multi-host per site.
-
 func registerSiteKeys(m map[string]*SiteRuntime, rt *SiteRuntime) error {
 	bind := rt.Bind
 	for _, host := range splitHosts(rt.Site.Host) {
@@ -744,7 +762,12 @@ func registerSiteKeys(m map[string]*SiteRuntime, rt *SiteRuntime) error {
 	return nil
 }
 
-// splitHosts splits a host field by comma, supporting multi-host per site.
+/**
+ * splitHosts 按逗号切分站点 host 字段，支持单站点绑定多个 Host。
+ *
+ * @param raw 站点 Host 字段原值。
+ * @return 切分后的 Host 列表。
+ */
 func splitHosts(raw string) []string {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
@@ -915,7 +938,15 @@ type ccRuleConfig struct {
 	DurationUnit string            `json:"duration_unit"`
 }
 
-// normalizeRuleCaptchaType keeps rule-level CAPTCHA overrides strict and fail-safe.
+/**
+ * normalizeRuleCaptchaType 对规则级验证码类型做严格且失败的规范化。
+ *
+ * 只接受已知取值；未知取值一律归一为空串（即继承全局），避免手写配置里的
+ * 拼写错误被当成一个新类型放行。
+ *
+ * @param value 规则里配置的验证码类型。
+ * @return 规范化后的类型；非法值为空串。
+ */
 func normalizeRuleCaptchaType(value string) string {
 	switch value {
 	case "", "math", "click", "slide", "rotate":
@@ -1114,11 +1145,18 @@ func normalizeCCAction(action string) store.RuleAction {
 	}
 }
 
-// ParsePattern extracts kind and arg from DSL string like "block_ip:1.2.3.0/24".
+/**
+ * ParsePattern 从 DSL 字符串中拆出 kind 与 arg，例如 "block_ip:1.2.3.0/24"。
+ *
+ * 以 "{" 开头的字符串视为复合 JSON 规则，整串作为 arg 返回，kind 固定为 "compound"。
+ *
+ * @param p 规则模式原串。
+ * @return kind 与 arg；复合规则返回 "compound" 与原始 JSON。
+ */
 func ParsePattern(p string) (kind, arg string) {
 	p = strings.TrimSpace(p)
 
-	// Check if it's a compound JSON pattern
+	// 判断是否为复合 JSON 规则
 	if strings.HasPrefix(p, "{") {
 		return "compound", p
 	}
@@ -1341,13 +1379,21 @@ func settingInt(m map[string]string, key string, defaultValue int) int {
 	return v
 }
 
-// systemSettingKeyEquals returns a GORM clause for querying system settings by key.
+// systemSettingKeyEquals 返回按 key 查询系统设置的 GORM 条件子句。
 func systemSettingKeyEquals(key string) clause.Eq {
 	return clause.Eq{Column: clause.Column{Name: "key"}, Value: key}
 }
 
-// ResolveOutboundHost resolves the upstream host for a request.
-// It prefers the site's explicit upstream host, then the upstream host header, and falls back to the incoming host.
+/**
+ * ResolveOutboundHost 解析发往上游时使用的 Host。
+ *
+ * 优先级：站点显式配置的 upstream host > 上游 host header > 传入的请求 Host。
+ *
+ * @param rt 站点运行时。
+ * @param upstreamHost 上游地址。
+ * @param incomingHost 客户端请求的 Host。
+ * @return 解析出的上游 Host。
+ */
 func ResolveOutboundHost(rt SiteRuntime, upstreamHost string, incomingHost string) (string, error) {
 	if rt.Site.UpstreamHost != "" {
 		return rt.Site.UpstreamHost, nil

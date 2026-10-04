@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// IPListEntry is an IP or CIDR with metadata.
+// IPListEntry 是一条带元数据的 IP 或 CIDR 条目。
 type IPListEntry struct {
 	CIDR     *net.IPNet
 	Single   net.IP
@@ -16,7 +16,7 @@ type IPListEntry struct {
 	Action   string
 }
 
-// IPReputation manages blacklist/whitelist + auto-ban.
+// IPReputation 管理全局黑白名单与基于违规计数的自动封禁。
 type IPReputation struct {
 	mu               sync.RWMutex
 	blacklist        []IPListEntry
@@ -136,7 +136,7 @@ func (r *IPReputation) Check(ip net.IP) IPDecision {
 	return IPDecision{Allowed: true}
 }
 
-// IsWhitelisted reports whether the IP matches an active global whitelist entry.
+// IsWhitelisted 报告该 IP 是否命中仍生效的全局白名单条目。
 func (r *IPReputation) IsWhitelisted(ip net.IP) bool {
 	return ip != nil && r.Check(ip).Category == "whitelist"
 }

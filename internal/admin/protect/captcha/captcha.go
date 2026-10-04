@@ -12,7 +12,7 @@ import (
 	"My-OpenWaf/internal/waf/challenge"
 )
 
-// captchaConfigResponse is the API response for captcha configuration.
+// captchaConfigResponse 是 captcha 配置的 API 响应。
 type captchaConfigResponse struct {
 	CaptchaEnabled          bool   `json:"captcha_enabled"`
 	CaptchaType             string `json:"captcha_type"`
@@ -51,7 +51,7 @@ type captchaConfigRequest struct {
 	ShieldEnableDevTools    *bool  `json:"shield_enable_devtools"`
 }
 
-// GetCaptchaConfig returns the current captcha/shield challenge configuration.
+// GetCaptchaConfig 返回当前的 captcha/shield 质询配置。
 func GetCaptchaConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		cfg := shared.LoadProtectionConfig(repo)
@@ -59,7 +59,7 @@ func GetCaptchaConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 	}
 }
 
-// ValidateChallengeConfig validates challenge fields that are part of an update payload.
+// ValidateChallengeConfig 校验更新请求体中出现的质询相关字段。
 func ValidateChallengeConfig(cfg store.ProtectionConfig, present map[string]bool) error {
 	if present["captcha_type"] {
 		if err := shared.ValidateGlobalCaptchaType(cfg.CaptchaType); err != nil {
@@ -111,7 +111,7 @@ func buildCaptchaConfigResponse(cfg store.ProtectionConfig) captchaConfigRespons
 	}
 }
 
-// UpdateCaptchaConfig updates captcha/shield challenge configuration.
+// UpdateCaptchaConfig 更新 captcha/shield 质询配置。
 func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req captchaConfigRequest
@@ -205,7 +205,7 @@ func UpdateCaptchaConfig(repo *repository.SystemSettingsRepo, reload func() erro
 	}
 }
 
-// TestCaptcha generates a test captcha preview.
+// TestCaptcha 生成一张测试用 captcha 预览。
 func TestCaptcha(repo *repository.SystemSettingsRepo, mgr *challenge.CaptchaManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		if mgr == nil {

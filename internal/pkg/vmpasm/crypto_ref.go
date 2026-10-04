@@ -32,8 +32,10 @@ import (
 //
 // SM4 不需要自实现：`gmsm/sm4` 本就提供单块接口。
 
-// refSha256Compress 对 `mem[state..state+32)`（8×u32 大端）与
-// `mem[block..block+64)` 做一次 SHA-256 压缩，就地更新状态。
+/**
+ * refSha256Compress 对 `mem[state..state+32)`（8×u32 大端）与
+ * `mem[block..block+64)` 做一次 SHA-256 压缩，就地更新状态。
+ */
 func refSha256Compress(mem []byte, state, block uint64) error {
 	s, err := checkedRange(state, 32, uint64(len(mem)))
 	if err != nil {
@@ -55,8 +57,10 @@ func refSha256Compress(mem []byte, state, block uint64) error {
 	return nil
 }
 
-// refSm3Compress 对 `mem[state..state+32)`（8×u32 大端）与
-// `mem[block..block+64)` 做一次 SM3 压缩，就地更新状态。
+/**
+ * refSm3Compress 对 `mem[state..state+32)`（8×u32 大端）与
+ * `mem[block..block+64)` 做一次 SM3 压缩，就地更新状态。
+ */
 func refSm3Compress(mem []byte, state, block uint64) error {
 	s, err := checkedRange(state, 32, uint64(len(mem)))
 	if err != nil {
@@ -78,8 +82,10 @@ func refSm3Compress(mem []byte, state, block uint64) error {
 	return nil
 }
 
-// refSm4Block 对 `mem[block..block+16)` 做一次单块变换（就地）。
-// `encrypt` 为 false 时解密。密钥取 `mem[key..key+16)`。
+/**
+ * refSm4Block 对 `mem[block..block+16)` 做一次单块变换（就地）。
+ * `encrypt` 为 false 时解密。密钥取 `mem[key..key+16)`。
+ */
 func refSm4Block(mem []byte, key, block uint64, encrypt bool) error {
 	k, err := checkedRange(key, 16, uint64(len(mem)))
 	if err != nil {
@@ -103,10 +109,12 @@ func refSm4Block(mem []byte, key, block uint64, encrypt bool) error {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// SHA-256 压缩函数（FIPS 180-4 §6.2.2）—— 参照实现
-// ---------------------------------------------------------------------------
-
+/**
+ * SHA-256 压缩函数（FIPS 180-4 §6.2.2）—— 参照实现
+ *
+ * 此处的实现与 Rust 侧 `isa.rs` 的 `sha256_compress_at` 是两条独立写法，
+ * 用于捕捉「两侧同错」，因此不得把两者合并成一份共享代码。
+ */
 var sha256K = [64]uint32{
 	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
 	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -158,9 +166,11 @@ func sha256CompressBlock(h *[8]uint32, block []byte) {
 
 func rotr32(x uint32, n uint) uint32 { return x>>n | x<<(32-n) }
 
-// ---------------------------------------------------------------------------
-// SM3 压缩函数（GB/T 32907-2016）—— 参照实现
-// ---------------------------------------------------------------------------
+/**
+ * SM3 压缩函数（GB/T 32907-2016）—— 参照实现
+ *
+ * 与 `isa.rs` 的 `sm3_compress_at` 同为独立实现，用于对照验证。
+ */
 
 func sm3CompressBlock(v *[8]uint32, block []byte) {
 	var w [68]uint32
@@ -228,10 +238,12 @@ func sm3GG(x, y, z uint32, j int) uint32 {
 	return (x & y) | (^x & z)
 }
 
-// ---------------------------------------------------------------------------
-// 供测试使用的整段摘要（用标准库/第三方库，不是参照实现，作为外部权威）
-// ---------------------------------------------------------------------------
-
+/**
+ * 供测试使用的整段摘要。
+ *
+ * 这里用的是 Go 标准库与第三方库，不是本文件的参照实现 —— 作为**外部权威**，
+ * 用于让参照实现可被对照，而不是自证。
+ */
 // StdSHA256 返回标准库计算的 SHA-256 摘要。
 func StdSHA256(data []byte) [32]byte { return sha256.Sum256(data) }
 

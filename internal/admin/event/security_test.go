@@ -46,7 +46,7 @@ func invokeHandler(handler app.HandlerFunc, method, uri string, body []byte, ps 
 	return ctx
 }
 
-// ---------- SecurityEvent 处理器测试 ----------
+// SecurityEvent 处理器测试
 
 func TestListSecurityEventsReturns200(t *testing.T) {
 	db := newEventDB(t)
@@ -275,7 +275,7 @@ func TestSiteSecurityEventTimelineSiteNotFoundReturns404(t *testing.T) {
 	}
 }
 
-// ---------- GetRequestTrace 测试 ----------
+// GetRequestTrace 测试
 
 func TestGetRequestTraceEmptyIDReturns400(t *testing.T) {
 	db := newEventDB(t)

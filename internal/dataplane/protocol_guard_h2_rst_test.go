@@ -39,22 +39,24 @@ func (c *h2LoopCore) GetCtxPool() *sync.Pool {
 	return &c.bufPool
 }
 
-// h2LoopConn is the per-stream connection wrapper the harness injects via
-// rc.SetConn, mirroring the fork's h2ServerConn wrapper shape. It implements
-// the anonymous h2StreamResetter interface by calling the core's reset hook,
-// so the core stays independent of the fork module's unexported wrapper
-// type. Having an explicit ResetStreamHandler plus a hertz network.Conn
-// surface (both required by production wiring) also proves that
-// maybeH2ResetStream asserts by method set, not by concrete type.
+/**
+ * h2LoopConn 是 harness 通过 rc.SetConn 注入的逐流连接包装器，形态与 fork 的
+ * h2ServerConn 包装器一致。它通过调用核心的 reset hook 实现匿名
+ * h2StreamResetter 接口，从而使核心不依赖 fork 模块未导出的包装类型。
+ * 同时具备显式的 ResetStreamHandler 与 hertz network.Conn 表面（两者都是生产
+ * 接线所必需的），也证明了 maybeH2ResetStream 是按方法集而非具体类型做断言。
+ */
 type h2LoopConn struct {
 	net.Conn
 	core *h2LoopCore
 }
 
-// ResetStreamHandler 是 harness 的流级 RST 信号：只回执核心的 resetHook，
-// 帧层复放交给测试主流程（fork v0.2.0 无此方法，harness 就是真相）。
-// 签名的 http2ErrCode 与 dataplane 包内类型一致，从而天然满足
-// maybeH2ResetStream 的匿名接口（方法集匹配，无连接类型要求）。
+/**
+ * ResetStreamHandler 是 harness 的流级 RST 信号：只回执核心的 resetHook，
+ * 帧层复放交给测试主流程（fork v0.2.0 无此方法，harness 就是真相）。
+ * 签名的 http2ErrCode 与 dataplane 包内类型一致，从而天然满足
+ * maybeH2ResetStream 的匿名接口（方法集匹配，无连接类型要求）。
+ */
 func (c *h2LoopConn) ResetStreamHandler(code forkhttp2.ErrCode) bool {
 	if c == nil || c.core == nil {
 		return false
@@ -65,8 +67,10 @@ func (c *h2LoopConn) ResetStreamHandler(code forkhttp2.ErrCode) bool {
 	return true
 }
 
-// 以下方法凑齐 hertz network.Conn 表面（Reader/Writer/超时），
-// 与 h2ConnAdapter 同款空实现；drop 流不触碰这些接口。
+/**
+ * 以下方法凑齐 hertz network.Conn 表面（Reader/Writer/超时），
+ * 与 h2ConnAdapter 同款空实现；drop 流不触碰这些接口。
+ */
 func (c *h2LoopConn) Peek(int) ([]byte, error)            { return nil, nil }
 func (c *h2LoopConn) Skip(int) error                      { return nil }
 func (c *h2LoopConn) Release() error                      { return nil }
@@ -81,11 +85,13 @@ func (c *h2LoopConn) SetWriteTimeout(time.Duration) error { return nil }
 
 var _ network.Conn = (*h2LoopConn)(nil)
 
-// ServeHTTP 是 fork 每流调用的业务入口（runHandler）。它忠实复现
-// handler.go drop 分支的 h2 路径：生产代码对有重置能力的流包装先走
-// maybeH2ResetStream（流级 RST_STREAM）并 return。本 Core 的包装器放
-// 在 resetHook 回执里，设备失败的兜底 AbortWithStatus(502) 也与生产
-// handler 逐字同构；无辜流直接写 200 响应。
+/**
+ * ServeHTTP 是 fork 每流调用的业务入口（runHandler）。它忠实复现
+ * handler.go drop 分支的 h2 路径：生产代码对有重置能力的流包装先走
+ * maybeH2ResetStream（流级 RST_STREAM）并 return。本 Core 的包装器放
+ * 在 resetHook 回执里，设备失败的兜底 AbortWithStatus(502) 也与生产
+ * handler 逐字同构；无辜流直接写 200 响应。
+ */
 func (c *h2LoopCore) ServeHTTP(ctx context.Context, rc *app.RequestContext) {
 	rc.SetConn(&h2LoopConn{core: c})
 	c.reqCtxMu.Lock()
@@ -119,8 +125,10 @@ func (c *h2LoopCore) ServeHTTP(ctx context.Context, rc *app.RequestContext) {
 
 func (c *h2LoopCore) GetTracer() tracer.Controller { return noopTracerController{} }
 
-// noopTracerController satisfies hertz tracer.Controller with zero behavior;
-// the fork only calls DoFinish when trace is enabled.
+/**
+ * noopTracerController 以零行为满足 hertz tracer.Controller；
+ * 只有开启 trace 时 fork 才会调用 DoFinish。
+ */
 type noopTracerController struct{}
 
 func (noopTracerController) Append(tracer.Tracer) {}
@@ -130,7 +138,7 @@ func (noopTracerController) DoStart(context.Context, *app.RequestContext) contex
 func (noopTracerController) DoFinish(context.Context, *app.RequestContext, error) {}
 func (noopTracerController) HasTracer() bool                                      { return false }
 
-// h2ConnAdapter implements hertz network.Conn over net.Conn for the harness.
+// h2ConnAdapter 在 net.Conn 之上为 harness 实现 hertz network.Conn。
 type h2ConnAdapter struct {
 	net.Conn
 	rd *bytes.Reader
@@ -172,20 +180,22 @@ func (a *h2ConnAdapter) SetWriteTimeout(d time.Duration) error { return nil }
 
 var _ network.Conn = (*h2ConnAdapter)(nil)
 
-// TestDropH2AbortStatusSemantics 直接驱动 x01n/http2 服务端验证 drop 的
-// h2 真实帧级语义 = 流级 RST_STREAM，并以帧级断言锁定：
-//
-//  1. 命中 drop 的流（stream 1）上观察到 RST_STREAM 且
-//     ErrCode=CANCEL(0x8)——正断言：h2 drop 的正确传输级语义；
-//  2. 同一条连接上的无辜流（stream 3）照常拿到完整 200 响应——
-//     共享连接未被整连 RST 杀掉。
-//
-// 驱动方式：真实 fork 帧层（client preface → SETTINGS ack → 双流
-// HEADERS）。fork v0.2.0 尚无 ResetStreamHandler，harness 的 Core 侧注入
-// h2LoopConn 匿名实现（rc.SetConn 提前覆盖 fork 的 h2ServerConn），与生
-// 产 handler.go drop 分支的 maybeH2ResetStream 断言路径同构：断言成功即
-// 流级 reset，失败则兜底 AbortWithStatus(502)。resetHook 由 harness 在帧
-// 层复放 RST_STREAM，帧序列由 quic-go 客户端 Framer 解析锁定。
+/**
+ * TestDropH2AbortStatusSemantics 直接驱动 x01n/http2 服务端验证 drop 的
+ * h2 真实帧级语义 = 流级 RST_STREAM，并以帧级断言锁定：
+ *
+ *  1. 命中 drop 的流（stream 1）上观察到 RST_STREAM 且
+ *     ErrCode=CANCEL(0x8)——正断言：h2 drop 的正确传输级语义；
+ *  2. 同一条连接上的无辜流（stream 3）照常拿到完整 200 响应——
+ *     共享连接未被整连 RST 杀掉。
+ *
+ * 驱动方式：真实 fork 帧层（client preface → SETTINGS ack → 双流
+ * HEADERS）。fork v0.2.0 尚无 ResetStreamHandler，harness 的 Core 侧注入
+ * h2LoopConn 匿名实现（rc.SetConn 提前覆盖 fork 的 h2ServerConn），与生
+ * 产 handler.go drop 分支的 maybeH2ResetStream 断言路径同构：断言成功即
+ * 流级 reset，失败则兜底 AbortWithStatus(502)。resetHook 由 harness 在帧
+ * 层复放 RST_STREAM，帧序列由 quic-go 客户端 Framer 解析锁定。
+ */
 func TestDropH2AbortStatusSemantics(t *testing.T) {
 	// 客户端视角的连接；对端由 fork Serve 持有。
 	clientSide, forkSide := net.Pipe()

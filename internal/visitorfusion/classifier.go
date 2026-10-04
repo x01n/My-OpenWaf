@@ -1,4 +1,4 @@
-// Package visitorfusion classifies released HTTPS requests with local, explainable signals.
+// Package visitorfusion 用本地、可解释的信号对已放行的 HTTPS 请求做分类。
 package visitorfusion
 
 import (
@@ -7,7 +7,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 )
 
-// Classification is the local human-machine inference outcome.
+// Classification 是本地人机推断的结论。
 type Classification string
 
 const (
@@ -16,7 +16,7 @@ const (
 	Unknown Classification = "unknown"
 )
 
-// ClientFamily is a coarse client stack family, never an exact browser identity or version.
+// ClientFamily 是粗粒度的客户端协议栈族系，绝不是精确的浏览器身份或版本。
 type ClientFamily string
 
 const (
@@ -26,7 +26,7 @@ const (
 	UnknownFamily    ClientFamily = "unknown"
 )
 
-// UAClaim is the client family claimed by the User-Agent, not an asserted identity.
+// UAClaim 是 User-Agent 自称的客户端族系，并非已被证实的身份。
 type UAClaim string
 
 const (
@@ -36,7 +36,7 @@ const (
 	UnknownClaim    UAClaim = "unknown"
 )
 
-// Consistency describes whether independently available request and TLS signals agree.
+// Consistency 描述彼此独立可得的请求信号与 TLS 信号是否一致。
 type Consistency string
 
 const (
@@ -45,7 +45,7 @@ const (
 	InsufficientEvidence Consistency = "insufficient_evidence"
 )
 
-// TLSFeatures contains structural TLS fields already captured by the data plane.
+// TLSFeatures 保存数据面已经采集到的结构化 TLS 字段。
 type TLSFeatures struct {
 	JA3          string
 	JA4          string
@@ -56,7 +56,7 @@ type TLSFeatures struct {
 	Curves       int
 }
 
-// ExistingBotScores copies grouped scores from the existing bot detector without reusing its verdict.
+// ExistingBotScores 复制既有 bot 检测器的分模块分数，但不复用它的判定结论。
 type ExistingBotScores struct {
 	Available        bool
 	GeoIPScore       int
@@ -65,14 +65,17 @@ type ExistingBotScores struct {
 	IPRepScore       int
 }
 
-// EnvironmentSignal is reserved for a verified browser-sign or challenge environment result.
-// The current released-request path has no such result, so Available remains false.
+/**
+ * EnvironmentSignal 预留给经过验证的 browser-sign 或 challenge 环境结果。
+ *
+ * 当前已放行请求这条路径没有此类结果，因此 Available 始终为 false。
+ */
 type EnvironmentSignal struct {
 	Available          bool
 	AutomationDetected bool
 }
 
-// Input holds local request features used for a single fusion evaluation.
+// Input 保存单次融合评估所用的本地请求特征。
 type Input struct {
 	HTTPS     bool
 	WAFAction action.Result
@@ -89,7 +92,7 @@ type Input struct {
 	Environment       EnvironmentSignal
 }
 
-// ScoreBreakdown keeps source weights separate so an aggregate cannot be mistaken for an existing bot score.
+// ScoreBreakdown 把各来源权重分开保存，避免其汇总被误当成既有 bot 分。
 type ScoreBreakdown struct {
 	IP          int
 	Request     int
@@ -98,7 +101,7 @@ type ScoreBreakdown struct {
 	Behavior    int
 }
 
-// Result is the explainable local fusion outcome. Reasons are stable reason codes only.
+// Result 是可解释的本地融合结论。Reasons 只使用稳定的原因码。
 type Result struct {
 	Eligible           bool
 	EvidenceSufficient bool
@@ -111,13 +114,16 @@ type Result struct {
 	Reasons            []string
 }
 
-// IsPersistable reports whether this request is inside the HTTPS and released-request scope.
+// IsPersistable 报告该请求是否落在 HTTPS 且已放行的范围内。
 func (r Result) IsPersistable() bool {
 	return r.Eligible
 }
 
-// ExternalModelFeatures exposes only minimized, structured features to a future model advisor.
-// It deliberately excludes raw headers, bodies, cookies, client IPs, JA3, and JA4 values.
+/**
+ * ExternalModelFeatures 只向未来的模型顾问暴露最小化、结构化的特征。
+ *
+ * 有意排除原始头、正文、Cookie、客户端 IP，以及 JA3 与 JA4 取值。
+ */
 type ExternalModelFeatures struct {
 	UAClaim              UAClaim
 	HasClientHints       bool
@@ -133,32 +139,35 @@ type ExternalModelFeatures struct {
 	EnvironmentAvailable bool
 }
 
-// ExternalModelAdvice is intentionally observational; local classification never consumes it.
+// ExternalModelAdvice 有意保持为观测性质；本地分类永不消费它。
 type ExternalModelAdvice struct {
 	Available bool
 }
 
-// ExternalModelAdvisor reserves a local seam for a later model integration.
-// Future network-backed implementations require independent review for timeout, circuit breaker,
-// fail-open observation mode, privacy, and data minimization before any request is introduced.
+/**
+ * ExternalModelAdvisor 为后续的模型集成预留一个本地接缝。
+ *
+ * 将来任何走网络的实现，在真正引入请求之前都必须先通过独立评审：超时、
+ * 熔断、fail-open 观测模式、隐私与数据最小化。
+ */
 type ExternalModelAdvisor interface {
 	Advise(ExternalModelFeatures) ExternalModelAdvice
 }
 
-// DisabledExternalModelAdvisor is the production default and never performs network I/O.
+// DisabledExternalModelAdvisor 是生产默认实现，永不发起网络 I/O。
 type DisabledExternalModelAdvisor struct{}
 
-// Advise keeps the default path disabled and cannot alter local classification.
+// Advise 保持默认路径为禁用状态，无法改变本地分类结果。
 func (DisabledExternalModelAdvisor) Advise(ExternalModelFeatures) ExternalModelAdvice {
 	return ExternalModelAdvice{}
 }
 
-// Evaluate evaluates one request with the disabled external-model seam.
+// Evaluate 用禁用的外部模型接缝评估单个请求。
 func Evaluate(input Input) Result {
 	return EvaluateWithAdvisor(input, DisabledExternalModelAdvisor{})
 }
 
-// EvaluateWithAdvisor evaluates local rules only; advisor output is observation-only by design.
+// EvaluateWithAdvisor 只评估本地规则；顾问的输出按设计仅用于观测。
 func EvaluateWithAdvisor(input Input, advisor ExternalModelAdvisor) Result {
 	result := evaluateLocal(input)
 	if result.Eligible && advisor != nil {

@@ -11,17 +11,17 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// SeedDefaults ensures default API key and admin account exist.
-// Returns the first-run API token and admin password (empty if not first run).
+// SeedDefaults 确保默认 API Key 与管理员账号存在。
+// 返回首次运行时生成的 API 令牌与管理员口令（非首次运行则为空）。
 func SeedDefaults(db *gorm.DB, adminBind string, log *slog.Logger) (firstRunToken string, firstRunPassword string, err error) {
-	// Admin listener is no longer needed - admin server is always started separately
+	// 管理端监听器已不再需要——管理端服务器始终单独启动
 
 	firstRunToken, err = seedFirstAPIKey(db)
 	if err != nil {
 		return "", "", err
 	}
 
-	// Seed admin account with random password on first run.
+	// 首次运行时为管理员账号生成随机口令。
 	var aCount int64
 	if err := db.Model(&AdminAccount{}).Where("username = ?", "admin").Count(&aCount).Error; err != nil {
 		return "", "", fmt.Errorf("seed: count admin accounts: %w", err)

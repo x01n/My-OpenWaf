@@ -460,9 +460,9 @@ func init() {
 		},
 	})
 
-	// --- 12 new rules ---
+	// 以下为 12 条新增规则
 
-	// 1. Spring Data REST RCE (CVE-2017-8046)
+	// 1. Spring Data REST RCE（CVE-2017-8046）
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-spring-data-rest-rce",
 		Name:     "Spring Data REST JSON Patch SpEL 远程代码执行（RCE）",
@@ -487,7 +487,7 @@ func init() {
 		},
 	})
 
-	// 2. Jeecg-boot SQL injection (CVE-2023-1454)
+	// 2. Jeecg-boot SQL 注入（CVE-2023-1454）
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-jeecg-boot-sqli",
 		Name:     "Jeecg-boot API SQL 注入",
@@ -514,7 +514,7 @@ func init() {
 		},
 	})
 
-	// 3. XStream Deserialization RCE (CVE-2021-21351 / CVE-2021-29505)
+	// 3. XStream 反序列化 RCE（CVE-2021-21351 / CVE-2021-29505）
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-xstream-deser-rce",
 		Name:     "XStream 反序列化 RCE",
@@ -538,7 +538,7 @@ func init() {
 		},
 	})
 
-	// 4. Router OS Command Injection (CVE-2019-3929)
+	// 4. 路由器 OS 命令注入（CVE-2019-3929）
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-router-cmd-inject",
 		Name:     "Router CGI OS 命令注入",
@@ -569,7 +569,7 @@ func init() {
 		},
 	})
 
-	// 5. Java Code Injection
+	// 5. Java 代码注入
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-java-code-inject",
 		Name:     "Java 代码注入 / OGNL / SpEL",
@@ -604,7 +604,7 @@ func init() {
 		},
 	})
 
-	// 6. Suspicious Remote Call Protocol / JDBC
+	// 6. 可疑的远程调用协议 / JDBC
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-remote-protocol-jndi",
 		Name:     "可疑远程调用协议 / JDBC",
@@ -645,7 +645,7 @@ func init() {
 		},
 	})
 
-	// 7. Deep Path Traversal
+	// 7. 深层路径遍历
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-deep-path-traversal",
 		Name:     "深度 / 编码路径遍历",
@@ -674,7 +674,7 @@ func init() {
 		},
 	})
 
-	// 8. XML Entity Injection UTF-7 (XXE)
+	// 8. UTF-7 编码的 XML 实体注入（XXE）
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-xxe-utf7",
 		Name:     "通过 UTF-7 的 XXE",
@@ -698,7 +698,7 @@ func init() {
 		},
 	})
 
-	// 9. LDAP Injection
+	// 9. LDAP 注入
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-ldap-injection",
 		Name:     "LDAP 注入",
@@ -727,7 +727,7 @@ func init() {
 		},
 	})
 
-	// 10. MongoDB NoSQL Injection
+	// 10. MongoDB NoSQL 注入
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-nosql-injection",
 		Name:     "MongoDB NoSQL 注入",
@@ -756,7 +756,7 @@ func init() {
 		},
 	})
 
-	// 11. Sensitive File Access
+	// 11. 敏感文件访问
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-sensitive-file-access",
 		Name:     "敏感文件访问",
@@ -783,7 +783,7 @@ func init() {
 		},
 	})
 
-	// 12. Low-severity Command Execution
+	// 12. 低严重性命令执行
 	globalCVERuleRegistry.Register(&CVERule{
 		ID:       "cve-low-cmd-exec",
 		Name:     "URL 参数中的低严重性 OS 命令",
@@ -813,7 +813,7 @@ func init() {
 	})
 }
 
-// GeneralCVEDetector detects technology-agnostic CVE exploitation patterns.
+// GeneralCVEDetector 检测与技术栈无关的 CVE 利用特征。
 type GeneralCVEDetector struct {
 	rules []generalCVERule
 }
@@ -847,7 +847,7 @@ type generalCVERule struct {
 	description string
 	patterns    []*regexp.Regexp
 	target      string
-	matchAll    bool // if true, ALL patterns must match (conjunction)
+	matchAll    bool // 为 true 时要求全部正则都命中（合取）
 }
 
 var (
@@ -877,30 +877,30 @@ var (
 	reSmuggle_clte     = regexp.MustCompile(`(?i)transfer-encoding\s*:\s*chunked`)
 	reShellShock       = regexp.MustCompile(`(?i)\(\)\s*\{[^}]*\}\s*;`)
 
-	// HTTP header injection
+	// HTTP 请求头注入
 	reHeaderInject = regexp.MustCompile(`(?i)%0[dD]%0[aA]\s*(HTTP/|Content-|Location:|Set-Cookie)`)
 
-	// SAP NetWeaver Visual Composer (CVE-2025-31324)
+	// SAP NetWeaver Visual Composer（CVE-2025-31324）
 	reSAPMetadataUploader = regexp.MustCompile(`(?i)/developmentserver/metadatauploader`)
 
-	// PHP-CGI argument injection (CVE-2024-4577)
+	// PHP-CGI 参数注入（CVE-2024-4577）
 	rePHPCGISoftHyphen = regexp.MustCompile(`(?i)[%\x00-\xff]ad.*-[dD]\s*(allow_url_include|auto_prepend_file)`)
 	rePHPCGIArgInject  = regexp.MustCompile(`(?i)php://input.*allow_url_include|auto_prepend_file.*php://input`)
 
-	// PAN-OS GlobalProtect (CVE-2024-3400)
+	// PAN-OS GlobalProtect（CVE-2024-3400）
 	rePANOSCookieTraversal = regexp.MustCompile(`(?i)SESSID=.*\.\.`)
 	rePANOSGlobalProtect   = regexp.MustCompile(`(?i)/ssl-vpn/hipreport\.esp`)
 
-	// Confluence RCE (CVE-2023-22527)
+	// Confluence RCE（CVE-2023-22527）
 	reConfluenceOGNL = regexp.MustCompile(`(?i)/template/aui/text-inline\.vm`)
 
-	// Citrix Bleed (CVE-2023-4966)
+	// Citrix Bleed（CVE-2023-4966）
 	reCitrixBleed = regexp.MustCompile(`(?i)/vpn/\.\./vpns/|/vpn/index\.html`)
 
-	// Apache Struts path traversal (CVE-2024-53677)
+	// Apache Struts 路径遍历（CVE-2024-53677）
 	reStrutsUpload = regexp.MustCompile(`(?i)top\["[^"]*"\]\s*=`)
 
-	// Ivanti Connect Secure (CVE-2024-21887, CVE-2025-0282)
+	// Ivanti Connect Secure（CVE-2024-21887、CVE-2025-0282）
 	reIvantiCSAPI           = regexp.MustCompile(`(?i)/api/v1/totp/user-backup-code/\.\.;/`)
 	reIvantiCSWeb           = regexp.MustCompile(`(?i)/dana-na/auth/url_default/welcome\.cgi`)
 	reViteFSAccess          = regexp.MustCompile(`(?i)(^|/)@fs/`)
@@ -953,52 +953,52 @@ var (
 	// Spring CoreJDK >= 9 数据绑定 RCE（CVE-2022-22965，Spring4Shell）
 	reSpring4ShellParam = regexp.MustCompile(`(?i)(?:^|&)(?:class|Class)[^=&]{0,256}\.(?:module|classLoader)`)
 
-	// --- New rules ---
+	// 以下为新增规则
 
-	// Spring Data REST RCE (CVE-2017-8046): JSON Patch with SpEL
+	// Spring Data REST RCE（CVE-2017-8046）：JSON Patch 携带 SpEL 表达式
 	reSpringDataRestPatch = regexp.MustCompile(`(?i)application/json-patch\+json|application/merge-patch\+json`)
 	reSpringDataRestSpEL  = regexp.MustCompile(`(?i)(?:new\s+java\.lang\.ProcessBuilder|T\s*\(\s*java\.lang\.Runtime\s*\)|\.getRuntime\s*\(\s*\)\.exec|spring\.cloud\.bootstrap|org\.springframework|\.getClass\s*\(\s*\)\.forName|#this\.getClass|java\.lang\.(?:Thread|ClassLoader)|beanFactory|applicationContext|getEnvironment)`)
 
-	// Jeecg-boot SQLi (CVE-2023-1454)
+	// Jeecg-boot SQL 注入（CVE-2023-1454）
 	reJeecgEndpoint = regexp.MustCompile(`(?i)/(?:sys/(?:dict/load(?:TreeData|Dict)|duplicate/check|user/query(?:SysUser|UserByDepId)|permission/getPermCode|category/loadAllData)|jmreport/(?:queryFieldBySql|testConnection|dictTableWhite))`)
 	reJeecgSQLi     = regexp.MustCompile(`(?i)(?:(?:union\s+(?:all\s+)?select|select\s+.*\bfrom\b|insert\s+into|update\s+.*\bset\b|delete\s+from|drop\s+(?:table|database)|sleep\s*\(|benchmark\s*\(|waitfor\s+delay|extractvalue\s*\(|updatexml\s*\(|load_file\s*\(|into\s+(?:outfile|dumpfile))|\b(?:and|or)\s+['"]?\d+['"]?\s*=\s*['"]?\d+|'\s*(?:or|and)\s+['"]?\d|--\s*$|#\s*$)`)
 
-	// XStream Deserialization RCE (CVE-2021-21351 / CVE-2021-29505)
+	// XStream 反序列化 RCE（CVE-2021-21351 / CVE-2021-29505）
 	reXStreamPayload = regexp.MustCompile(`(?i)(?:<sorted-set>|<java\.util\.PriorityQueue|<dynamic-proxy>|<javax\.naming\.ldap\.Rdn\$RdnEntry|ProcessBuilder.*</|<java\.lang\.Runtime|<sun\.reflect\.annotation|<java\.beans\.EventHandler|<com\.sun\.rowset\.JdbcRowSetImpl|<org\.apache\.xalan|<org\.apache\.commons\.(?:beanutils|collections)|<javassist\.tools\.web\.Viewer|<java\.security\.SignedObject)`)
 	reXStreamXML     = regexp.MustCompile(`(?i)(?:<\?xml\s|<(?:map|list|set|object-stream|linked-hash-set|tree-set|sorted-set|java\.util|javax\.)\b)`)
 
-	// Router OS Command Injection (CVE-2019-3929)
+	// 路由器 OS 命令注入（CVE-2019-3929）
 	reRouterCGIPath   = regexp.MustCompile(`(?i)/(?:cgi-bin/|ping\.cgi|syscmd\.cgi|diagnostic\.cgi|test-cgi|shell\.cgi|command\.cgi|webcm|goform/|apply\.cgi|tmUnblock\.cgi|admin/config\.cgi|debug\.cgi|boardData\w*\.php|formLogin)`)
 	reRouterShellMeta = regexp.MustCompile("(?:[;|&]|\\$\\(|`|\\n|%0[aAdD]|%7[cC]|%3[bB])")
 
-	// Java Code Injection
+	// Java 代码注入
 	reJavaCodeInject = regexp.MustCompile(`(?i)(?:Runtime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*exec|new\s+ProcessBuilder|Class\s*\.\s*forName\s*\(|java\.lang\.reflect\.Method\s*\.\s*invoke|javax\.script\.ScriptEngine|\.getMethod\s*\(\s*["'](?:exec|invoke|forName|getRuntime)|java\.lang\.ProcessBuilder|ScriptEngineManager|\.newInstance\s*\(\s*\)|Unsafe\.getUnsafe|sun\.misc\.Unsafe)`)
 	reJavaOGNLSpEL   = regexp.MustCompile(`(?i)(?:#\{\s*T\s*\(|%23%7[bB]|ognlUtil|_memberAccess|valueStack|#context\[|ActionContext|#_memberAccess|#attr\[|#application\[|#session\[|#request\[|#parameters\[|#root\b|\.getClass\(\)\.forName|%24%7[bB]|java\.lang\.\w+\)\.|\$\{.*T\(java\.)`)
 
-	// Suspicious Remote Call Protocol / JDBC
+	// 可疑的远程调用协议 / JDBC
 	reRemoteProtocol = regexp.MustCompile(`(?i)(?:rmi://|ldaps?://|jndi:|jdbc:(?:mysql|postgresql|oracle|sqlserver|h2|derby|mariadb|sqlite)|iiop://|corba://|t3://|t3s://|dns://[^/]*\.\w+/|(?:^|[&?=])(?:rmi|ldap|jndi|jdbc|dns)://)`)
 
-	// Deep Path Traversal
+	// 深层路径遍历
 	reDeepPathTraversal = regexp.MustCompile(`(?i)(?:\.\.\.\.//|\\\.\\\.\\\.\\\.\\\\|%252[eE]%252[eE]/|\.\.%[cC]0%[aA][fF]|\.\.%[eE][fF]%[bB][cC]%8[fF]|(?:\.\./){4,}|(?:\.\.\\){4,}|(?:%2[eE]%2[eE](?:%2[fF]|%5[cC])){4,}|\.\.%25%35%63|\.\.%c1%1c|\.\.%c1%9c|\.\.%c0%9v|\.\.%uff0e%uff0e|%c0%ae%c0%ae/|\.\.;/|/\.%2e/\.%2e/)`)
 
-	// XXE UTF-7
+	// UTF-7 编码的 XXE
 	reXXEUTF7Prefix = regexp.MustCompile(`\+ADw-`)
 	reXXEUTF7Entity = regexp.MustCompile(`(?i)(?:\+ADw-\s*!DOCTYPE|\+ADw-\s*!ENTITY|SYSTEM|PUBLIC)`)
 
-	// LDAP Injection
+	// LDAP 注入
 	reLDAPInject = regexp.MustCompile(`(?i)(?:\)\s*\(\s*\|\s*\(|\*\)\s*\(\s*(?:objectclass|objectCategory|cn|uid|sAMAccountName|mail|memberOf)\s*=\s*\*|\\00|%00.*\(|\)\s*\(\s*[&|!]\s*\(|(?:^|[&?=])\(\s*[&|]\s*\(|\x00|\)\(cn=\*\))`)
 
-	// MongoDB NoSQL Injection
+	// MongoDB NoSQL 注入
 	reNoSQLInject = regexp.MustCompile(`(?i)(?:\{\s*["']?\$(?:gt|ne|regex|where|or|and|not|exists|elemMatch|nin|lt|gte|lte|in|type|size|all|mod)\b|\$(?:gt|ne|regex|where|or|and|not|exists|nin|lt|gte|lte|in)\s*[:\[{]|\[\s*\$(?:gt|ne|regex|where|or|and)\b|"\$(?:gt|ne|regex|where|or|and|not)"|\$where\s*:\s*["']?\s*(?:function|this\.)|\$regex\s*:\s*["']|(?:^|[&?])[\w.]*\[\$(?:gt|ne|regex|where)\])`)
 
-	// Sensitive File Access
+	// 敏感文件访问
 	reSensitiveFile = regexp.MustCompile(`(?i)(?:/\.env(?:\b|\.\w+|$)|/\.git/(?:config|HEAD|index|refs|objects|logs)|/\.gitignore|/\.htaccess|/\.htpasswd|/wp-config\.php(?:\.bak|\.old|\.swp|~)?|/web\.config|/database\.yml|/settings\.py|/application\.(?:properties|yml|yaml)|/etc/(?:passwd|shadow|hosts|my\.cnf|redis\.conf)|/\.DS_Store|/\.svn/entries|/\.svn/wc\.db|/\.idea/workspace\.xml|/\.vscode/settings\.json|/composer\.(?:json|lock)|/package\.json|/Gemfile(?:\.lock)?|/requirements\.txt|/Dockerfile|/docker-compose\.ya?ml|/\.aws/credentials|/\.ssh/(?:id_rsa|authorized_keys)|/\.bash_history|/\.mysql_history|/phpinfo\.php|/adminer\.php|/info\.php|/server-status|/server-info|/\.well-known/security\.txt|/backup\.(?:sql|zip|tar\.gz|bak)|/dump\.sql|/WEB-INF/web\.xml|/META-INF/MANIFEST\.MF)`)
 
-	// Low-severity Command Execution in URL
+	// URL 中的低严重性命令执行
 	reLowSeverityCmd = regexp.MustCompile(`(?i)(?:^|[&?=|;\x60\s])(?:whoami|(?:^|\b)id(?:\b|$)|uname(?:\s+-[a-z])?|hostname|ifconfig|ipconfig|systeminfo|net\s+user|cat\s+/etc/(?:passwd|shadow|hosts)|ls\s+-la|pwd|w(?:ho)?(?:\s|$)|env(?:\s|$)|set(?:\s|$)|printenv|curl\s+|wget\s+|nslookup\s+|dig\s+|traceroute\s+|ping\s+-[nc])\s*(?:[&;|)\x60]|%[0-9a-f]{2}|$)`)
 )
 
-// NewGeneralCVEDetector creates a general CVE detector with built-in rules.
+// NewGeneralCVEDetector 创建带内置规则的通用 CVE 检测器。
 func NewGeneralCVEDetector() *GeneralCVEDetector {
 	d := &GeneralCVEDetector{}
 	d.rules = []generalCVERule{
@@ -1047,7 +1047,7 @@ func NewGeneralCVEDetector() *GeneralCVEDetector {
 			patterns:    []*regexp.Regexp{reHeaderInject},
 			target:      "all",
 		},
-		// 2024-2025 Critical CVEs
+		// 2024-2025 年高危 CVE
 		{
 			cveID: "CVE-2025-31324", severity: "critical",
 			description: "SAP NetWeaver Visual Composer 未认证文件上传 RCE",
@@ -1298,7 +1298,7 @@ func requestTargetContainsPANOSGlobalProtect(req *CVERequest, target string) boo
 func (d *GeneralCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CVEMatch {
 	var matches []CVEMatch
 
-	// Special handling: HTTP request smuggling checks both CL and TE headers.
+	// 特殊处理：HTTP 请求走私需同时检查 Content-Length 与 Transfer-Encoding 两个头
 	if checkHTTPSmuggling(req) {
 		matches = append(matches, CVEMatch{
 			CVEID:       "CVE-2023-SMUGGLE",
@@ -1322,7 +1322,7 @@ func (d *GeneralCVEDetector) Detect(req *CVERequest, hits *subDetectorHits) []CV
 			continue
 		}
 		if rule.cveID == "CVE-2023-SMUGGLE" {
-			continue // handled above
+			continue // 已在上方单独处理
 		}
 		if !shouldScanGeneralRule(req, rule, hits) {
 			continue
@@ -1500,8 +1500,8 @@ func (d *GeneralCVEDetector) DetectFirst(req *CVERequest, hits *subDetectorHits)
 	return CVEMatch{}, false
 }
 
-// checkHTTPSmuggling detects when both Content-Length and Transfer-Encoding headers
-// are present simultaneously, or TE contains malformed values.
+// checkHTTPSmuggling 检测 Content-Length 与 Transfer-Encoding 同时出现，
+// 或 Transfer-Encoding 取值畸形的请求。
 func checkHTTPSmuggling(req *CVERequest) bool {
 	hasCL := false
 	hasTE := false

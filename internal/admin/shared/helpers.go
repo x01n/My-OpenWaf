@@ -18,8 +18,8 @@ import (
 	"My-OpenWaf/internal/waf/cve"
 )
 
-// LoadProtectionConfig reads the protection settings from the system settings repository.
-// It retains the legacy default-on-missing behavior for callers that cannot return an error.
+// LoadProtectionConfig 从系统设置仓库读取防护配置。
+// 对无法返回错误的调用方，保留「缺失即用默认值」的既有行为。
 func LoadProtectionConfig(repo *repository.SystemSettingsRepo) store.ProtectionConfig {
 	cfg, err := LoadProtectionConfigStrict(repo)
 	if err != nil {
@@ -28,8 +28,8 @@ func LoadProtectionConfig(repo *repository.SystemSettingsRepo) store.ProtectionC
 	return cfg
 }
 
-// LoadProtectionConfigStrict reads and validates persisted protection settings.
-// Missing settings use defaults; database and JSON errors are returned to the caller.
+// LoadProtectionConfigStrict 读取并校验已持久化的防护配置。
+// 配置缺失时使用默认值；数据库错误与 JSON 错误会返回给调用方。
 func LoadProtectionConfigStrict(repo *repository.SystemSettingsRepo) (store.ProtectionConfig, error) {
 	val, err := repo.Get("protection")
 	if err != nil {
@@ -51,15 +51,15 @@ func LoadProtectionConfigStrict(repo *repository.SystemSettingsRepo) (store.Prot
 	return cfg, nil
 }
 
-// NormalizeAndValidateBasicAuth trims configured credentials and rejects enabled Basic Auth
-// unless both credentials are non-empty.
+// NormalizeAndValidateBasicAuth 去除配置凭据的首尾空白；若启用了
+// Basic Auth，则要求用户名与口令都非空。
 func NormalizeAndValidateBasicAuth(cfg *store.ProtectionConfig) error {
 	cfg.BasicAuthUsername = strings.TrimSpace(cfg.BasicAuthUsername)
 	cfg.BasicAuthPassword = strings.TrimSpace(cfg.BasicAuthPassword)
 	return cfg.ValidateBasicAuth()
 }
 
-// SaveProtectionConfig writes validated protection settings to the system settings repository.
+// SaveProtectionConfig 把校验通过的防护配置写入系统设置仓库。
 func SaveProtectionConfig(repo *repository.SystemSettingsRepo, cfg store.ProtectionConfig) error {
 	if _, err := LoadProtectionConfigStrict(repo); err != nil {
 		return err
@@ -77,13 +77,13 @@ func SaveProtectionConfig(repo *repository.SystemSettingsRepo, cfg store.Protect
 	return repo.Set("protection", string(data))
 }
 
-// ParseUintParam extracts a uint path parameter by name from the request context.
+// ParseUintParam 按名字从请求上下文中取出一个 uint 路径参数。
 func ParseUintParam(c *app.RequestContext, name string) (uint, error) {
 	v, err := strconv.ParseUint(c.Param(name), 10, 64)
 	return uint(v), err
 }
 
-// ValidateSiteTLSCertificate checks that a TLS-enabled site has a valid certificate reference.
+// ValidateSiteTLSCertificate 校验启用了 TLS 的站点确实引用了有效证书。
 func ValidateSiteTLSCertificate(tlsEnabled bool, certID *uint, certRepo *repository.CertificateRepo) error {
 	if !tlsEnabled {
 		return nil
@@ -100,7 +100,7 @@ func ValidateSiteTLSCertificate(tlsEnabled bool, certID *uint, certRepo *reposit
 	return nil
 }
 
-// ValidateRuleAction normalizes and validates a rule action string.
+// ValidateRuleAction 归一化并校验规则动作字符串。
 func ValidateRuleAction(value string) (string, bool) {
 	if value == "" {
 		return "", true
@@ -112,8 +112,7 @@ func ValidateRuleAction(value string) (string, bool) {
 	return string(act), true
 }
 
-// ValidateActionWithoutRedirectTarget validates actions for config fields that
-// do not carry a redirect_to target.
+// ValidateActionWithoutRedirectTarget 校验那些不携带 redirect_to 目标的配置字段所用的动作。
 func ValidateActionWithoutRedirectTarget(value string) (string, bool) {
 	normalized, ok := ValidateRuleAction(value)
 	if !ok {
@@ -136,7 +135,7 @@ func ValidateActionWithRedirectTarget(value string, redirectTo *string) (string,
 	return normalized, true
 }
 
-// ValidateCaptchaType validates the strict rule-level CAPTCHA override contract.
+// ValidateCaptchaType 校验规则级别的严格 CAPTCHA 覆盖契约。
 func ValidateCaptchaType(value string) (string, bool) {
 	if value == "" {
 		return "", true
@@ -147,7 +146,7 @@ func ValidateCaptchaType(value string) (string, bool) {
 	return value, true
 }
 
-// ValidateGlobalCaptchaType validates the persisted global CAPTCHA mode.
+// ValidateGlobalCaptchaType 校验已持久化的全局 CAPTCHA 模式。
 func ValidateGlobalCaptchaType(value string) error {
 	if !challenge.IsValidCaptchaType(challenge.CaptchaType(value)) {
 		return fmt.Errorf("captcha_type must be one of: math, click, slide, rotate")
@@ -155,7 +154,7 @@ func ValidateGlobalCaptchaType(value string) error {
 	return nil
 }
 
-// ValidateCCRules validates the shared global/site CC rule JSON contract.
+// ValidateCCRules 校验全局与站点共用的 CC 规则 JSON 契约。
 func ValidateCCRules(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -240,7 +239,7 @@ func ValidateCCRules(raw string) error {
 	return nil
 }
 
-// ValidateCCRuleAction validates supported CC actions and legacy aliases.
+// ValidateCCRuleAction 校验受支持的 CC 动作及其 legacy 别名。
 func ValidateCCRuleAction(value string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "intercept", "rate_limit", "captcha", "captcha_challenge", "shield_challenge", "chain_challenge", "drop", "observe", "challenge", "block", "log_only":
@@ -268,7 +267,6 @@ func splitCCHeaderValueForValidation(value string) (string, string) {
 	return "", ""
 }
 
-// ValidateAntiReplayAction validates the actions preserved by the anti-replay dataplane path.
 // ValidateChallengeAction 校验质询动作白名单并归一化。
 // 合法集合：challenge / captcha_challenge / shield_challenge / chain_challenge。
 // 空串表示「继承」，返回 ("", true)；非法值返回 ("", false)。
@@ -294,6 +292,7 @@ func ValidateGlobalChallengeAction(value string) bool {
 	return ok
 }
 
+// ValidateAntiReplayAction 校验 anti-replay 数据面路径会保留的动作集合。
 func ValidateAntiReplayAction(value string) (string, bool) {
 	if value == "" {
 		return "", true
@@ -307,20 +306,20 @@ func ValidateAntiReplayAction(value string) (string, bool) {
 	}
 }
 
-// ValidateBotScoreThreshold checks the shared bot/drop threshold range.
+// ValidateBotScoreThreshold 校验 bot/drop 共用的分值阈值范围。
 func ValidateBotScoreThreshold(value int) bool {
 	return value >= 1 && value <= 100
 }
 
-// ReloadCVERules triggers a CVE rule reload on the feed manager if it is not nil.
+// ReloadCVERules 在 feed 管理器非空时触发一次 CVE 规则重载。
 func ReloadCVERules(feedMgr *cve.CVEFeedManager) {
 	if feedMgr != nil {
 		feedMgr.ReloadRules()
 	}
 }
 
-// SyncBotEnabledToProtection updates ProtectionConfig.BotDetectionEnabled
-// so the engine stays consistent when the bot settings page toggles the flag.
+// SyncBotEnabledToProtection 更新 ProtectionConfig.BotDetectionEnabled，
+// 使 bot 设置页切换开关时引擎侧保持一致。
 func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	cfg, err := LoadProtectionConfigStrict(settingsRepo)
 	if err != nil {
@@ -333,10 +332,8 @@ func SyncBotEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, ena
 	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
-// SyncCaptchaEnabledToProtection updates ProtectionConfig.CaptchaEnabled
-// so the engine stays consistent when the bot settings page toggles the captcha flag.
-// SyncCaptchaEnabledToProtection updates ProtectionConfig.CaptchaEnabled
-// so the engine stays consistent when the bot settings page toggles the captcha flag.
+// SyncCaptchaEnabledToProtection 更新 ProtectionConfig.CaptchaEnabled，
+// 使 bot 设置页切换 CAPTCHA 开关时引擎侧保持一致。
 func SyncCaptchaEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	cfg, err := LoadProtectionConfigStrict(settingsRepo)
 	if err != nil {
@@ -349,7 +346,7 @@ func SyncCaptchaEnabledToProtection(settingsRepo *repository.SystemSettingsRepo,
 	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
-// SyncAntiReplayEnabledToProtection updates the global anti-replay flag used by the runtime.
+// SyncAntiReplayEnabledToProtection 更新运行时使用的全局 anti-replay 开关。
 func SyncAntiReplayEnabledToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	cfg, err := LoadProtectionConfigStrict(settingsRepo)
 	if err != nil {
@@ -383,7 +380,7 @@ func SyncProtectionCaptchaToSettings(settingsRepo *repository.SystemSettingsRepo
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
-// SyncProtectionAntiReplayToSettings updates bot_settings.AntiReplayEnabled from protection.
+// SyncProtectionAntiReplayToSettings 把 protection 中的 AntiReplayEnabled 同步到 bot_settings。
 func SyncProtectionAntiReplayToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	current := BotSettingsResponse{ScoreThreshold: 60}
 	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
@@ -415,7 +412,7 @@ func ValidateAntiReplayCookieMode(raw string, allowEmpty bool) (string, bool) {
 	}
 }
 
-// SyncAntiReplayCookieModeToProtection updates the global anti-replay cookie mode used by the runtime.
+// SyncAntiReplayCookieModeToProtection 更新运行时使用的全局 anti-replay Cookie 模式。
 func SyncAntiReplayCookieModeToProtection(settingsRepo *repository.SystemSettingsRepo, mode string) error {
 	cfg, err := LoadProtectionConfigStrict(settingsRepo)
 	if err != nil {
@@ -428,7 +425,7 @@ func SyncAntiReplayCookieModeToProtection(settingsRepo *repository.SystemSetting
 	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
-// SyncProtectionAntiReplayCookieModeToSettings updates bot_settings.AntiReplayCookieMode from protection.
+// SyncProtectionAntiReplayCookieModeToSettings 把 protection 中的 AntiReplayCookieMode 同步到 bot_settings。
 func SyncProtectionAntiReplayCookieModeToSettings(settingsRepo *repository.SystemSettingsRepo, mode string) error {
 	current := BotSettingsResponse{ScoreThreshold: 60}
 	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
@@ -447,8 +444,6 @@ func SyncProtectionAntiReplayCookieModeToSettings(settingsRepo *repository.Syste
 
 // SyncBrowserSignToProtection 将 bot_settings 中的浏览器签名配置同步到 protection，
 // 供引擎 phase 与 proxy HTML 注入读取。
-// SyncBrowserSignToProtection synchronizes browser signature settings from
-// bot_settings to protection for the engine phase and proxy HTML injection.
 func SyncBrowserSignToProtection(settingsRepo *repository.SystemSettingsRepo, enabled bool, ttl int, action string) error {
 	cfg, err := LoadProtectionConfigStrict(settingsRepo)
 	if err != nil {
@@ -473,7 +468,7 @@ func SyncBrowserSignToProtection(settingsRepo *repository.SystemSettingsRepo, en
 	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
-// SyncBotThresholdToDropPolicy keeps the runtime bot threshold aligned with the bot settings page.
+// SyncBotThresholdToDropPolicy 让运行时 bot 阈值与 bot 设置页保持一致。
 func SyncBotThresholdToDropPolicy(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
 	if threshold <= 0 {
 		return nil
@@ -503,9 +498,8 @@ func SyncBotThresholdToDropPolicy(settingsRepo *repository.SystemSettingsRepo, t
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
-// SyncCVEAutoDropToDropPolicy keeps CVE auto-drop runtime policy aligned with protection settings.
-// SyncDropThresholdToBotSettings updates bot_settings.ScoreThreshold so the bot page
-// stays consistent when the drop policy page changes the shared bot threshold.
+// SyncDropThresholdToBotSettings 更新 bot_settings.ScoreThreshold，
+// 使 drop policy 页修改共用 bot 阈值时 bot 页保持一致。
 func SyncDropThresholdToBotSettings(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
 	if threshold <= 0 {
 		return nil
@@ -525,6 +519,7 @@ func SyncDropThresholdToBotSettings(settingsRepo *repository.SystemSettingsRepo,
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
+// SyncCVEAutoDropToDropPolicy 让 CVE 自动 drop 的运行时策略与 protection 设置保持一致。
 func SyncCVEAutoDropToDropPolicy(settingsRepo *repository.SystemSettingsRepo, critical, high bool) error {
 	current := struct {
 		Enabled             bool `json:"enabled"`
@@ -552,8 +547,8 @@ func SyncCVEAutoDropToDropPolicy(settingsRepo *repository.SystemSettingsRepo, cr
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
-// SyncProtectionBotToSettings updates bot_settings.Enabled so the bot page
-// stays consistent when the protection page toggles bot_detection_enabled.
+// SyncProtectionBotToSettings 更新 bot_settings.Enabled，
+// 使 protection 页切换 bot_detection_enabled 时 bot 页保持一致。
 func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
 	current := BotSettingsResponse{ScoreThreshold: 60}
 	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
@@ -570,7 +565,7 @@ func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, en
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
-// BotSettingsResponse represents the bot detection configuration returned by the API.
+// BotSettingsResponse 是 API 返回的 bot 检测配置。
 type BotSettingsResponse struct {
 	Enabled                  bool     `json:"enabled"`
 	ScoreThreshold           int      `json:"score_threshold"`

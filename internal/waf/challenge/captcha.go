@@ -22,17 +22,17 @@ import (
 	"My-OpenWaf/internal/waf/challenge/gm"
 )
 
-// CaptchaType defines the type of CAPTCHA to generate.
+// CaptchaType 定义要生成的验证码类型。
 type CaptchaType string
 
 const (
 	CaptchaTypeClick  CaptchaType = "click"
 	CaptchaTypeSlide  CaptchaType = "slide"
 	CaptchaTypeRotate CaptchaType = "rotate"
-	CaptchaTypeMath   CaptchaType = "math" // Built-in math captcha (no external resources needed)
+	CaptchaTypeMath   CaptchaType = "math" // 内置算式验证码（不需要外部资源）
 )
 
-// IsValidCaptchaType reports whether t is one of the supported CAPTCHA modes.
+// IsValidCaptchaType 报告 t 是否为受支持的验证码模式之一。
 func IsValidCaptchaType(t CaptchaType) bool {
 	switch t {
 	case CaptchaTypeMath, CaptchaTypeClick, CaptchaTypeSlide, CaptchaTypeRotate:
@@ -42,7 +42,7 @@ func IsValidCaptchaType(t CaptchaType) bool {
 	}
 }
 
-// ValidateCaptchaType validates a CAPTCHA mode used by persisted global settings.
+// ValidateCaptchaType 校验持久化全局设置中使用的验证码模式。
 func ValidateCaptchaType(t CaptchaType) error {
 	if !IsValidCaptchaType(t) {
 		return fmt.Errorf("unsupported captcha type %q", t)
@@ -50,12 +50,12 @@ func ValidateCaptchaType(t CaptchaType) error {
 	return nil
 }
 
-// CaptchaSession stores the server-side state for a pending CAPTCHA verification.
+// CaptchaSession 保存待验证验证码的服务端状态。
 type CaptchaSession struct {
 	ChallengeSessionBinding
 	ID        string      `json:"id"`
 	Type      CaptchaType `json:"type"`
-	Answer    string      `json:"answer"` // JSON-encoded expected answer
+	Answer    string      `json:"answer"` // JSON 编码的期望答案
 	CreatedAt time.Time   `json:"created_at"`
 	ExpiresAt time.Time   `json:"expires_at"`
 	// EnvKey 是会话绑定的环境指纹加密会话主密钥（32 字节，页面下发 hex 前 64 字符）。
@@ -75,13 +75,13 @@ type CaptchaItemPayload struct {
 	ExecScript string `json:"exec_script,omitempty"`
 }
 
-// CaptchaChallenge is the data sent to the client.
+// CaptchaChallenge 是下发给客户端的数据。
 type CaptchaChallenge struct {
 	SessionID   string `json:"session_id"`
 	Type        string `json:"type"`
 	MasterImg   string `json:"master_img"`
 	ThumbImg    string `json:"thumb_img"`
-	Prompt      string `json:"prompt"` // e.g. "Click the characters in order" or "Solve: 3+7=?"
+	Prompt      string `json:"prompt"` // 例如 "Click the characters in order" 或 "Solve: 3+7=?"
 	Width       int    `json:"width"`
 	Height      int    `json:"height"`
 	CaptchaData string `json:"captcha_data"`
@@ -178,7 +178,7 @@ type CaptchaItems struct {
 	Height    int
 }
 
-// CaptchaManager handles CAPTCHA generation and verification with Redis session storage.
+// CaptchaManager 负责验证码的生成与校验，会话存于 Redis。
 type CaptchaManager struct {
 	redis   rueidis.Client
 	prefix  string
@@ -194,8 +194,8 @@ type CaptchaManager struct {
 	sessions map[string]*CaptchaSession
 }
 
-// NewCaptchaManager creates a new CaptchaManager.
-// redis can be nil (will use in-memory fallback).
+// NewCaptchaManager 创建一个 CaptchaManager。
+// redis 可为 nil（此时使用内存存储）。
 func NewCaptchaManager(redis rueidis.Client, timeout time.Duration) *CaptchaManager {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
@@ -207,7 +207,7 @@ func NewCaptchaManager(redis rueidis.Client, timeout time.Duration) *CaptchaMana
 		done:     make(chan struct{}),
 		sessions: make(map[string]*CaptchaSession),
 	}
-	// Start cleanup goroutine for in-memory sessions
+	// 启动内存会话的清理协程
 	go cm.cleanupLoop()
 	return cm
 }
@@ -261,9 +261,7 @@ func (cm *CaptchaManager) timeoutValue() time.Duration {
 	return timeout
 }
 
-// Generate creates a new CAPTCHA challenge of the specified type.
-// Returns the challenge data to render to the client.
-// Generate 生成指定类型的验证码。
+// Generate 生成指定类型的验证码，返回渲染给客户端的挑战数据。
 // envCheck 为 true 时会为该会话绑定一个环境指纹密钥，
 // 页面据此注入浏览器/环境采集 JS，验证时校验环境指纹。
 func (cm *CaptchaManager) Generate(captchaType CaptchaType, envCheck bool) (*CaptchaChallenge, error) {
@@ -292,14 +290,13 @@ func (cm *CaptchaManager) GenerateWithBinding(captchaType CaptchaType, envCheck 
 	}
 }
 
-// Verify checks a client's CAPTCHA answer against the stored session.
+// Verify 用存储的会话校验客户端提交的验证码答案。
 // 会话通过原子“取出即删除”获得，保证一份正确答案只能被兑换一次。
 func (cm *CaptchaManager) Verify(sessionID, answer string) bool {
 	return cm.VerifyWithBinding(sessionID, answer, ChallengeSessionBinding{})
 }
 
-// VerifyWithBinding atomically consumes a CAPTCHA session only after the
-// request's matched-site binding has been checked.
+// VerifyWithBinding 先校验请求的匹配站点绑定，再原子消费验证码会话。
 func (cm *CaptchaManager) VerifyWithBinding(sessionID, answer string, binding ChallengeSessionBinding) bool {
 	session := cm.takeSessionWithBinding(sessionID, binding)
 	if session == nil {
@@ -433,10 +430,10 @@ func randomMathProblem() (expr string, answer int) {
 	operand := mathOperandMin + randIntN(mathOperandMax-mathOperandMin+1)
 	switch op := randIntN(3); op {
 	case 0:
-		// answer = a + operand
+		// answer = a + operand（a 为第一操作数，题面即 a + operand = ?）
 		return fmt.Sprintf("%d + %d = ?", answer-operand, operand), answer
 	case 1:
-		// answer = a - operand
+		// answer = a - operand（a 为第一操作数，题面即 a - operand = ?）
 		return fmt.Sprintf("%d - %d = ?", answer+operand, operand), answer
 	default:
 		// answer = dividend / divisor；先抽商（2..10），保证整除且除数不为零。
@@ -447,7 +444,7 @@ func randomMathProblem() (expr string, answer int) {
 	}
 }
 
-// generateMath creates a simple math CAPTCHA (addition/subtraction).
+// generateMath 生成一道简单算式验证码（加法/减法）。
 func (cm *CaptchaManager) generateMath(envKey []byte, binding ChallengeSessionBinding) (*CaptchaChallenge, error) {
 	expr, answer := randomMathProblem()
 
@@ -466,7 +463,7 @@ func (cm *CaptchaManager) generateMath(envKey []byte, binding ChallengeSessionBi
 		return nil, err
 	}
 
-	// Generate a simple image with the math expression
+	// 生成一张带算式题面的简单图片
 	imgData := cm.renderMathImage(expr)
 
 	return newCaptchaChallenge(sessionID, envKey, &CaptchaItems{
@@ -478,16 +475,16 @@ func (cm *CaptchaManager) generateMath(envKey []byte, binding ChallengeSessionBi
 	})
 }
 
-// renderMathImage creates a simple PNG image containing the math expression.
+// renderMathImage 生成一张含算式题面的简单 PNG 图片。
 func (cm *CaptchaManager) renderMathImage(expr string) string {
 	width, height := 200, 80
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 
-	// Background with noise
+	// 背景与噪点
 	bgColor := color.RGBA{240, 243, 248, 255}
 	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
-	// Add noise dots.
+	// 绘制噪点。
 	// 一次性读取随机字节再切分，避免每个噪点做 5 次 crypto/rand 系统调用——
 	// 验证码是可被匿名请求无限触发的路径，逐点取随机数会成为 CPU 消耗点。
 	const noiseDots = 100
@@ -500,7 +497,7 @@ func (cm *CaptchaManager) renderMathImage(expr string) string {
 		img.Set(x, y, color.RGBA{noise[o+2] % 200, noise[o+3] % 200, noise[o+4] % 200, 255})
 	}
 
-	// Draw simple text using pixel font (no external font dependency)
+	// 用点阵字体绘制题面文字（不依赖外部字体）
 	cm.drawText(img, expr, 20, 35)
 
 	// 干扰线：在文本之后绘制，采用半透明暗色，避免吞掉题面笔画。
@@ -521,7 +518,7 @@ func (cm *CaptchaManager) renderMathImage(expr string) string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-// drawLine draws a one-pixel line between two points using Bresenham's algorithm.
+// drawLine 用 Bresenham 算法在两点之间绘制一条单像素直线。
 func drawLine(img *image.RGBA, x1, y1, x2, y2 int, c color.RGBA) {
 	dx := x2 - x1
 	if dx < 0 {
@@ -558,7 +555,7 @@ func drawLine(img *image.RGBA, x1, y1, x2, y2 int, c color.RGBA) {
 	}
 }
 
-// drawText draws text on an image using a basic pixel font.
+// drawText 用基础点阵字体在图片上绘制文字。
 func (cm *CaptchaManager) drawText(img *image.RGBA, text string, startX, startY int) {
 	textColor := color.RGBA{30, 41, 59, 255}
 	x := startX
@@ -571,7 +568,7 @@ func (cm *CaptchaManager) drawText(img *image.RGBA, text string, startX, startY 
 		for row, rowData := range pattern {
 			for col, pixel := range rowData {
 				if pixel == 1 {
-					// Draw 2x2 for better visibility
+					// 每个像素放大 2x2 提升可见度
 					img.Set(x+col*2, startY+row*2, textColor)
 					img.Set(x+col*2+1, startY+row*2, textColor)
 					img.Set(x+col*2, startY+row*2+1, textColor)
@@ -583,7 +580,7 @@ func (cm *CaptchaManager) drawText(img *image.RGBA, text string, startX, startY 
 	}
 }
 
-// storeSession saves a session to Redis or in-memory fallback.
+// storeSession 把会话存入 Redis 或内存存储。
 func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 	data, err := json.Marshal(session)
 	if err != nil {
@@ -607,7 +604,7 @@ func (cm *CaptchaManager) storeSession(session *CaptchaSession) error {
 	return nil
 }
 
-// cleanupLoop periodically removes expired in-memory sessions.
+// cleanupLoop 周期性清除已过期的内存会话。
 func (cm *CaptchaManager) cleanupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
@@ -637,7 +634,7 @@ func generateSessionID() string {
 	return fmt.Sprintf("%x", b)
 }
 
-// getCharPattern returns a 5x5 pixel pattern for basic ASCII characters.
+// getCharPattern 返回基础 ASCII 字符的 5x5 点阵。
 func getCharPattern(ch rune) [][]int {
 	patterns := map[rune][][]int{
 		'0': {{1, 1, 1}, {1, 0, 1}, {1, 0, 1}, {1, 0, 1}, {1, 1, 1}},

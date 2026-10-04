@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// ResolveFS returns either the on-disk override or the embedded dist tree.
+// ResolveFS 返回磁盘覆盖目录或内嵌的 dist 产物树。
 func ResolveFS(diskDir string) (fs.FS, error) {
 	diskDir = strings.TrimSpace(diskDir)
 	if diskDir != "" {
@@ -16,7 +16,7 @@ func ResolveFS(diskDir string) (fs.FS, error) {
 	return SubFS()
 }
 
-// ReadRouteFile resolves an exported Next.js route or asset from the given FS.
+// ReadRouteFile 从给定 FS 中解析导出的 Next.js 路由或静态资源。
 func ReadRouteFile(webFS fs.FS, requestPath string) ([]byte, string, error) {
 	for _, candidate := range routeCandidates(requestPath) {
 		data, err := fs.ReadFile(webFS, candidate)
@@ -27,7 +27,7 @@ func ReadRouteFile(webFS fs.FS, requestPath string) ([]byte, string, error) {
 	return nil, "", fs.ErrNotExist
 }
 
-// ContentType maps exported asset names to their response content-type.
+// ContentType 把导出资源名映射为响应 Content-Type。
 func ContentType(name string) string {
 	switch {
 	case strings.HasSuffix(name, ".html"):

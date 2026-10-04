@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// ---- ParseIPListEntry edge cases ----
+// ParseIPListEntry 边界用例
 
 func TestParseIPListEntryEmptyStringReturnsFalse(t *testing.T) {
 	_, ok := ParseIPListEntry("", "note")
@@ -49,7 +49,7 @@ func TestParseIPListEntryWhitespaceTrimmed(t *testing.T) {
 	}
 }
 
-// ---- entryMatchesAt ----
+// entryMatchesAt 的过期与匹配判定
 
 func TestEntryMatchesAtExpiredEntryDoesNotMatch(t *testing.T) {
 	e := IPListEntry{Single: net.ParseIP("1.2.3.4"), ExpireAt: time.Now().Unix() - 1}
@@ -76,7 +76,7 @@ func TestEntryMatchesCIDR(t *testing.T) {
 	}
 }
 
-// ---- Check: nil IP ----
+// Check：nil IP 直接放行
 
 func TestCheckNilIPAllowed(t *testing.T) {
 	r := NewIPReputation()
@@ -88,7 +88,7 @@ func TestCheckNilIPAllowed(t *testing.T) {
 	}
 }
 
-// ---- Check: whitelist / blacklist ----
+// Check：白名单与黑名单的优先级
 
 func TestCheckWhitelistBeatsBlacklist(t *testing.T) {
 	r := NewIPReputation()
@@ -129,7 +129,7 @@ func TestCheckUnlistedIPAllowed(t *testing.T) {
 	}
 }
 
-// ---- Check: expired blacklist entry passes ----
+// Check：已过期的黑名单条目不再拦截
 
 func TestCheckExpiredBlacklistEntryAllowed(t *testing.T) {
 	r := NewIPReputation()
@@ -146,7 +146,7 @@ func TestCheckExpiredBlacklistEntryAllowed(t *testing.T) {
 	}
 }
 
-// ---- RecordViolation + auto-ban ----
+// RecordViolation 与自动封禁的触发条件
 
 func TestRecordViolationDisabledReturnsFalse(t *testing.T) {
 	r := NewIPReputation()
@@ -229,7 +229,7 @@ func TestCheckReturnsBannedAfterAutoBan(t *testing.T) {
 	}
 }
 
-// ---- ActiveBans ----
+// ActiveBans 的封禁期过滤
 
 func TestActiveBansReturnsCurrentBans(t *testing.T) {
 	r := NewIPReputation()
@@ -257,7 +257,7 @@ func TestActiveBansEmptyWhenNoBan(t *testing.T) {
 	}
 }
 
-// ---- ConfigureAutoBanAction ----
+// ConfigureAutoBanAction 的动作归一化
 
 func TestConfigureAutoBanActionDrop(t *testing.T) {
 	r := NewIPReputation()

@@ -15,7 +15,7 @@ func init() {
 		Category: "cve_java",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
-			// Check all inputs for obfuscated log4j patterns
+			// 在全部输入中检查混淆的 Log4j 特征
 			for _, s := range []string{uri, body, ua} {
 				if reLog4j1.MatchString(s) || reLog4j2.MatchString(s) || reLog4j3.MatchString(s) ||
 					reLog4j4.MatchString(s) || reLog4j5.MatchString(s) || reLog4j6.MatchString(s) || reLog4j7.MatchString(s) {
@@ -30,7 +30,7 @@ func init() {
 					}
 				}
 			}
-			// Also check header values
+			// 再检查各请求头的值
 			for _, v := range headers {
 				if reLog4j1.MatchString(v) || reLog4j5.MatchString(v) {
 					return &CVEMatch{
@@ -71,7 +71,7 @@ func init() {
 	})
 }
 
-// JavaCVEDetector detects Java-specific CVE exploitation attempts.
+// JavaCVEDetector 检测 Java 技术栈特有的 CVE 利用尝试。
 type JavaCVEDetector struct {
 	rules []javaCVERule
 }
@@ -84,7 +84,7 @@ type javaCVERule struct {
 	target      string
 }
 
-// Compiled Java CVE patterns (init-time).
+// Java CVE 正则，在 init 阶段编译。
 var (
 	reLog4j1        = regexp.MustCompile(`(?i)\$\{jndi:(ldap|rmi|dns|iiop|corba|nds|http)://`)
 	reLog4j2        = regexp.MustCompile(`(?i)\$\{\$\{[a-z:]*\}ndi:`)
@@ -115,17 +115,17 @@ var (
 	reJackson1      = regexp.MustCompile(`(?i)\["org\.apache\.commons\.`)
 	reJackson2      = regexp.MustCompile(`(?i)com\.sun\.org\.apache\.xalan`)
 
-	// Apache OFBiz Auth Bypass + RCE (CVE-2023-49070, CVE-2023-51467)
+	// Apache OFBiz 认证绕过 + RCE（CVE-2023-49070、CVE-2023-51467）
 	reOFBiz1 = regexp.MustCompile(`(?i)/webtools/control/(xmlrpc|main|ViewHandlerExt)`)
 	reOFBiz2 = regexp.MustCompile(`(?i)/accounting/control/.*requirePasswordChange=Y`)
 
-	// Apache Tomcat deserialization (CVE-2025-24813)
+	// Apache Tomcat 反序列化（CVE-2025-24813）
 	reTomcat1 = regexp.MustCompile(`(?i)\.session\.\d+\.ser`)
 
-	// Apache ActiveMQ RCE (CVE-2023-46604)
+	// Apache ActiveMQ RCE（CVE-2023-46604）
 	reActiveMQ = regexp.MustCompile(`(?i)ExceptionResponse.*ClassPathXmlApplicationContext|ClassInfo.*org\.springframework`)
 
-	// Confluence OGNL injection (CVE-2022-26134)
+	// Confluence OGNL 注入（CVE-2022-26134）
 	reConfluence1 = regexp.MustCompile(`(?i)/\$\{[^}]*\}/?$`)
 	reConfluence2 = regexp.MustCompile(`(?i)#a=@java\.lang\.Runtime@getRuntime`)
 )

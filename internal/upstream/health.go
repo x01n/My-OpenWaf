@@ -229,8 +229,14 @@ func (p *Pool) Pick(urls []string, next func(uint32) uint32) (string, bool) {
 	return urls[start], true
 }
 
-// GroupURLsByProtocolPreference splits upstream URLs into protocol-preference
-// groups, ordered from highest to lowest protocol version.
+/**
+ * GroupURLsByProtocolPreference 把上游 URL 按协议偏好分组。
+ *
+ * 返回的分组按协议版本从高到低排列。
+ *
+ * @param urls 上游 URL 列表。
+ * @return 按协议版本从高到低排列的分组。
+ */
 func GroupURLsByProtocolPreference(urls []string) [][]string {
 	groups := make([][]string, 4)
 	for _, raw := range urls {
@@ -248,8 +254,16 @@ func GroupURLsByProtocolPreference(urls []string) [][]string {
 	return groups
 }
 
-// PickByProtocolPreference selects an upstream URL by preferring explicit
-// HTTP/3, then h2c, then HTTPS, then other upstreams.
+/**
+ * PickByProtocolPreference 按协议偏好挑选一个上游 URL。
+ *
+ * 优先级依次为显式 HTTP/3、h2c、HTTPS，最后是其他上游。
+ *
+ * @param urls 上游 URL 列表。
+ * @param pool 上游池；为 nil 时退化为不查池的选择逻辑。
+ * @param next 轮询下标生成函数；为 nil 时从下标 0 开始。
+ * @return 选中的 URL 与是否选中；列表为空时返回 false。
+ */
 func PickByProtocolPreference(urls []string, pool *Pool, next func(uint32) uint32) (string, bool) {
 	if len(urls) == 0 {
 		return "", false

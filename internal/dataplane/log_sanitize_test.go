@@ -535,11 +535,13 @@ func TestShouldRecordAccessLogSupportsZeroSamplingDisable(t *testing.T) {
 	}
 }
 
-// TestIsClientGoneForPlainAccessLogOnlySkipsPlainPass 守护「客户端断开跳过访问日志」的边界。
-//
-// 采样率默认为 1 后，客户端在响应交付途中 RST_STREAM 的请求会带着上游给的 200 走到
-// 代理完成记录点。跳过它是为了不虚增流量，但这个跳过绝不能扩大到 observe：那是误报
-// 排查的唯一依据。intercept/challenge/drop 走别的记录点，此处一并断言不受影响。
+/**
+ * TestIsClientGoneForPlainAccessLogOnlySkipsPlainPass 守护「客户端断开跳过访问日志」的边界。
+ *
+ * 采样率默认为 1 后，客户端在响应交付途中 RST_STREAM 的请求会带着上游给的 200 走到
+ * 代理完成记录点。跳过它是为了不虚增流量，但这个跳过绝不能扩大到 observe：那是误报
+ * 排查的唯一依据。intercept/challenge/drop 走别的记录点，此处一并断言不受影响。
+ */
 func TestIsClientGoneForPlainAccessLogOnlySkipsPlainPass(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

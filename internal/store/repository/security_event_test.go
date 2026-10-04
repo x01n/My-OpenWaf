@@ -163,7 +163,7 @@ func TestTopCountriesRespectsLimit(t *testing.T) {
 	}
 }
 
-// ---------- ListRequests（请求级聚合）测试 ----------
+// ListRequests（请求级聚合）测试
 
 // seedSecurityEvents 批量写入事件，便于聚合用例构造数据。
 func seedSecurityEvents(t *testing.T, repo *SecurityEventRepo, events []store.SecurityEvent) {

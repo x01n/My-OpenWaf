@@ -15,11 +15,13 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// UnifiedWriter accepts all types of observability records on dedicated
-// channels and flushes them in a single DB transaction on a fixed interval.
-// The request hot-path only performs a non-blocking channel send, keeping
-// CPU overhead to a minimum. A single goroutine drains all channels and
-// writes everything in one transaction — eliminating SQLite lock contention.
+/**
+ * UnifiedWriter 在专用通道上接收各类可观测性记录，并按固定周期在单个数据库
+ * 事务里 flush。
+ *
+ * 请求热路径只做一次非阻塞的通道发送，把 CPU 开销压到最低。单个 goroutine
+ * 排空所有通道、在同一个事务里写入全部记录——从根本上消除 SQLite 锁竞争。
+ */
 type UnifiedWriter struct {
 	db    *gorm.DB
 	redis atomic.Pointer[redisClientHolder]
@@ -78,7 +80,7 @@ type UnifiedWriter struct {
 // 队列容量上限（与 internal/core/config.go QueueConfig 注释保持一致）。
 // 防止误调把内存吃光或单事务拉满驱动上限；超出后保留用户原值会被截断。
 const (
-	unifiedWriterMaxChannelCapacity = 1 << 20 // 1M
+	unifiedWriterMaxChannelCapacity = 1 << 20 // 1M 条
 	unifiedWriterMaxBatchSize       = 10000
 	unifiedWriterMaxFlushInterval   = 60 * time.Second
 )
@@ -220,7 +222,7 @@ const (
 	unifiedWriterCloseGrace = 5 * time.Second
 )
 
-// UnifiedWriterStats is a point-in-time snapshot of the async observability writer.
+// UnifiedWriterStats 是异步可观测性写入器的时点快照。
 type UnifiedWriterStats struct {
 	SecurityEventQueueLen int `json:"security_event_queue_len"`
 	AccessLogQueueLen     int `json:"access_log_queue_len"`
@@ -242,9 +244,12 @@ type UnifiedWriterStats struct {
 	FailedRecordsTotal     int64 `json:"failed_records_total"`
 }
 
-// NewUnifiedWriter creates a unified writer with large channel buffers.
-// 向后兼容包装：内部使用 DefaultUnifiedWriterOptions；新增可配置参数请改用
-// NewUnifiedWriterWithOptions。
+/**
+ * NewUnifiedWriter 创建带大容量通道缓冲的统一写入器。
+ *
+ * 这是向后兼容的包装：内部使用 DefaultUnifiedWriterOptions；需要新增可配置
+ * 参数请改用 NewUnifiedWriterWithOptions。
+ */
 func NewUnifiedWriter(db *gorm.DB, log *slog.Logger) *UnifiedWriter {
 	return NewUnifiedWriterWithOptions(db, log, DefaultUnifiedWriterOptions())
 }
@@ -284,7 +289,7 @@ type redisClientHolder struct {
 	c rueidis.Client
 }
 
-// SetRedis enables Redis dual-write for real-time consumption.
+/** SetRedis 开启 Redis 双写，供实时消费使用。 */
 func (w *UnifiedWriter) SetRedis(client rueidis.Client) {
 	if client == nil {
 		w.redis.Store(nil)
@@ -293,9 +298,12 @@ func (w *UnifiedWriter) SetRedis(client rueidis.Client) {
 	w.redis.Store(&redisClientHolder{c: client})
 }
 
-// SetCountCacheInvalidator attaches an optional COUNT-cache invalidator.
-// Invalidation happens only after a transaction has committed at least one
-// observability record, so failed or dropped batches do not perturb cache state.
+/**
+ * SetCountCacheInvalidator 挂接一个可选的 COUNT 缓存失效器。
+ *
+ * 只有当某个事务确实提交了至少一条可观测性记录之后才会触发失效，
+ * 因此失败或丢弃的批次不会扰动缓存状态。
+ */
 func (w *UnifiedWriter) SetCountCacheInvalidator(invalidator interface{ InvalidateAll() }) {
 	if w == nil {
 		return
@@ -326,7 +334,7 @@ func (w *UnifiedWriter) invalidateCountCache(prefixes ...string) {
 	invalidator.InvalidateAll()
 }
 
-// Stats returns queue, drop and flush counters for runtime diagnostics.
+/** Stats 返回队列、丢弃与 flush 计数器，供运行期诊断。 */
 func (w *UnifiedWriter) Stats() UnifiedWriterStats {
 	return UnifiedWriterStats{
 		SecurityEventQueueLen: len(w.eventCh),
@@ -411,7 +419,7 @@ func (w *UnifiedWriter) beginRecord(kind string, counter *atomic.Int64) bool {
 	return true
 }
 
-// RecordEvent enqueues a security event. Non-blocking.
+/** RecordEvent 入队一条安全事件。非阻塞。 */
 func (w *UnifiedWriter) RecordEvent(ev store.SecurityEvent) {
 	if !w.beginRecord("security_event", &w.securityEventDropped) {
 		return
@@ -424,7 +432,7 @@ func (w *UnifiedWriter) RecordEvent(ev store.SecurityEvent) {
 	}
 }
 
-// RecordAccessLog enqueues an access log. Non-blocking.
+/** RecordAccessLog 入队一条访问日志。非阻塞。 */
 func (w *UnifiedWriter) RecordAccessLog(al store.AccessLog) {
 	if !w.beginRecord("access_log", &w.accessLogDropped) {
 		return
@@ -437,7 +445,7 @@ func (w *UnifiedWriter) RecordAccessLog(al store.AccessLog) {
 	}
 }
 
-// RecordDropEvent enqueues a drop event. Non-blocking.
+/** RecordDropEvent 入队一条丢包事件。非阻塞。 */
 func (w *UnifiedWriter) RecordDropEvent(ev store.DropEvent) {
 	if !w.beginRecord("drop_event", &w.dropEventDropped) {
 		return
@@ -450,7 +458,7 @@ func (w *UnifiedWriter) RecordDropEvent(ev store.DropEvent) {
 	}
 }
 
-// RecordBotScore enqueues a bot score log. Non-blocking.
+/** RecordBotScore 入队一条 Bot 评分日志。非阻塞。 */
 func (w *UnifiedWriter) RecordBotScore(bs store.BotScoreLog) {
 	if !w.beginRecord("bot_score", &w.botScoreDropped) {
 		return
@@ -687,17 +695,17 @@ func (w *UnifiedWriter) flushBuffered(
 		return
 	}
 
-	// Push to Redis first (low-latency path for real-time consumers).
+	// 先推送 Redis（面向实时消费方的低延迟路径）。
 	if h := w.redis.Load(); h != nil && h.c != nil {
 		if err := w.pushToRedis(h.c, events, accessLogs, dropEvents, botScores); err != nil {
 			failed = true
 		}
 	}
 
-	// Single DB transaction for all types, with one SAVEPOINT per record type so a
-	// failing type cannot take the others down with it. On the sqlite dialect the
-	// long-lived statement path replaces CreateInBatches per type; everything else
-	// (transaction, per-type SAVEPOINT, failure accounting) stays byte-identical.
+	// 所有类型共用单个数据库事务，每类记录各持一个 SAVEPOINT，
+	// 使某一类失败不会连带拖垮其它类。在 sqlite 方言下长期语句路径取代
+	// 了逐类 CreateInBatches；其余部分（事务、逐类 SAVEPOINT、失败计数）
+	// 保持逐字节一致。
 	bf := w.sqliteFlusherFor()
 	err := w.db.Transaction(func(tx *gorm.DB) error {
 		var writeSecurity = func() error {

@@ -27,7 +27,7 @@ func (r *AdminAPIKeyRepo) Get(id uint) (*store.AdminAPIKey, error) {
 	return &item, r.db.First(&item, id).Error
 }
 
-// Create generates a new token, stores the bcrypt hash, returns the plaintext (shown once).
+// Create 生成新令牌，存储其 bcrypt 哈希，并返回明文（只展示这一次）。
 func (r *AdminAPIKeyRepo) Create(name string) (token string, item *store.AdminAPIKey, err error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -46,8 +46,8 @@ func (r *AdminAPIKeyRepo) Create(name string) (token string, item *store.AdminAP
 	return token, k, nil
 }
 
-// Verify checks a bearer token against stored hashes.
-// Fast path: match by prefix (first 8 chars). Fallback: full scan for legacy keys without prefix.
+// Verify 用已存储的哈希校验 bearer 令牌。
+// 快路径：按前缀（前 8 个字符）匹配。回退路径：为没有前缀的 legacy 密钥做全表扫描。
 func (r *AdminAPIKeyRepo) Verify(token string) (*store.AdminAPIKey, bool) {
 	if len(token) >= 8 {
 		prefix := token[:8]
@@ -63,7 +63,7 @@ func (r *AdminAPIKeyRepo) Verify(token string) (*store.AdminAPIKey, bool) {
 			}
 		}
 	}
-	// Fallback: legacy keys without prefix.
+	// 回退路径：没有前缀的 legacy 密钥。
 	var legacy []store.AdminAPIKey
 	if err := r.db.Where("prefix = '' OR prefix IS NULL").Find(&legacy).Error; err != nil {
 		return nil, false

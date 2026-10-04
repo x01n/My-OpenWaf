@@ -81,8 +81,8 @@ func TestPutProtectionSettingsWritesAllActionFields(t *testing.T) {
 	}
 }
 
-// TestPutProtectionSettingsRejectsUnsupportedAutoBanAction ensures the admin contract
-// does not persist actions that the IP reputation runtime cannot execute.
+// TestPutProtectionSettingsRejectsUnsupportedAutoBanAction 确保管理端契约
+// 不会持久化 IP 信誉运行时无法执行的动作。
 func TestPutProtectionSettingsRejectsUnsupportedAutoBanAction(t *testing.T) {
 	repo := newSystemSettingsRepoForProtectionTest(t)
 	if err := shared.SaveProtectionConfig(repo, store.DefaultProtectionConfig()); err != nil {

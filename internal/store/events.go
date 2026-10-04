@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// SecurityEvent records every matched WAF event (block/observe/challenge/drop).
+// SecurityEvent 记录每一次命中的 WAF 事件（intercept/observe/challenge/drop）。
 type SecurityEvent struct {
 	ID        uint      `gorm:"primaryKey;index:idx_se_site_created_id,priority:3" json:"id"`
 	CreatedAt time.Time `gorm:"index:idx_se_created;index:idx_se_site_created;index:idx_se_site_created_id,priority:2" json:"created_at"`
@@ -72,7 +72,7 @@ type SecurityEvent struct {
 	StatusCode int `gorm:"default:0" json:"status_code"`
 }
 
-// AccessLog records every inbound request outcome for querying and auditing.
+// AccessLog 记录每个入站请求的最终结果，供查询与审计使用。
 type AccessLog struct {
 	ID          uint      `gorm:"primaryKey;index:idx_al_site_created_id,priority:3" json:"id"`
 	CreatedAt   time.Time `gorm:"index:idx_al_created;index:idx_al_site_created;index:idx_al_site_created_id,priority:2" json:"created_at"`
@@ -189,7 +189,7 @@ func (a *AccessLog) BeforeSave(*gorm.DB) error {
 	return nil
 }
 
-// DropEvent records a TCP connection drop (no HTTP response sent).
+// DropEvent 记录一次 TCP 连接丢弃（未发出任何 HTTP 响应）。
 type DropEvent struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	SiteID    uint      `gorm:"index" json:"site_id"`
@@ -202,7 +202,7 @@ type DropEvent struct {
 	CreatedAt time.Time `gorm:"index;index:idx_drop_source_created" json:"created_at"`
 }
 
-// BotScoreLog records the result of a bot scoring evaluation.
+// BotScoreLog 记录一次 Bot 评分判定结果。
 type BotScoreLog struct {
 	ID               uint      `gorm:"primarykey" json:"id"`
 	SiteID           uint      `gorm:"index" json:"site_id"`

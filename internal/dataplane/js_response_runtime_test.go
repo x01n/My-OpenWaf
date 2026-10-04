@@ -16,8 +16,10 @@ func (fakeResponseExecutorForRuntimeTest) ExecuteResponse(context.Context, *jspl
 	return jsplugin.ResponseMutationPlan{}, nil
 }
 
-// TestJSResponseRuntimeContextRoundTrip 固定执行器与脚本快照经由 hertz
-// 上下文存取往返，未挂接与空请求上下文都返回零值。
+/**
+ * TestJSResponseRuntimeContextRoundTrip 固定执行器与脚本快照经由 hertz
+ * 上下文存取往返，未挂接与空请求上下文都返回零值。
+ */
 func TestJSResponseRuntimeContextRoundTrip(t *testing.T) {
 	c := &app.RequestContext{}
 	if executor, scripts := JSResponseRuntimeFromRequestContext(c); executor != nil || scripts != nil {

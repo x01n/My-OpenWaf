@@ -41,7 +41,7 @@ type luaPluginRequest struct {
 // 脚本在数据面同步执行，允许过长会让单个慢脚本拖垮 P99 延迟。
 const luaMaxTimeoutMS = 1000
 
-// luaValidationKV is an isolated in-memory backend used only for enablement checks.
+// luaValidationKV 是仅用于启用校验的隔离内存后端。
 type luaValidationKV struct {
 	mu     sync.Mutex
 	values map[string][]byte

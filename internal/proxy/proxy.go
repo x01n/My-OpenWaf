@@ -70,7 +70,7 @@ func (r *finishOnCanceledReadCloser) Close() error {
 	return r.body.Close()
 }
 
-// transportKey identifies a unique upstream TLS configuration.
+// transportKey 唯一标识一份上游 TLS 配置。
 type transportKey struct {
 	tlsServerName string
 	tlsSkipVerify bool
@@ -95,7 +95,13 @@ var (
 	transportPool = make(map[transportKey]*http.Transport)
 )
 
-// SharedTransportForUpstream keys the pool by the selected upstream scheme.
+/**
+ * SharedTransportForUpstream 以选定的上游 scheme 作为池的键取共享 transport。
+ *
+ * @param rt 站点运行时。
+ * @param base 上游基础 URL。
+ * @return 该 scheme 对应的共享 http.Transport。
+ */
 func SharedTransportForUpstream(rt snapshot.SiteRuntime, base string) *http.Transport {
 	return sharedTransportForUpstreamClassified(rt, isHTTPSUpstreamBase(base))
 }
@@ -183,7 +189,7 @@ func isHTTPSUpstreamBase(base string) bool {
 	return true
 }
 
-// clientPool caches http.Client instances keyed by transport to avoid repeated allocation.
+// clientPool 按 transport 缓存 http.Client 实例，避免重复分配。
 var (
 	clientPoolMu        sync.RWMutex
 	clientCache         = make(map[*http.Transport]*http.Client)
@@ -228,16 +234,24 @@ func sharedNoTimeoutClient(tr *http.Transport) *http.Client {
 	return hc
 }
 
-// rtClientPool caches no-timeout http.Client instances keyed by RoundTripper
-// interface value, so streaming callers (SSE) reuse a single client per
-// upstream transport instead of allocating one per request.
+/**
+ * rtClientPool 按 RoundTripper 接口值缓存无超时 http.Client 实例。
+ *
+ * 流式调用方（SSE）因此可以按上游 transport 复用一个 client，而不是每请求分配一个。
+ */
 var (
 	rtClientMu   sync.RWMutex
 	rtClientPool = make(map[http.RoundTripper]*http.Client)
 )
 
-// SharedNoTimeoutClientForRoundTripper returns a cached timeout-less http.Client
-// bound to the given RoundTripper. Suitable for long-lived streaming responses.
+/**
+ * SharedNoTimeoutClientForRoundTripper 返回绑定到指定 RoundTripper 的缓存无超时 http.Client。
+ *
+ * 适用于长生命周期的流式响应。
+ *
+ * @param rt 上游 RoundTripper。
+ * @return 该 RoundTripper 对应的共享无超时 client。
+ */
 func SharedNoTimeoutClientForRoundTripper(rt http.RoundTripper) *http.Client {
 	rtClientMu.RLock()
 	if hc, ok := rtClientPool[rt]; ok {
@@ -624,9 +638,16 @@ func doHertzUpstream(ctx context.Context, rt snapshot.SiteRuntime, base string, 
 	return resp, hreq, requestDone, cancel, nil
 }
 
-// NormalizeUpstreamURL converts h2c:// and h3:// URLs to http:// and https://,
-// and RPC alias URLs (grpc:// -> http://, tls:// / grpcs:// / grpc+tls:// /
-// grpc+https:// -> https://), so standard Go http.Client can process them.
+/**
+ * NormalizeUpstreamURL 把上游 URL 归一为 Go 标准库能处理的 http(s):// 形式。
+ *
+ * 涉及两类改写：h2c:// 与 h3:// 分别归一为 http:// 与 https://；RPC 别名
+ * （grpc:// -> http://，tls:// / grpcs:// / grpc+tls:// / grpc+https:// -> https://）
+ * 归一到对应传输 scheme。
+ *
+ * @param raw 原始上游 URL。
+ * @return 归一后的 URL；无需归一或别名不识别时原样返回。
+ */
 func NormalizeUpstreamURL(raw string) string {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "h2c://") {
@@ -705,8 +726,13 @@ func resolveUpstreamBase(rt snapshot.SiteRuntime, base string) upstreamBaseResol
 	}
 }
 
-// UpstreamRoundTripperForBase returns an appropriate http.RoundTripper and
-// normalized base URL for the given upstream URL scheme.
+/**
+ * UpstreamRoundTripperForBase 为给定上游 scheme 返回合适的 http.RoundTripper 与归一化 base URL。
+ *
+ * @param rt 站点运行时。
+ * @param base 上游基础 URL。
+ * @return 传输实现与该 base 的归一化 URL。
+ */
 func UpstreamRoundTripperForBase(rt snapshot.SiteRuntime, base string) (http.RoundTripper, string) {
 	res := resolveUpstreamBase(rt, base)
 	return res.transport, res.normalized
@@ -796,21 +822,31 @@ func http3TransportForUpstream(rt snapshot.SiteRuntime, upstreamHost string) *ht
 	return tr
 }
 
-// http3ClientPools caches http.Client instances keyed by http3.Transport, one per
-// timeout class. The buffered path uses http3Clients (30 s total timeout) and the
-// streaming path uses http3NoTimeoutClients, mirroring the HTTP/1 transport pairs.
+/**
+ * http3ClientPools 按 http3.Transport 缓存 http.Client 实例，每个超时档位一份。
+ *
+ * 缓冲路径用 http3Clients（整体超时 30 s），流式路径用 http3NoTimeoutClients，
+ * 与 HTTP/1 的一对 transport 缓存结构一致。
+ */
 var (
 	http3ClientMu         sync.RWMutex
 	http3Clients          = make(map[*http3.Transport]*http.Client)
 	http3NoTimeoutClients = make(map[*http3.Transport]*http.Client)
 )
 
-// sharedPooledClient returns a pooled http.Client for the resolved upstream
-// transport, selecting the pool by transport kind:
-//   - *http.Transport 走 sharedClient / sharedNoTimeoutClient（原缓存）；
-//   - *http3.Transport 走本文件新增的 http3Clients / http3NoTimeoutClients，
-//     与 transport 生命周期同步增减，使 UpstreamTransportPoolStats 的
-//     HTTP3Clients / HTTP3NoTimeoutClients 反映真实池规模（不再恒 0）。
+/**
+ * sharedPooledClient 为解析出的上游 transport 返回池化 http.Client，按 transport 类型选池。
+ *
+ * 分流规则：
+ * - *http.Transport 走 sharedClient / sharedNoTimeoutClient（原缓存）；
+ * - *http3.Transport 走本文件新增的 http3Clients / http3NoTimeoutClients，
+ *   与 transport 生命周期同步增减，使 UpstreamTransportPoolStats 的
+ *   HTTP3Clients / HTTP3NoTimeoutClients 反映真实池规模（不再恒 0）。
+ *
+ * @param transport 已解析的上游 RoundTripper。
+ * @param timeout 客户端整体超时；<= 0 表示无超时档位。
+ * @return 该 transport 对应的池化 client。
+ */
 func sharedPooledClient(transport http.RoundTripper, timeout time.Duration) *http.Client {
 	var hc *http.Client
 	switch tr := transport.(type) {
@@ -861,7 +897,7 @@ func sharedPooledClient(transport http.RoundTripper, timeout time.Duration) *htt
 	}
 }
 
-// HTTPResponse is a buffered upstream response used by the cache path.
+// HTTPResponse 是缓存路径使用的已缓冲上游响应。
 type HTTPResponse struct {
 	StatusCode           int
 	ContentType          string
@@ -1226,7 +1262,7 @@ func writeResponseTransformFailure(c *app.RequestContext) {
 
 var upstreamErrorLogCounter atomic.Uint64
 
-// shouldLogUpstreamErrorCount keeps initial evidence and samples repeated failures.
+// shouldLogUpstreamErrorCount 保留最初的错误证据，对重复失败改为抽样记录。
 func shouldLogUpstreamErrorCount(count uint64) bool {
 	return count <= 16 || count%1024 == 0
 }
@@ -1720,8 +1756,14 @@ func copyResponseHeaders(dst *app.RequestContext, src http.Header) {
 	}
 }
 
-// AddResponseTrailerHeaders re-adds the Trailer declaration header after copyResponseHeaders
-// strips it.  This tells the downstream HTTP client which trailer fields to expect.
+/**
+ * AddResponseTrailerHeaders 重新写回被 copyResponseHeaders 剥掉的 Trailer 声明头。
+ *
+ * 该声明头用于告知下游 HTTP 客户端应当期待哪些 trailer 字段。
+ *
+ * @param dst Hertz 响应上下文。
+ * @param trailers 上游响应 trailer 集合。
+ */
 func AddResponseTrailerHeaders(dst *app.RequestContext, trailers http.Header) {
 	if len(trailers) == 0 {
 		return
@@ -1756,7 +1798,7 @@ func responseConnectionTokens(h http.Header) map[string]bool {
 	return tokens
 }
 
-// FetchHTTP performs the upstream request and returns a buffered response.
+// FetchHTTP 执行上游请求并返回缓冲响应。
 func fetchHTTPResponse(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*http.Response, string, error) {
 	res := resolveUpstreamBase(rt, base)
 	req, err := buildUpstreamRequest(ctx, c, res.normalized, clientIP, origHost, rt.PreserveOriginalHost)
@@ -1811,17 +1853,38 @@ func FetchHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunti
 	return FetchHTTPLimited(ctx, c, rt, base, clientIP, origHost, 0)
 }
 
-// FetchHTTPForAppRouteCapture buffers an upstream response for AppRoute response-body
-// matching while enforcing the dynamic-transform body limit. Oversized bodies remain
-// streamable via ForwardCapturedResponseForSite.
+/**
+ * FetchHTTPForAppRouteCapture 缓冲上游响应供 AppRoute 响应体匹配使用，同时受动态变换体限约束。
+ *
+ * 超限的响应体仍可经 ForwardCapturedResponseForSite 流式转发。
+ *
+ * @param ctx 请求上下文。
+ * @param c Hertz 请求上下文。
+ * @param rt 站点运行时。
+ * @param base 上游基础 URL。
+ * @param clientIP 客户端 IP。
+ * @param origHost 原始 Host。
+ * @return 已缓冲（或保留未读余量）的上游响应。
+ */
 func FetchHTTPForAppRouteCapture(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) (*HTTPResponse, error) {
 	return FetchHTTPLimited(ctx, c, rt, base, clientIP, origHost, maxStreamTransformBufferBytes)
 }
 
-// FetchHTTPLimited buffers the upstream response up to maxBodyBytes (post-decode).
-// When maxBodyBytes > 0 and the body exceeds the limit, the returned HTTPResponse
-// keeps the unread remainder so callers can stream the complete response without
-// truncating or fully materializing a compression bomb.
+/**
+ * FetchHTTPLimited 在 maxBodyBytes（解码后）上限内缓冲上游响应。
+ *
+ * maxBodyBytes > 0 且响应体超过上限时，返回的 HTTPResponse 保留未读余量，
+ * 调用方可以流式转发完整响应 —— 既不截断，也不必把压缩炸弹完整展开到内存。
+ *
+ * @param ctx 请求上下文。
+ * @param c Hertz 请求上下文。
+ * @param rt 站点运行时。
+ * @param base 上游基础 URL。
+ * @param clientIP 客户端 IP。
+ * @param origHost 原始 Host。
+ * @param maxBodyBytes 缓冲上限（解码后字节数）；<= 0 表示不限。
+ * @return 上游响应；超限时 Body 只含前缀，余量放入 remainingBody。
+ */
 func FetchHTTPLimited(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string, maxBodyBytes int64) (*HTTPResponse, error) {
 	resp, method, err := fetchHTTPResponse(ctx, c, rt, base, clientIP, origHost)
 	if err != nil {
@@ -1830,8 +1893,18 @@ func FetchHTTPLimited(ctx context.Context, c *app.RequestContext, rt snapshot.Si
 	return bufferedHTTPResponseFromUpstream(resp, method, maxBodyBytes, false)
 }
 
-// FetchHTTPForCache avoids buffering a known-oversized response before falling
-// back to the streaming path.
+/**
+ * FetchHTTPForCache 在回退到流式路径之前，先避免缓冲已知超限的响应。
+ *
+ * @param ctx 请求上下文。
+ * @param c Hertz 请求上下文。
+ * @param rt 站点运行时。
+ * @param base 上游基础 URL。
+ * @param clientIP 客户端 IP。
+ * @param origHost 原始 Host。
+ * @param maxBodyBytes 缓冲上限（解码后字节数）。
+ * @return 上游响应，超限时保留未读余量。
+ */
 func FetchHTTPForCache(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string, maxBodyBytes int64) (*HTTPResponse, error) {
 	resp, method, err := fetchHTTPResponse(ctx, c, rt, base, clientIP, origHost)
 	if err != nil {
@@ -1908,9 +1981,18 @@ func ForwardBufferedResponseForSiteWithClientIP(c *app.RequestContext, resp *HTT
 	forwardBufferedResponseWithOptions(c, resp, streamCompressionOptions(rt), responseEntityTransformerForSiteAndClient(rt, c, clientIP), clientIP)
 }
 
-// ForwardCapturedResponseForSite forwards a response returned by FetchHTTPLimited.
-// Buffered responses retain the normal dynamic transform path; oversized responses
-// stream the unread remainder without transformation and preserve the full body.
+/**
+ * ForwardCapturedResponseForSite 转发 FetchHTTPLimited 返回的响应。
+ *
+ * 已完整缓冲的响应仍走常规动态变换路径；超限响应则直接流式转发未读余量、
+ * 不做变换，但保留完整响应体。
+ *
+ * @param ctx 请求上下文。
+ * @param c Hertz 请求上下文。
+ * @param resp 上游响应。
+ * @param rt 站点运行时。
+ * @return 写回下游过程中的错误。
+ */
 func ForwardCapturedResponseForSite(ctx context.Context, c *app.RequestContext, resp *HTTPResponse, rt snapshot.SiteRuntime) error {
 	return ForwardCapturedResponseForSiteWithClientIP(ctx, c, resp, rt, nil)
 }
@@ -2037,8 +2119,14 @@ func ForwardBufferedResponseAsStreamForSiteWithClientIP(c *app.RequestContext, r
 	c.Response.SetBodyStream(bytes.NewReader(body), -1)
 }
 
-// SanitizeHeadersForEdgeCache strips hop-by-hop headers and Content-Length before persisting
-// upstream metadata with the body. Keeps Content-Encoding (e.g. br) so cache hits decode correctly.
+/**
+ * SanitizeHeadersForEdgeCache 在随响应体一并持久化上游元数据之前剥离逐跳头与 Content-Length。
+ *
+ * 保留 Content-Encoding（如 br），缓存命中时才能正确解码。
+ *
+ * @param src 上游响应头。
+ * @return 可安全存入共享缓存的头集合；无剩余字段时返回 nil。
+ */
 func SanitizeHeadersForEdgeCache(src http.Header) http.Header {
 	if src == nil {
 		return nil
@@ -2073,7 +2161,13 @@ func deleteHeaderValuesFold(header http.Header, name string) {
 	}
 }
 
-// WriteCachedResponse replays a cache.ResponseEntry, including stored headers when present.
+/**
+ * WriteCachedResponse 回放一条 cache.ResponseEntry，条目带存储头时一并回放。
+ *
+ * @param c Hertz 请求上下文。
+ * @param method 请求方法（HEAD 与 GET 共用同一条目）。
+ * @param e 缓存条目。
+ */
 func WriteCachedResponse(c *app.RequestContext, method string, e *cache.ResponseEntry) {
 	writeCachedResponseWithOptions(c, method, e, DefaultResponseCompressionOptions(false), nil, nil)
 }
@@ -2089,15 +2183,14 @@ func writeCachedResponseWithOptions(c *app.RequestContext, method string, e *cac
 	isHead := strings.EqualFold(strings.TrimSpace(method), "HEAD")
 
 	if e.Header != nil && len(e.Header) > 0 {
-		// Treat cache entries as untrusted state. Older entries and tests may have
-		// been constructed before the storage gate stripped Set-Cookie and
-		// hop-by-hop headers; never replay those headers to a shared-cache client.
+		// 缓存条目按不可信状态处理。更早写入的条目与测试构造的条目，可能
+		// 早于存储闸门剥离 Set-Cookie 与逐跳头；这些头绝不能回放给共享缓存
+		// 的客户端。
 		copyResponseHeaders(c, SanitizeHeadersForEdgeCache(e.Header))
 	}
-	// RFC 9111 §5.1: Age is the response age accumulated in this shared cache.
-	// The upstream's own Age was already folded into the entry TTL by
-	// EffectiveCacheTTL, so replay must replace it with our dwell time instead
-	// of letting downstreams see a stale or duplicated value.
+	// RFC 9111 §5.1：Age 表示响应在本共享缓存中累计的年龄。上游自带的 Age
+	// 已被 EffectiveCacheTTL 折算进条目 TTL，因此回放时必须换成本层的驻留
+	// 时长，不能把陈旧或重复的旧值透给下游。
 	c.Response.Header.Del("Age")
 	if e.CachedAt > 0 {
 		age := time.Now().Unix() - e.CachedAt
@@ -2132,8 +2225,12 @@ func ShouldCacheResponse(method string, statusCode int, body []byte) bool {
 	return strings.EqualFold(method, "GET") && statusCode == 200 && len(body) > 0
 }
 
-// varyDisallowsCaching reports true when any Vary field contains a dimension
-// that the cache does not normalize into its identity representation.
+/**
+ * varyDisallowsCaching 判断任一 Vary 字段是否含有缓存未纳入身份表示的维度。
+ *
+ * @param values 各条 Vary 头的原值。
+ * @return 存在未归一维度时返回 true，表示该响应不得进入共享缓存。
+ */
 func varyDisallowsCaching(values ...string) bool {
 	for _, value := range values {
 		for _, part := range strings.Split(value, ",") {
@@ -2159,9 +2256,8 @@ func cacheControlDisallowsStorage(values []string) bool {
 			case "private", "no-store", "no-cache", "must-revalidate", "proxy-revalidate", "no-transform":
 				return true
 			case "max-age", "s-maxage":
-				// A zero/negative freshness lifetime explicitly requires
-				// revalidation; do not let the site TTL turn it into a
-				// shared-cache hit.
+				// 零或负的新鲜期显式要求每次回源校验；站点 TTL 不得把它
+				// 变成一次共享缓存命中。
 				seconds, err := strconv.ParseInt(directiveValue, 10, 64)
 				if err != nil || seconds <= 0 {
 					return true
@@ -2196,10 +2292,16 @@ func pragmaDisallowsStorage(values []string) bool {
 	return false
 }
 
-// responseHeaderValues returns all values for a header name, including values
-// held under a non-canonical map key. http.Header normally canonicalizes keys,
-// but upstream adapters and legacy callers may construct the map directly.
-// Security decisions must not depend on that representation detail.
+/**
+ * responseHeaderValues 取某个头名的全部取值，包括挂非规范 map 键下的值。
+ *
+ * http.Header 正常会做键名规范化，但上游适配器与历史调用方可能直接构造该 map。
+ * 安全判定不得依赖这一表示细节。
+ *
+ * @param header 待查头集合。
+ * @param name 头名，大小写不敏感。
+ * @return 所有匹配取值，按 map 遍历顺序拼接。
+ */
 func responseHeaderValues(header http.Header, name string) []string {
 	if len(header) == 0 {
 		return nil
@@ -2225,9 +2327,16 @@ func contentEncodingDisallowsCaching(values []string) bool {
 	return false
 }
 
-// ShouldCacheHTTPResponse decides whether to store the upstream response in the
-// shared edge cache. The optional legacy argument is ignored deliberately:
-// origin privacy directives are never overridden by a site path rule.
+/**
+ * ShouldCacheHTTPResponse 判定上游响应是否可存入共享边缘缓存。
+ *
+ * 可选的历史参数被有意忽略：源站的隐私指令永远不能被站点路径规则覆盖。
+ *
+ * @param method 请求方法。
+ * @param resp 已缓冲的上游响应。
+ * @param _ 历史遗留参数，恒被忽略。
+ * @return 允许入缓存时返回 true。
+ */
 func ShouldCacheHTTPResponse(method string, resp *HTTPResponse, _ ...bool) bool {
 	if resp == nil || !ShouldCacheResponse(method, resp.StatusCode, resp.Body) {
 		return false
@@ -2251,13 +2360,13 @@ func ShouldCacheHTTPResponse(method string, resp *HTTPResponse, _ ...bool) bool 
 	if varyDisallowsCaching(responseHeaderValues(resp.Header, "Vary")...) {
 		return false
 	}
-	// Supported upstream encodings are decoded before this decision. A remaining
-	// encoding is unknown and cannot share a key across Accept-Encoding variants.
+	// 受支持的上游编码在本次判定之前就已被解码。仍有剩留编码说明编码未知，
+	// 无法在 Accept-Encoding 变体之间共用同一个缓存键。
 	if contentEncodingDisallowsCaching(responseHeaderValues(resp.Header, "Content-Encoding")) {
 		return false
 	}
-	// Age is a singleton response field. Any malformed or repeated value makes
-	// the freshness lifetime ambiguous, so do not turn it into a shared hit.
+	// Age 是单值响应字段。取值畸形或重复出现都会让新鲜期变得含糊，因此
+	// 不得让它成为共享缓存命中。
 	ages := responseHeaderValues(resp.Header, "Age")
 	if len(ages) > 1 {
 		return false
@@ -2271,9 +2380,16 @@ func ShouldCacheHTTPResponse(method string, resp *HTTPResponse, _ ...bool) bool 
 	return true
 }
 
-// EffectiveCacheTTL caps the site rule TTL by the freshness lifetime explicitly
-// supplied by the origin. A site allowlist may opt a path into caching, but it
-// cannot extend an origin's shorter max-age/s-maxage or an Expires deadline.
+/**
+ * EffectiveCacheTTL 用源站显式给出的新鲜期压住站点规则 TTL。
+ *
+ * 站点白名单可以把某条路径纳入缓存，但不能把源站更短的 max-age/s-maxage
+ * 或 Expires 期限拉长。
+ *
+ * @param configured 站点规则配置的 TTL（秒）。
+ * @param resp 已缓冲的上游响应。
+ * @return 实际生效的 TTL（秒）；不可缓存时为 0。
+ */
 func EffectiveCacheTTL(configured int64, resp *HTTPResponse) int64 {
 	if configured <= 0 || resp == nil {
 		return 0
@@ -2330,9 +2446,16 @@ func EffectiveCacheTTL(configured int64, resp *HTTPResponse) int64 {
 	return effective
 }
 
-// siteCacheFirstMatch returns the first matching cache rule's TTL, query-key
-// policy, and stale-if-error window. Case-insensitive matching never changes the
-// origin path stored in the cache key.
+/**
+ * siteCacheFirstMatch 返回首个命中缓存规则的 TTL、查询串建键策略与 stale-if-error 窗口。
+ *
+ * 大小写不敏感匹配不会改变存入缓存键的源站路径。
+ *
+ * @param rt 站点运行时。
+ * @param matchKey 路径加可选原始查询串。
+ * @return ttl 生效 TTL（秒）；stripQueryKey 是否从键中丢弃查询串；staleIfError
+ *   stale-if-error 窗口秒数；matched 是否命中规则。
+ */
 func siteCacheFirstMatch(rt snapshot.SiteRuntime, matchKey string) (ttl int64, stripQueryKey bool, staleIfError int64, matched bool) {
 	if !rt.CacheEnabled {
 		return 0, false, 0, false
@@ -2390,15 +2513,27 @@ func siteCacheFirstMatch(rt snapshot.SiteRuntime, matchKey string) (ttl int64, s
 	return 0, false, 0, false
 }
 
-// SiteCacheTTLDetails returns TTL and whether a cache_rules row matched (pattern hit).
-// cache_default_ttl is applied only as the TTL for a matching rule whose own ttl is <= 0;
-// it does not enable caching for paths that do not match any rule.
+/**
+ * SiteCacheTTLDetails 返回 TTL，以及是否有 cache_rules 行命中（模式命中）。
+ *
+ * cache_default_ttl 只作为「已命中但自身 ttl <= 0」那条规则的 TTL 生效；
+ * 它不会让未命中任何规则的路径获得缓存能力。
+ *
+ * @param rt 站点运行时。
+ * @param matchKey 路径加可选原始查询串。
+ * @return ttl 生效 TTL；matchedExplicitRule 是否命中显式规则。
+ */
 func SiteCacheTTLDetails(rt snapshot.SiteRuntime, matchKey string) (ttl int64, matchedExplicitRule bool) {
 	t, _, _, ok := siteCacheFirstMatch(rt, matchKey)
 	return t, ok
 }
 
-// RuleMatchKey is path plus optional raw query string, used to evaluate cache path rules.
+/**
+ * RuleMatchKey 给出路径加可选原始查询串，用于评估缓存路径规则。
+ *
+ * @param c Hertz 请求上下文。
+ * @return 规则匹配键。
+ */
 func RuleMatchKey(c *app.RequestContext) string {
 	return ruleMatchKeyFromPathQuery(requestPath(c), c.URI().QueryString())
 }
@@ -2426,9 +2561,16 @@ func pathOnlyFromRuleMatchKey(matchKey string) string {
 	return matchKey
 }
 
-// cacheSuffixPatternMatch matches suffix rules without mid-token false positives, e.g. pattern
-// "ig" must not match ".../config". File extensions (".js") and explicit path tails ("a/b.js")
-// keep standard suffix semantics.
+/**
+ * cacheSuffixPatternMatch 做后缀规则匹配，但避免命中词中间位置造成的误判。
+ *
+ * 例：模式 "ig" 不得匹配 ".../config"。文件扩展名（".js"）与显式路径尾
+ * （"a/b.js"）仍保持标准后缀语义。
+ *
+ * @param matchKey 路径加可选原始查询串。
+ * @param pat 规则模式。
+ * @return 命中时返回 true。
+ */
 func cacheSuffixPatternMatch(matchKey, pat string) bool {
 	if pat == "" {
 		return false
@@ -2458,8 +2600,18 @@ func cacheSuffixPatternMatch(matchKey, pat string) bool {
 	}
 }
 
-// BuildSiteCacheStorageKey builds the in-process cache key; stripQuery drops the query from the key,
-// lowerPath lowercases only the path segment (not the host key) when case-insensitive rules matched.
+/**
+ * BuildSiteCacheStorageKey 构造进程内缓存键。
+ *
+ * stripQuery 为真时从键中丢弃查询串；lowerPath 为真（大小写不敏感规则命中）时
+ * 只把路径段小写化，host 键不受影响。
+ *
+ * @param rt 站点运行时。
+ * @param c Hertz 请求上下文。
+ * @param stripQuery 是否丢弃查询串。
+ * @param lowerPath 是否把路径段小写化。
+ * @return 缓存键。
+ */
 func BuildSiteCacheStorageKey(rt snapshot.SiteRuntime, c *app.RequestContext, stripQuery, lowerPath bool) string {
 	return buildSiteCacheStorageKeyFromParts(rt, c, requestPath(c), c.URI().QueryString(), stripQuery, lowerPath)
 }
@@ -2481,16 +2633,28 @@ func buildSiteCacheStorageKeyFromParts(rt snapshot.SiteRuntime, c *app.RequestCo
 	return cache.CacheKey(method, hostKey, p, q)
 }
 
-// SiteCacheEligible reports whether this request may use the shared response
-// cache. The third result preserves the historical "matched rule" boolean.
+/**
+ * SiteCacheEligible 判定本次请求是否可以使用共享响应缓存。
+ *
+ * 第三个返回值保留了历史上的「规则命中」布尔语义。
+ *
+ * @param rt 站点运行时。
+ * @param c Hertz 请求上下文。
+ * @return key 缓存键（不可用为空串）；ttl 生效 TTL；matched 是否命中规则。
+ */
 func SiteCacheEligible(rt snapshot.SiteRuntime, c *app.RequestContext) (key string, ttl int64, matched bool) {
 	key, ttl, _ = SiteCacheEligibleWithStale(rt, c)
 	matched = key != ""
 	return key, ttl, matched
 }
 
-// SiteCacheEligibleWithStale is the extended cache eligibility contract used by
-// the data plane; it also returns the configured stale-if-error window.
+/**
+ * SiteCacheEligibleWithStale 是数据面使用的扩展缓存资格契约，额外返回配置的 stale-if-error 窗口。
+ *
+ * @param rt 站点运行时。
+ * @param c Hertz 请求上下文。
+ * @return key 缓存键（不可用为空串）；ttl 生效 TTL；staleIfError stale-if-error 窗口秒数。
+ */
 func SiteCacheEligibleWithStale(rt snapshot.SiteRuntime, c *app.RequestContext) (key string, ttl int64, staleIfError int64) {
 	if !rt.CacheEnabled {
 		return "", 0, 0
@@ -2578,10 +2742,12 @@ func isCacheableRequestMethod(method []byte) bool {
 	return false
 }
 
-// streamProbeSize is the buffer used to attempt a single Read on unknown-length
-// responses. If the entire body fits in one Read (EOF returned), ForwardHTTP
-// serves it buffered without compression. Otherwise it switches to streaming
-// compression. 32 KiB balances memory per request with typical small-body sizes.
+/**
+ * streamProbeSize 是对未知长度响应做单次 Read 探测所用的缓冲容量。
+ *
+ * 若整个响应体一次 Read 即可读完（返回 EOF），ForwardHTTP 走无压缩的缓冲
+ * 路径，否则切换到流式压缩。32 KiB 在每请求内存占用与常见小响应体之间取平衡。
+ */
 const streamProbeSize = 32768
 const completeUnknownLengthCompressMaxBytes = 5 * snapshot.DefaultResponseCompressionMinBytes
 
@@ -2604,12 +2770,14 @@ func putStreamCopyBuf(bp *[]byte) {
 	streamCopyBufPool.Put(bp)
 }
 
-// maxStreamTransformBufferBytes is the maximum body size (post-decompression) that
-// forwardHTTP will buffer into memory for identity response transformation.
-// Responses exceeding this are served untransformed via the normal streaming path.
+/**
+ * maxStreamTransformBufferBytes 是 forwardHTTP 为身份响应变换而缓冲进内存的响应体上限（解压后）。
+ *
+ * 超过该上限的响应不做变换，直接走常规流式路径。
+ */
 const maxStreamTransformBufferBytes = 8 * 1024 * 1024 // 8 MiB
 
-// ForwardHTTP copies the incoming request to upstream and streams the response.
+// closeUpstreamResponse 释放上游响应占用的资源：先取消上下文，再执行关闭函数。
 func closeUpstreamResponse(cancel context.CancelFunc, closeFn func() error, resp *http.Response) {
 	if cancel != nil {
 		cancel()
@@ -2909,9 +3077,20 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	return nil
 }
 
-// forwardHTTPWithTransform buffers the upstream response (up to maxStreamTransformBufferBytes),
-// applies the identity response transformer, and writes the result. Falls back to untransformed
-// streaming when the body exceeds the buffer limit.
+/**
+ * forwardHTTPWithTransform 缓冲上游响应（上限 maxStreamTransformBufferBytes），施加身份响应变换后写回。
+ *
+ * 响应体超过缓冲上限时，回退为不做变换的流式转发。
+ *
+ * @param ctx 请求上下文。
+ * @param c Hertz 请求上下文。
+ * @param rt 站点运行时。
+ * @param resp 上游响应。
+ * @param cancelUpstream 取消上游请求的函数。
+ * @param transformer 身份响应变换器。
+ * @param clientIP 客户端 IP。
+ * @return 写回下游过程中的错误。
+ */
 func forwardHTTPWithTransform(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, resp *http.Response, cancelUpstream context.CancelFunc, transformer identityResponseTransformer, clientIP net.IP) error {
 	body, _, remaining, closeFn, decoded, truncated, readErr := readUpstreamResponseBodyLimited(resp, maxStreamTransformBufferBytes)
 	if readErr != nil {
@@ -3017,10 +3196,21 @@ func (b *recompressedResponseBody) Close() error {
 	return nil
 }
 
-// streamRecompressedResponse sets up a non-blocking streaming compression
-// pipeline: a goroutine reads from src, compresses, and writes into a pipe;
-// the pipe reader is handed to Hertz via SetBodyStream so ForwardHTTP returns
-// immediately.
+/**
+ * streamRecompressedResponse 搭建非阻塞的流式压缩管线。
+ *
+ * 由一个 goroutine 从 src 读取、压缩并写入管道，管道读端经 SetBodyStream
+ * 交给 Hertz，ForwardHTTP 因此可以立即返回。
+ *
+ * @param ctx 请求上下文。
+ * @param c Hertz 请求上下文。
+ * @param src 上游响应体读取器。
+ * @param closeFn 上游资源关闭函数。
+ * @param resp 上游响应，用于读取状态码与头。
+ * @param cancel 取消上游请求的函数。
+ * @param encoding 目标压缩编码。
+ * @return 建立管线过程中的错误。
+ */
 func streamRecompressedResponse(ctx context.Context, c *app.RequestContext, src io.Reader, closeFn func() error, resp *http.Response, cancel context.CancelFunc, encoding responseEncoding) error {
 	ensureVaryAcceptEncoding(c)
 	c.Response.Header.Set("Content-Encoding", string(encoding))
@@ -3088,8 +3278,19 @@ func streamRecompressedResponse(ctx context.Context, c *app.RequestContext, src 
 	return nil
 }
 
-// streamCompressedResponseFromReader sets up streaming compression for a
-// known-length response body.
+/**
+ * streamCompressedResponseFromReader 为已知长度的响应体搭建流式压缩。
+ *
+ * @param ctx 请求上下文。
+ * @param c Hertz 请求上下文。
+ * @param src 上游响应体读取器。
+ * @param closeFn 上游资源关闭函数。
+ * @param resp 上游响应。
+ * @param cancel 取消上游请求的函数。
+ * @param encoding 目标压缩编码。
+ * @param bodySize 响应体长度。
+ * @return 建立管线过程中的错误。
+ */
 func streamCompressedResponseFromReader(ctx context.Context, c *app.RequestContext, src io.Reader, closeFn func() error, resp *http.Response, cancel context.CancelFunc, encoding responseEncoding, bodySize int) error {
 	return streamRecompressedResponse(ctx, c, src, closeFn, resp, cancel, encoding)
 }
@@ -3138,9 +3339,11 @@ func StreamResponseViaHijack(ctx context.Context, c *app.RequestContext, src io.
 	}
 }
 
-// proxyBodyStream wraps an upstream body reader for SetBodyStream. It closes
-// the underlying resources and copies trailers on EOF or Close, and monitors
-// the request context for cancellation.
+/**
+ * proxyBodyStream 包装上游响应体读取器供 SetBodyStream 使用。
+ *
+ * 它在 EOF 或 Close 时释放底层资源并搬运 trailer，同时监视请求上下文的取消。
+ */
 type proxyBodyStream struct {
 	reader        io.Reader
 	closeFn       func() error
@@ -3271,12 +3474,17 @@ func (s *proxyBodyStream) initCondLocked() {
 
 const probeEOFTimeout = 5 * time.Millisecond
 
-// probeStreamEOF attempts a short non-blocking read to detect whether the
-// upstream body is already complete. For chunked responses the first Read may
-// return all data bytes without EOF because the zero-length terminator chunk
-// has not arrived yet. This helper spawns a brief goroutine read: if EOF
-// arrives within probeEOFTimeout the body is fully buffered; otherwise
-// bodyReader remains usable for streaming.
+/**
+ * probeStreamEOF 用一次短时非阻塞读取探测上游响应体是否已经完整。
+ *
+ * 对 chunked 响应而言，首次 Read 可能返回全部数据字节却不带 EOF —— 零长度
+ * 结束块尚未到达。本函数因此另起一个短命 goroutine 读取：若 EOF 在
+ * probeEOFTimeout 内到达即判定响应体已全部缓冲，否则 bodyReader 仍可用于流式读取。
+ *
+ * @param bodyReader 上游响应体读取器。
+ * @return reader 可继续读的读取器（探测到 EOF 时可能并入探测到的字节）；
+ *   complete 是否已完整；err 读取错误。
+ */
 func probeStreamEOF(bodyReader io.Reader) (io.Reader, bool, error) {
 	type probeResult struct {
 		data []byte
@@ -3436,16 +3644,27 @@ func isHopByHop(name string) bool {
 	return ok
 }
 
-// IsHopByHop returns whether the given header name is a hop-by-hop header
-// that should be stripped when forwarding responses.
+/**
+ * IsHopByHop 判断给定头名是否为转发响应时应当剥离的逐跳头。
+ *
+ * @param name 头名。
+ * @return 是逐跳头时返回 true。
+ */
 func IsHopByHop(name string) bool { return isHopByHop(name) }
 
-// RequestConnectionHeaderStripper strips tokens listed in the Connection header.
+/**
+ * RequestConnectionHeaderStripper 按 Connection 头列出的令牌执行剥离。
+ */
 type RequestConnectionHeaderStripper struct {
 	tokens map[string]struct{}
 }
 
-// NewRequestConnectionHeaderStripper creates a stripper from the Connection header of a request.
+/**
+ * NewRequestConnectionHeaderStripper 依据请求的 Connection 头构造剥离器。
+ *
+ * @param c Hertz 请求上下文。
+ * @return 剥离器；Connection 未列出任何令牌时返回 nil。
+ */
 func NewRequestConnectionHeaderStripper(c *app.RequestContext) *RequestConnectionHeaderStripper {
 	s := &RequestConnectionHeaderStripper{tokens: make(map[string]struct{})}
 	for _, val := range c.Request.Header.PeekAll("Connection") {
@@ -3495,9 +3714,15 @@ func parseRawHeaderConnectionTokens(raw []byte, tokens map[string]struct{}) {
 	}
 }
 
-// ShouldStrip returns whether the given header key should be stripped.
-// Tokens are folded to lowercase when inserted, so membership is checked by
-// zero-allocation ASCII fold-compare instead of ToLower'ing each key.
+/**
+ * ShouldStrip 判断给定头键是否应当剥离。
+ *
+ * 令牌在插入时就已折叠为小写，因此成员判定用零分配的 ASCII 折叠比较，
+ * 而不是对每个键调用 ToLower。
+ *
+ * @param key 待判定的头键。
+ * @return 应剥离时返回 true。
+ */
 func (s *RequestConnectionHeaderStripper) ShouldStrip(key []byte) bool {
 	if s == nil || len(s.tokens) == 0 {
 		return false
@@ -3510,10 +3735,15 @@ func (s *RequestConnectionHeaderStripper) ShouldStrip(key []byte) bool {
 	return false
 }
 
-// lowerConnectionToken returns the ASCII-lowercased form of a Connection
-// header token without allocating beyond the returned copy. Token bytes come
-// from the request buffer and are reused after the handler returns, so the
-// lowercased form must not alias them unless nothing changed.
+/**
+ * lowerConnectionToken 返回 Connection 头令牌的 ASCII 小写形式，除返回的副本外不额外分配。
+ *
+ * 令牌字节来自请求缓冲，会在 handler 返回后被复用，因此小写结果不得与其
+ * 别名 —— 除非本来就没有字符发生变化。
+ *
+ * @param raw 原始令牌字节。
+ * @return 小写令牌；无变化时直接复用原字节。
+ */
 func lowerConnectionToken(raw []byte) string {
 	lower := make([]byte, len(raw))
 	changed := false
@@ -3530,7 +3760,12 @@ func lowerConnectionToken(raw []byte) string {
 	return string(lower)
 }
 
-// trimASCIIHeaderSpaceBytes trims ASCII space characters from both ends of a byte slice.
+/**
+ * trimASCIIHeaderSpaceBytes 去除字节切片两端的 ASCII 空格。
+ *
+ * @param raw 原始字节。
+ * @return 去空白后的子切片。
+ */
 func trimASCIIHeaderSpaceBytes(raw []byte) []byte {
 	start := 0
 	end := len(raw)
@@ -3543,7 +3778,7 @@ func trimASCIIHeaderSpaceBytes(raw []byte) []byte {
 	return raw[start:end]
 }
 
-// PruneStats records the number of pruned upstream transports and clients.
+// PruneStats 记录被修剪掉的上游 transport 与 client 数量。
 type PruneStats struct {
 	HTTPTransports           int
 	HTTP2CleartextTransports int
@@ -3554,18 +3789,27 @@ type PruneStats struct {
 	HTTP3NoTimeoutClients    int
 }
 
-// Changed returns whether any transports or clients were pruned.
+/**
+ * Changed 判断是否有任何 transport 或 client 被修剪。
+ *
+ * @return 有修剪发生时返回 true。
+ */
 func (s PruneStats) Changed() bool {
 	return s.HTTPTransports > 0 || s.HTTP2CleartextTransports > 0 || s.HTTPClients > 0 || s.HTTPNoTimeoutClients > 0 ||
 		s.HTTP3Transports > 0 || s.HTTP3Clients > 0 || s.HTTP3NoTimeoutClients > 0
 }
 
-// PruneInactiveUpstreamTransports removes transports and clients that are not referenced by any site in the snapshot.
+/**
+ * PruneInactiveUpstreamTransports 移除快照中已无任何站点引用的 transport 与 client。
+ *
+ * @param sn 当前快照。
+ * @return 各类池的修剪计数。
+ */
 func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 	if sn == nil || len(sn.Sites) == 0 {
 		return PruneStats{}
 	}
-	// Build set of active transport keys from current snapshot.
+	// 用当前快照构建活跃 transport 键集合。
 	active := make(map[transportKey]struct{})
 	for _, rt := range sn.Sites {
 		base := ""
@@ -3586,7 +3830,7 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 			} else {
 				stats.HTTPTransports++
 			}
-			// Remove associated clients.
+			// 连带移除配套的 client。
 			clientPoolMu.Lock()
 			if _, ok := clientCache[tr]; ok {
 				delete(clientCache, tr)
@@ -3649,8 +3893,11 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 	return stats
 }
 
-// CloseIdleUpstreamTransports closes idle connections on all cached transports.
-// Returns counts of closed HTTP, H2C, and HTTP/3 transports.
+/**
+ * CloseIdleUpstreamTransports 关闭所有已缓存 transport 上的空闲连接。
+ *
+ * @return 依次为 HTTP、H2C、HTTP/3 transport 的关闭数量。
+ */
 func CloseIdleUpstreamTransports() (int, int, int) {
 	var httpCount, h2cCount, h3Count int
 	transportMu.RLock()
@@ -3676,7 +3923,13 @@ func CloseIdleUpstreamTransports() (int, int, int) {
 	return httpCount, h2cCount, h3Count
 }
 
-// transportKeyForUpstream builds a transport key from the upstream base URL and site runtime.
+/**
+ * transportKeyForUpstream 依据上游基础 URL 与站点运行时构造 transport 键。
+ *
+ * @param base 上游基础 URL。
+ * @param rt 站点运行时。
+ * @return 传输池键。
+ */
 func transportKeyForUpstream(base string, rt snapshot.SiteRuntime) transportKey {
 	key := transportKey{}
 	if base != "" {
@@ -3695,7 +3948,7 @@ func transportKeyForUpstream(base string, rt snapshot.SiteRuntime) transportKey 
 	return key
 }
 
-// HTTP/3 transport pool for upstream connections.
+// 上游连接的 HTTP/3 transport 池。
 type http3TransportKey struct {
 	upstreamHost          string
 	tlsServerName         string
@@ -3708,9 +3961,12 @@ var (
 	http3TransportPool = make(map[http3TransportKey]*http3.Transport)
 )
 
-// UpstreamTransportPoolStats holds snapshot statistics for upstream transport pools.
-// HTTP3Clients / HTTP3NoTimeoutClients 反映 http3ClientPools 的真实规模（h3 上游
-// 请求路径按 transport 池化），不再是占位常量。
+/**
+ * UpstreamTransportPoolStats 承载上游传输池的瞬时统计。
+ *
+ * HTTP3Clients / HTTP3NoTimeoutClients 反映 http3ClientPools 的真实规模
+ * （h3 上游请求路径按 transport 池化），不再是占位常量。
+ */
 type UpstreamTransportPoolStats struct {
 	HTTPTransports           int
 	HTTP2CleartextTransports int
@@ -3721,7 +3977,11 @@ type UpstreamTransportPoolStats struct {
 	HTTP3NoTimeoutClients    int
 }
 
-// UpstreamTransportPoolStatsSnapshot returns current pool statistics.
+/**
+ * UpstreamTransportPoolStatsSnapshot 返回当前各池的统计快照。
+ *
+ * @return 传输池统计。
+ */
 func UpstreamTransportPoolStatsSnapshot() UpstreamTransportPoolStats {
 	transportMu.RLock()
 	httpTransports := 0

@@ -6,8 +6,10 @@ import (
 	"time"
 )
 
-// Metrics tracks data-plane counters and distinct resolved client IPs (thread-safe).
-// The IP sets back the distinct counters and are intentionally scoped to this process lifetime.
+/**
+ * Metrics 跟踪数据平面计数器与去重后的解析客户端 IP（线程安全）。
+ * IP 集合回填去重计数器，其作用域有意限定为本进程的生命周期。
+ */
 type Metrics struct {
 	RequestsTotal atomic.Int64
 	Status2xx     atomic.Int64
@@ -46,12 +48,12 @@ func NewMetrics() *Metrics {
 func (m *Metrics) RecordRequest() {
 	m.RequestsTotal.Add(1)
 	now := time.Now().Unix()
-	// Simple ring buffer: find current second's slot or advance.
+	// 简单的环形缓冲：定位当前秒所在的槽位，找不到就前进一格。
 	idx := int(m.ringIdx.Load()) % qpsRingSize
 	if m.ring[idx].ts.Load() == now {
 		m.ring[idx].count.Add(1)
 	} else {
-		// Advance to next slot (benign race: worst case we overcount slightly).
+		// 前进到下一个槽位（良性竞态：最坏情况只是略微多计）。
 		newIdx := (idx + 1) % qpsRingSize
 		m.ringIdx.Store(int64(newIdx))
 		m.ring[newIdx].ts.Store(now)
@@ -74,7 +76,7 @@ func (m *Metrics) RecordWAFBlock()   { m.WAFBlocks.Add(1) }
 func (m *Metrics) RecordWAFObserve() { m.WAFObserves.Add(1) }
 func (m *Metrics) RecordBuiltinHit() { m.BuiltinHits.Add(1) }
 
-// RecordClientIP records one unique resolved client IP.
+// RecordClientIP 记录一个去重后的已解析客户端 IP。
 func (m *Metrics) RecordClientIP(ip string) {
 	if ip == "" {
 		return
@@ -90,7 +92,7 @@ func (m *Metrics) RecordClientIP(ip string) {
 	m.ipMu.Unlock()
 }
 
-// RecordAttackIP records one unique resolved client IP that triggered a WAF action.
+// RecordAttackIP 记录一个去重后的、触发了 WAF 动作的已解析客户端 IP。
 func (m *Metrics) RecordAttackIP(ip string) {
 	if ip == "" {
 		return
@@ -106,7 +108,7 @@ func (m *Metrics) RecordAttackIP(ip string) {
 	m.ipMu.Unlock()
 }
 
-// QPS returns approximate queries-per-second over the last windowSec seconds.
+// QPS 返回最近 windowSec 秒内的近似每秒查询数。
 func (m *Metrics) QPS(windowSec int) float64 {
 	if windowSec <= 0 {
 		windowSec = 1

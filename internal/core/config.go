@@ -9,25 +9,25 @@ import (
 	"time"
 )
 
-// BotConfig holds bot-detection and GeoIP-scoring tuning knobs.
+// BotConfig 汇总 bot 检测与 GeoIP 打分的调优参数。
 type BotConfig struct {
 	Enabled           bool     `yaml:"enabled" json:"enabled"`
 	GeoIPDBPath       string   `yaml:"geoip_db_path" json:"geoip_db_path"`
-	HighRiskCountries []string `yaml:"high_risk_countries" json:"high_risk_countries"` // ISO 3166-1 alpha-2 codes
+	HighRiskCountries []string `yaml:"high_risk_countries" json:"high_risk_countries"` // ISO 3166-1 alpha-2 国家码
 	DataCenterASNs    []uint   `yaml:"datacenter_asns" json:"datacenter_asns"`
 	VPNProxyASNs      []uint   `yaml:"vpn_proxy_asns" json:"vpn_proxy_asns"`
-	ScoreThreshold    int      `yaml:"score_threshold" json:"score_threshold"` // total score to trigger block (default 80)
+	ScoreThreshold    int      `yaml:"score_threshold" json:"score_threshold"` // 触发拦截的总分（默认 80）
 }
 
-// DefaultBotConfig returns a BotConfig with sensible production defaults.
+// DefaultBotConfig 返回带生产可用默认值的 BotConfig。
 func DefaultBotConfig() BotConfig {
 	return BotConfig{
 		Enabled:        true,
 		GeoIPDBPath:    "",
 		ScoreThreshold: 80,
-		// High-risk countries: empty by default – admin configures per deployment.
+		// 高风险国家默认留空——由管理员按部署环境配置。
 		HighRiskCountries: nil,
-		// Common cloud / datacenter ASNs (AWS, GCP, Azure, DigitalOcean, Vultr, Linode, OVH, Hetzner).
+		// 常见云 / 数据中心 ASN（AWS、GCP、Azure、DigitalOcean、Vultr、Linode、OVH、Hetzner）。
 		DataCenterASNs: []uint{
 			16509, 14618, // AWS
 			15169, 396982, // Google Cloud
@@ -41,29 +41,29 @@ func DefaultBotConfig() BotConfig {
 			45090, // Tencent Cloud
 			37963, // Alibaba Cloud
 		},
-		// Common VPN / proxy ASNs.
+		// 常见 VPN / 代理 ASN。
 		VPNProxyASNs: []uint{
-			9009,   // M247 (used by NordVPN, Surfshark, etc.)
-			20473,  // Choopa / Vultr (many VPN endpoints)
-			60068,  // Datacamp / CDN77 (proxy services)
+			9009,   // M247（NordVPN、Surfshark 等在用）
+			20473,  // Choopa / Vultr（大量 VPN 出口）
+			60068,  // Datacamp / CDN77（代理服务）
 			212238, // Datacamp Limited
-			206264, // Amarutu Technology (VPN hosting)
-			62240,  // Clouvider (VPN hosting)
-			396356, // Maxihost (proxy hosting)
-			174,    // Cogent (some proxy infra)
+			206264, // Amarutu Technology（VPN 托管）
+			62240,  // Clouvider（VPN 托管）
+			396356, // Maxihost（代理托管）
+			174,    // Cogent（部分代理基础设施）
 		},
 	}
 }
 
-// DropConfig controls the TCP drop (connection close) strategy.
+// DropConfig 控制 TCP drop（直接关闭连接）策略。
 type DropConfig struct {
 	Enabled             bool `yaml:"enabled" json:"enabled"`
-	BotScoreThreshold   int  `yaml:"bot_score_threshold" json:"bot_score_threshold"`       // default 80
-	CVEAutoDropCritical bool `yaml:"cve_auto_drop_critical" json:"cve_auto_drop_critical"` // default true
-	CVEAutoDropHigh     bool `yaml:"cve_auto_drop_high" json:"cve_auto_drop_high"`         // default true
+	BotScoreThreshold   int  `yaml:"bot_score_threshold" json:"bot_score_threshold"`       // 默认 80
+	CVEAutoDropCritical bool `yaml:"cve_auto_drop_critical" json:"cve_auto_drop_critical"` // 默认 true
+	CVEAutoDropHigh     bool `yaml:"cve_auto_drop_high" json:"cve_auto_drop_high"`         // 默认 true
 }
 
-// DefaultDropConfig returns a DropConfig with sensible production defaults.
+// DefaultDropConfig 返回带生产可用默认值的 DropConfig。
 func DefaultDropConfig() DropConfig {
 	return DropConfig{
 		Enabled:             true,
@@ -98,9 +98,9 @@ const (
 	queueMaxFlushInterval   = 60 * time.Second
 )
 
-// DefaultQueueConfig returns the production defaults. 除 BatchSize 外均与
-// observability 包参数化前的硬编码常量一致；BatchSize 经 SQLite 写径审计由
-// 64 上调至 256。WriteQueue 各默认不变。
+// DefaultQueueConfig 返回生产默认值。除 BatchSize 外均与 observability 包
+// 参数化前的硬编码常量一致；BatchSize 经 SQLite 写径审计由 64 上调至 256。
+// WriteQueue 各默认值不变。
 func DefaultQueueConfig() QueueConfig {
 	return QueueConfig{
 		EventBufferSize:     16384,
@@ -214,41 +214,41 @@ func clampQueueConfig(cfg QueueConfig) (QueueConfig, []string) {
 	return cfg, warns
 }
 
-// Config is process bootstrap: SQL backend + optional Redis (cache / future pubsub).
+// Config 是进程引导配置：SQL 后端 + 可选 Redis（缓存 / 后续 pubsub）。
 type Config struct {
-	// DBDriver: sqlite | mysql | postgres (default sqlite).
+	// DBDriver：sqlite | mysql | postgres（默认 sqlite）。
 	DBDriver string
-	// DBDSN: sqlite file path, or full DSN for mysql/postgres.
-	// If empty with sqlite, falls back to DataDir/waf.db.
+	// DBDSN：sqlite 文件路径，或 mysql/postgres 的完整 DSN。
+	// sqlite 下为空时回退到 DataDir/waf.db。
 	DBDSN string
-	// LogDBDSN stores high-volume access/security/drop/bot logs separately.
-	// If empty with sqlite, falls back to DataDir/waf_logs.db.
+	// LogDBDSN 单独存放高写入量的访问/安全/drop/bot 日志。
+	// sqlite 下为空时回退到 DataDir/waf_logs.db。
 	LogDBDSN string
-	// DataDir used when sqlite DSN has no directory part.
+	// DataDir 在 sqlite 的 DSN 不含目录部分时使用。
 	DataDir string
 
-	// Redis (optional). Empty Addr → no Redis client.
+	// Redis（可选）。Addr 为空则不创建 Redis 客户端。
 	RedisAddr     string
 	RedisPassword string
 	RedisDB       int
 
-	// AdminBind is the address the admin control-plane server listens on.
+	// AdminBind 是管理控制面服务器的监听地址。
 	AdminBind string
-	// AdminStaticDir overrides embedded frontend for local development.
+	// AdminStaticDir 在本地开发时覆盖内嵌前端产物。
 	AdminStaticDir string
 
-	// CVE detection configuration.
+	// CVE 检测配置。
 	CVE CVEConfig
 
-	// Bot detection & GeoIP scoring configuration.
+	// Bot 检测与 GeoIP 打分配置。
 	Bot BotConfig
 
-	// Drop (TCP connection close) strategy configuration.
+	// Drop（关闭 TCP 连接）策略配置。
 	Drop DropConfig
 
-	// ResponseCacheMB is the max response cache size in MiB (0 = use default 64).
+	// ResponseCacheMB 是响应缓存的最大容量（MiB，0 = 使用默认值 64）。
 	ResponseCacheMB int
-	// ResponseCacheTTLSec is the default cache TTL in seconds (0 = use default 60).
+	// ResponseCacheTTLSec 是默认缓存 TTL（秒，0 = 使用默认值 60）。
 	ResponseCacheTTLSec int
 
 	// Queue 调优各类可观测/异步写入队列的容量与批大小。
@@ -261,13 +261,13 @@ type Config struct {
 	QueueWarnings []string
 }
 
-// CVEConfig controls CVE-specific detection and feed synchronisation.
+// CVEConfig 控制 CVE 专项检测与情报源同步。
 type CVEConfig struct {
 	Enabled      bool   `yaml:"enabled" json:"enabled"`
 	FeedEnabled  bool   `yaml:"feed_enabled" json:"feed_enabled"`
-	FeedInterval string `yaml:"feed_interval" json:"feed_interval"` // e.g. "6h"
+	FeedInterval string `yaml:"feed_interval" json:"feed_interval"` // 例如 "6h"
 	NVDAPIKey    string `yaml:"nvd_api_key" json:"nvd_api_key"`
-	AutoApprove  bool   `yaml:"auto_approve" json:"auto_approve"` // auto-approve generated rules
+	AutoApprove  bool   `yaml:"auto_approve" json:"auto_approve"` // 自动批准生成的规则
 }
 
 func LoadConfigFromEnv() Config {

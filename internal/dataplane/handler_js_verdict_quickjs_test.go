@@ -16,8 +16,10 @@ import (
 	"My-OpenWaf/internal/waf/jsplugin"
 )
 
-// TestHandlerJSRequestStageVerdictShortCircuitsUpstream 锁定请求阶段裁决
-// 语义：脚本给出 action 后请求不再走上游，响应码与内容按脚本要求渲染。
+/**
+ * TestHandlerJSRequestStageVerdictShortCircuitsUpstream 锁定请求阶段裁决
+ * 语义：脚本给出 action 后请求不再走上游，响应码与内容按脚本要求渲染。
+ */
 func TestHandlerJSRequestStageVerdictShortCircuitsUpstream(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +68,10 @@ func TestHandlerJSRequestStageVerdictShortCircuitsUpstream(t *testing.T) {
 	}
 }
 
-// TestHandlerJSRequestStageWithoutVerdictProxies 确认没有裁决时脚本仍然只改
-// 请求并继续走上游，既有语义不变。
+/**
+ * TestHandlerJSRequestStageWithoutVerdictProxies 确认没有裁决时脚本仍然只改
+ * 请求并继续走上游，既有语义不变。
+ */
 func TestHandlerJSRequestStageWithoutVerdictProxies(t *testing.T) {
 	var upstreamPath atomic.Value
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -100,8 +104,10 @@ func TestHandlerJSRequestStageWithoutVerdictProxies(t *testing.T) {
 	}
 }
 
-// TestHandlerJSRequestStageRejectsUnknownAction 锁定「拼错的动作必须可见」：
-// 未知动作会让计划校验失败，fail-open 脚本被跳过而不是静默按放行处理。
+/**
+ * TestHandlerJSRequestStageRejectsUnknownAction 锁定「拼错的动作必须可见」：
+ * 未知动作会让计划校验失败，fail-open 脚本被跳过而不是静默按放行处理。
+ */
 func TestHandlerJSRequestStageRejectsUnknownAction(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,8 +139,10 @@ func TestHandlerJSRequestStageRejectsUnknownAction(t *testing.T) {
 	}
 }
 
-// TestHandlerJSRequestStageRedirectVerdict 锁定 redirect 裁决走数据面既有
-// 重定向分支，且目标来自脚本。
+/**
+ * TestHandlerJSRequestStageRedirectVerdict 锁定 redirect 裁决走数据面既有
+ * 重定向分支，且目标来自脚本。
+ */
 func TestHandlerJSRequestStageRedirectVerdict(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -167,8 +175,10 @@ func TestHandlerJSRequestStageRedirectVerdict(t *testing.T) {
 	}
 }
 
-// TestHandlerJSRequestStageVerdictBeatsBuiltin 锁定裁决优先于内置管道：
-// 脚本的放行/拦截决定不会被内置检测覆盖。
+/**
+ * TestHandlerJSRequestStageVerdictBeatsBuiltin 锁定裁决优先于内置管道：
+ * 脚本的放行/拦截决定不会被内置检测覆盖。
+ */
 func TestHandlerJSRequestStageVerdictBeatsBuiltin(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

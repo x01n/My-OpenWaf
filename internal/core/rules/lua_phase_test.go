@@ -70,10 +70,12 @@ func TestLuaPhaseNilEngineIsNoop(t *testing.T) {
 	}
 }
 
-// TestLuaPhaseTerminalActions 验证终止动作被正确标记。
-//
-// terminal 为 false 会让 pipeline 继续执行后续阶段并最终放行——
-// 拦截类动作漏标就是静默失效。
+/**
+ * TestLuaPhaseTerminalActions 验证终止动作被正确标记。
+ *
+ * terminal 为 false 会让 pipeline 继续执行后续阶段并最终放行——
+ * 拦截类动作漏标就是静默失效。
+ */
 func TestLuaPhaseTerminalActions(t *testing.T) {
 	cases := []struct {
 		act          string
@@ -251,10 +253,12 @@ func TestBuildLuaRequestViewNilClientIP(t *testing.T) {
 	}
 }
 
-// TestBuildLuaRequestViewRuntime 验证运行时视图被填充为 pre 阶段。
-//
-// 脚本此前完全读不到 ctx.runtime：字段在 exec.go 里暴露，但生产侧从未赋值，
-// 恒为空表且不报错。这里锁定三个键的来源——阶段、管道阶段名、请求 ID。
+/**
+ * TestBuildLuaRequestViewRuntime 验证运行时视图被填充为 pre 阶段。
+ *
+ * 脚本此前完全读不到 ctx.runtime：字段在 exec.go 里暴露，但生产侧从未赋值，
+ * 恒为空表且不报错。这里锁定三个键的来源——阶段、管道阶段名、请求 ID。
+ */
 func TestBuildLuaRequestViewRuntime(t *testing.T) {
 	ctx := &pipeline.RequestCtx{RequestID: "req-42"}
 	view := BuildLuaRequestView(ctx)
@@ -298,11 +302,13 @@ func TestBuildLuaPostRuntimeView(t *testing.T) {
 	}
 }
 
-// TestBuildLuaRequestViewLeavesConfigMetricsEmpty 锁定当前事实：
-// Config 与 Metrics 在数据面无写入方，视图里保持 nil。
-//
-// 这不是「尚待补齐」的断言，而是防止无声改变：若将来有人接上数据源，此用例
-// 会失败，提示同步更新文档与前端帮助面板里对这两个字段的描述。
+/**
+ * TestBuildLuaRequestViewLeavesConfigMetricsEmpty 锁定当前事实：
+ * Config 与 Metrics 在数据面无写入方，视图里保持 nil。
+ *
+ * 这不是「尚待补齐」的断言，而是防止无声改变：若将来有人接上数据源，此用例
+ * 会失败，提示同步更新文档与前端帮助面板里对这两个字段的描述。
+ */
 func TestBuildLuaRequestViewLeavesConfigMetricsEmpty(t *testing.T) {
 	view := BuildLuaRequestView(&pipeline.RequestCtx{RequestID: "r"})
 	if view.Config != nil {
@@ -313,9 +319,11 @@ func TestBuildLuaRequestViewLeavesConfigMetricsEmpty(t *testing.T) {
 	}
 }
 
-// TestLuaPhaseScriptErrorDoesNotBlock 验证脚本报错时请求不被拦截。
-//
-// 自定义策略故障不应导致站点不可用——这是数据面的可用性底线。
+/**
+ * TestLuaPhaseScriptErrorDoesNotBlock 验证脚本报错时请求不被拦截。
+ *
+ * 自定义策略故障不应导致站点不可用——这是数据面的可用性底线。
+ */
 func TestLuaPhaseScriptErrorDoesNotBlock(t *testing.T) {
 	phase := luaPhaseWith(t, `function handle(ctx) error("boom") end`)
 	res, terminal := phase.Execute(&pipeline.RequestCtx{})

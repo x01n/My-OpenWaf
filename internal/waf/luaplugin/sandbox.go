@@ -17,16 +17,18 @@ func compileProto(name, source string) (*lua.FunctionProto, error) {
 	return lua.Compile(chunk, name)
 }
 
-// allowedLibs 是允许注册的标准库。
-//
-// 刻意排除：
-//   - io / os：文件系统与环境访问，脚本绝不应触达
-//   - debug：可绕过一切沙箱限制（能改别人的函数、读局部变量）
-//   - package（require/loadlib）：可加载任意模块与 C 动态库
-//   - coroutine：与超时中断机制冲突——协程内的执行不受调用方 context 约束
-//
-// base 库虽保留，但其中的 dofile/loadfile/load/loadstring/require/collectgarbage
-// 会在 hardenState 中单独摘除：它们能从字符串动态构造代码，使脚本审计失去意义。
+/**
+ * allowedLibs 是允许注册的标准库。
+ *
+ * 刻意排除：
+ *   - io / os：文件系统与环境访问，脚本绝不应触达
+ *   - debug：可绕过一切沙箱限制（能改别人的函数、读局部变量）
+ *   - package（require/loadlib）：可加载任意模块与 C 动态库
+ *   - coroutine：与超时中断机制冲突——协程内的执行不受调用方 context 约束
+ *
+ * base 库虽保留，但其中的 dofile/loadfile/load/loadstring/require/collectgarbage
+ * 会在 hardenState 中单独摘除：它们能从字符串动态构造代码，使脚本审计失去意义。
+ */
 var allowedLibs = []struct {
 	name string
 	fn   lua.LGFunction
@@ -37,11 +39,13 @@ var allowedLibs = []struct {
 	{lua.MathLibName, lua.OpenMath},
 }
 
-// bannedBaseFuncs 是需从 base 库摘除的函数。
-//
-// 前五个能从字符串动态构造并执行代码——保留它们等于允许脚本在运行时生成
-// 任意逻辑，静态审计与体积限制都将形同虚设。collectgarbage 则允许脚本
-// 主动触发 STW GC，是廉价的拒绝服务手段。
+/**
+ * bannedBaseFuncs 是需从 base 库摘除的函数。
+ *
+ * 前五个能从字符串动态构造并执行代码——保留它们等于允许脚本在运行时生成
+ * 任意逻辑，静态审计与体积限制都将形同虚设。collectgarbage 则允许脚本
+ * 主动触发 STW GC，是廉价的拒绝服务手段。
+ */
 var bannedBaseFuncs = []string{
 	"dofile", "loadfile", "load", "loadstring", "require",
 	"collectgarbage",
@@ -60,11 +64,13 @@ var bannedBaseFuncs = []string{
 	"module",
 }
 
-// vmPool 管理一次执行一个的 Lua 状态机。
-//
-// 标准库和 _G 都是可变对象，无法在不遗漏嵌套表、函数或元表的前提下可靠复原。
-// 因此状态机绝不跨脚本或请求复用，执行结束立即关闭；已编译的函数原型仍由
-// compileProto 共享，避免重复解析和编译脚本源码。
+/**
+ * vmPool 管理一次执行一个的 Lua 状态机。
+ *
+ * 标准库和 _G 都是可变对象，无法在不遗漏嵌套表、函数或元表的前提下可靠复原。
+ * 因此状态机绝不跨脚本或请求复用，执行结束立即关闭；已编译的函数原型仍由
+ * compileProto 共享，避免重复解析和编译脚本源码。
+ */
 type vmPool struct{}
 
 func newVMPool() *vmPool {
@@ -76,7 +82,9 @@ func (p *vmPool) get() *lua.LState {
 	return newSandboxedState()
 }
 
-// put 清空栈并关闭执行完毕的状态机，丢弃所有脚本可能改写的库表和全局状态。
+/**
+ * put 清空栈并关闭执行完毕的状态机，丢弃所有脚本可能改写的库表和全局状态。
+ */
 func (p *vmPool) put(L *lua.LState) {
 	if L != nil && !L.IsClosed() {
 		L.SetTop(0)

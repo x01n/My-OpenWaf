@@ -18,10 +18,12 @@ import (
 	"My-OpenWaf/internal/waf/luaplugin"
 )
 
-// newLuaMutationHandler 构造只挂 Lua 插件、上游为一个 httptest 服务的数据面。
-//
-// 与 handler_test.go 的 Lua 用例同构：OWASP/CVE/bot 关闭，观察点收窄到
-// 「脚本改写是否到达上游」与「响应改写是否到达客户端」。
+/**
+ * newLuaMutationHandler 构造只挂 Lua 插件、上游为一个 httptest 服务的数据面。
+ *
+ * 与 handler_test.go 的 Lua 用例同构：OWASP/CVE/bot 关闭，观察点收窄到
+ * 「脚本改写是否到达上游」与「响应改写是否到达客户端」。
+ */
 func newLuaMutationHandler(t *testing.T, upstreamURL string, scripts []*luaplugin.Script) app.HandlerFunc {
 	t.Helper()
 	protection := store.DefaultProtectionConfig()
@@ -54,8 +56,10 @@ func newLuaMutationHandler(t *testing.T, upstreamURL string, scripts []*luaplugi
 	})
 }
 
-// TestHandlerLuaPreRewritesUpstreamRequest 锁定 pre 阶段请求改写的端到端效果：
-// 脚本改的方法、路径、查询、请求头与请求体全部到达上游。
+/**
+ * TestHandlerLuaPreRewritesUpstreamRequest 锁定 pre 阶段请求改写的端到端效果：
+ * 脚本改的方法、路径、查询、请求头与请求体全部到达上游。
+ */
 func TestHandlerLuaPreRewritesUpstreamRequest(t *testing.T) {
 	type captured struct {
 		method  string
@@ -127,8 +131,10 @@ end`)
 	}
 }
 
-// TestHandlerLuaPostRewritesUpstreamResponse 锁定 post 阶段响应改写的端到端
-// 效果：客户端拿到的是脚本改写后的状态码、响应体与响应头。
+/**
+ * TestHandlerLuaPostRewritesUpstreamResponse 锁定 post 阶段响应改写的端到端
+ * 效果：客户端拿到的是脚本改写后的状态码、响应体与响应头。
+ */
 func TestHandlerLuaPostRewritesUpstreamResponse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Upstream-Header", "1")
@@ -174,8 +180,10 @@ end`)
 	}
 }
 
-// TestHandlerLuaPreRewriteKeepsVerdictShortCircuit 确认改写不会让判定失效：
-// 同一脚本既改写又拦截时，请求仍被拦下。
+/**
+ * TestHandlerLuaPreRewriteKeepsVerdictShortCircuit 确认改写不会让判定失效：
+ * 同一脚本既改写又拦截时，请求仍被拦下。
+ */
 func TestHandlerLuaPreRewriteKeepsVerdictShortCircuit(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,8 +216,10 @@ end`)
 	}
 }
 
-// TestHandlerLuaPreInvalidRewriteStillProxies 锁定 fail-safe：非法改写（绝对
-// URL）被放弃，请求仍按原样代理，站点不会因为脚本笔误不可用。
+/**
+ * TestHandlerLuaPreInvalidRewriteStillProxies 锁定 fail-safe：非法改写（绝对
+ * URL）被放弃，请求仍按原样代理，站点不会因为脚本笔误不可用。
+ */
 func TestHandlerLuaPreInvalidRewriteStillProxies(t *testing.T) {
 	var upstreamPath atomic.Value
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -17,8 +17,8 @@ import (
 	"My-OpenWaf/internal/pkg/snippet"
 )
 
-// CVEDetector orchestrates CVE-specific vulnerability detection across
-// multiple technology-focused sub-detectors (PHP, Java, Node.js, general).
+// CVEDetector 编排 CVE 漏洞检测，下挂按技术栈划分的多个子检测器
+// （PHP、Java、Node.js 与通用）。
 type CVEDetector struct {
 	phpDetector     *PHPCVEDetector
 	javaDetector    *JavaCVEDetector
@@ -49,8 +49,8 @@ type CVEMatch struct {
 	Description string
 	MatchedPart string
 	Pattern     string
-	Action      string // drop, block, log
-	CaptchaType string // rule-level CAPTCHA type; empty inherits global
+	Action      string // 取值：drop、block、log
+	CaptchaType string // 规则级 CAPTCHA 类型；为空则继承全局配置
 	// Source/CVSSScore/CWEType/References 来自数据库规则行（cve_rules），
 	// 供安全事件展示规则来源与危险度明细；内置注册表规则无对应行时为空。
 	Source     string
@@ -61,16 +61,16 @@ type CVEMatch struct {
 	Snippet string
 }
 
-// CustomCVERule is a user/auto-generated CVE rule loaded from the database.
+// CustomCVERule 是从数据库载入的用户自定义或自动生成的 CVE 规则。
 type CustomCVERule struct {
 	ID          uint
 	CVEID       string
 	Category    string
-	Pattern     string // regex pattern
-	Target      string // all, url, url_body, body, header, cookie
+	Pattern     string // 检测用的正则表达式
+	Target      string // 取值：all、url、url_body、body、header、cookie
 	Severity    string
 	Action      string
-	CaptchaType string // rule-level CAPTCHA type; empty inherits global
+	CaptchaType string // 规则级 CAPTCHA 类型；为空则继承全局配置
 	Enabled     bool
 	Description string
 	// Source/CVSSScore/CWEType/References 是数据库规则行的展示元信息，
@@ -92,8 +92,8 @@ type CVERule struct {
 	Name        string                                                          // 规则名称
 	Description string                                                          // 规则描述
 	CVE         string                                                          // CVE 编号
-	Severity    string                                                          // critical/high/medium/low
-	Category    string                                                          // cve_general/cve_java/cve_node/cve_php
+	Severity    string                                                          // 取值：critical/high/medium/low
+	Category    string                                                          // 取值：cve_general/cve_java/cve_node/cve_php
 	Enabled     bool                                                            // 是否启用
 	Sensitivity string                                                          // 敏感度级别覆盖
 	CheckFunc   func(uri, body, ua string, headers map[string]string) *CVEMatch // 检测函数
@@ -193,7 +193,7 @@ func (r *CVERuleRegistry) DetectAll(uri, body, ua string, headers map[string]str
 	return matches
 }
 
-// DetectFirst returns the first enabled registered rule match in registry order.
+// DetectFirst 按注册表顺序返回首个命中的已启用注册规则。
 func (r *CVERuleRegistry) DetectFirst(uri, body, ua string, headers map[string]string) (CVEMatch, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -764,14 +764,14 @@ func GetGlobalCVERuleRegistry() *CVERuleRegistry {
 	return globalCVERuleRegistry
 }
 
-// CVERequest holds the normalised request data for CVE scanning.
+// CVERequest 保存供 CVE 扫描使用的归一化请求数据。
 type CVERequest struct {
 	Path        string
 	RawQuery    string
 	Headers     map[string]string
 	Body        string
 	ContentType string
-	// Decoded variants for multi-pass detection.
+	// 多层解码后的变体，供多轮检测使用。
 	DecodedPath        string
 	DecodedQuery       string
 	DecodedBody        string
@@ -782,11 +782,11 @@ type CVERequest struct {
 	URLTargetsLower    []string
 	BodyTargetsLower   []string
 	HeaderTargetsLower []string
-	AllTargets         []string // aggregated targets (path+query+header values+body)
-	AllTargetsLower    []string // pre-lowercased AllTargets for hasCVESuspiciousContent
+	AllTargets         []string // 聚合后的扫描目标（path + query + 请求头值 + body）
+	AllTargetsLower    []string // 预先小写化的 AllTargets，供 hasCVESuspiciousContent 使用
 }
 
-// NewCVEDetector initialises all sub-detectors.
+// NewCVEDetector 初始化全部子检测器。
 func NewCVEDetector() *CVEDetector {
 	return &CVEDetector{
 		phpDetector:     NewPHPCVEDetector(),
@@ -796,14 +796,14 @@ func NewCVEDetector() *CVEDetector {
 	}
 }
 
-// BuildCVERequest constructs a normalised CVERequest from raw request components.
+// BuildCVERequest 由原始请求组成部分构造归一化的 CVERequest。
 func BuildCVERequest(path, rawQuery string, headers map[string]string, body []byte, contentType string) *CVERequest {
 	req := &CVERequest{}
 	BuildCVERequestInto(req, path, rawQuery, headers, body, contentType)
 	return req
 }
 
-// BuildCVERequestInto fills dst with a normalised CVERequest from raw request components.
+// BuildCVERequestInto 由原始请求组成部分填充 dst，复用调用方持有的 CVERequest。
 func BuildCVERequestInto(dst *CVERequest, path, rawQuery string, headers map[string]string, body []byte, contentType string) {
 	bodyStr := buildCVEBodyString(body, contentType)
 
@@ -1046,10 +1046,10 @@ func stringsContainsAny(value string, needles ...string) bool {
 	return false
 }
 
-// HasRawCVESuspiciousContent checks raw request components before building a
-// full CVERequest. It mirrors the existing CVE fast path conservatively: when
-// any raw field could become suspicious after normalization, callers must run
-// the full BuildCVERequest + Detect path.
+// HasRawCVESuspiciousContent 在构造完整 CVERequest 之前先嗅探原始请求组成部分。
+//
+// 它保守地镜像既有 CVE 快路径的判据：只要任一原始字段在归一化后可能变可疑，
+// 调用方就必须走完整的 BuildCVERequest + Detect 路径，不得据此提前放行。
 const (
 	rawCVEHeaderOther = iota
 	rawCVEHeaderContentLength
@@ -1782,13 +1782,16 @@ func lowerCVERawTarget(raw string) string {
 	return raw
 }
 
-// Detect runs all sub-detectors, custom rules, and registry rules, returning all matches.
-// Runs detectors sequentially with early exit for performance — spawning
-// 4 goroutines per request adds ~10μs overhead that's significant at scale.
-// The optional categorySensitivity map allows per-category sensitivity override;
-// setting a category to "none" skips that sub-detector entirely.
+// Detect 依次执行全部子检测器、自定义规则与注册表规则，返回所有命中。
+//
+// 串行执行并在命中后尽早退出：每请求派生 4 个 goroutine 会引入约 10μs 的
+// 额外开销，在规模化场景下不可忽略。
+//
+// @param req 归一化的请求数据
+// @param categorySensitivity 可选的分类敏感度覆盖；某分类设为 "none" 时整体跳过该子检测器
+// @return 全部命中结果
 func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]string) []CVEMatch {
-	// Fast path: skip CVE scanning for short clean requests.
+	// 快路径：短且干净的请求直接跳过 CVE 扫描。
 	if !hasCVESuspiciousContent(req) {
 		return nil
 	}
@@ -1803,9 +1806,8 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 	// 一次性计算四子检测器 AC hit mask
 	hits := computeSubDetectorHits(req)
 
-	// Run detectors sequentially. Most requests won't match any, and
-	// sequential execution avoids goroutine spawn/sync overhead.
-	// General detector runs first as it covers the broadest set.
+	// 串行执行各子检测器：绝大多数请求不会命中任何规则，串行可省去
+	// goroutine 派生与同步开销。通用检测器覆盖面最广，故排在首位。
 	isDetectorEnabled := func(key string) bool {
 		if catSens == nil {
 			return true
@@ -1835,7 +1837,7 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 		}
 	}
 
-	// Custom rules.
+	// 自定义规则
 	customs := d.compiledCustomRules()
 
 	for _, cr := range customs {
@@ -1860,7 +1862,7 @@ func (d *CVEDetector) Detect(req *CVERequest, categorySensitivity ...map[string]
 	return matches
 }
 
-// DetectFirst returns the first CVE match using the same detector order as Detect.
+// DetectFirst 以与 Detect 相同的检测器顺序返回首个 CVE 命中。
 func (d *CVEDetector) DetectFirst(req *CVERequest, categorySensitivity ...map[string]string) (CVEMatch, bool) {
 	if !hasCVESuspiciousContent(req) {
 		return CVEMatch{}, false
@@ -1946,8 +1948,8 @@ func newCustomCVEMatch(cr compiledCustomRule, target string) CVEMatch {
 	}
 }
 
-// hasCVESuspiciousContent performs a cheap pre-filter to skip CVE scanning
-// for requests that are clearly clean. Checks for common exploit indicators.
+// hasCVESuspiciousContent 是廉价的预过滤：对明显干净的请求直接跳过 CVE 扫描，
+// 判据为常见利用特征。
 func hasCVEHighRiskPunctuation(raw, lower string) bool {
 	if strings.ContainsAny(raw, "\\|`") {
 		return true
@@ -2245,13 +2247,13 @@ func hasCVEKnownIndicator(lower string) bool {
 	return false
 }
 
-// ReloadCustomRules hot-reloads custom CVE rules (thread-safe).
+// ReloadCustomRules 热重载自定义 CVE 规则（并发安全）。
 func (d *CVEDetector) ReloadCustomRules(rules []CustomCVERule) {
 	compiled := make([]compiledCustomRule, 0, len(rules))
 	for _, r := range rules {
 		re, err := regexp.Compile("(?i)" + r.Pattern)
 		if err != nil {
-			continue // skip invalid patterns
+			continue // 跳过无法编译的正则
 		}
 		compiled = append(compiled, compiledCustomRule{rule: r, re: re})
 	}
@@ -2262,7 +2264,7 @@ func (d *CVEDetector) ReloadCustomRules(rules []CustomCVERule) {
 	d.mu.Unlock()
 }
 
-// AddCustomRule adds a single rule at runtime.
+// AddCustomRule 在运行时追加单条规则。
 func (d *CVEDetector) AddCustomRule(rule CustomCVERule) {
 	re, err := regexp.Compile("(?i)" + rule.Pattern)
 	if err != nil {
@@ -2275,7 +2277,7 @@ func (d *CVEDetector) AddCustomRule(rule CustomCVERule) {
 	d.mu.Unlock()
 }
 
-// RemoveCustomRule removes a rule by ID.
+// RemoveCustomRule 按 ID 移除规则。
 func (d *CVEDetector) RemoveCustomRule(id uint) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -2295,7 +2297,7 @@ func (d *CVEDetector) RemoveCustomRule(id uint) {
 	}
 }
 
-// pickTarget selects which request part to match against.
+// pickTarget 按 target 选择要匹配的请求部分。
 func pickTarget(req *CVERequest, target string) string {
 	switch target {
 	case "url":
@@ -2365,7 +2367,7 @@ func cveLowerHeaderName(name string) string {
 	return strings.ToLower(name)
 }
 
-// multiDecode performs URL-decode then attempts base64-decode on the result.
+// multiDecode 先做 URL 解码，再对结果尝试 base64 解码。
 func multiDecode(s string) string {
 	if s == "" {
 		return s

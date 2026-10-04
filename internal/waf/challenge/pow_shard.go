@@ -161,28 +161,30 @@ func buildPowShardAssembler(parts []string, keys []byte, checksum uint32, names 
 	)
 }
 
-// VerifyShardEnvelopeSignature 核对 0x06 域信封的 SM2 签名并返回其明文
-// （分片内层 JSON）；任一环节失败返回空串。
-//
-// ⚠️ **本函数不校验调用方传入的 pubHex**：`gm.Open(..., verifySig=true)` 用的是
-// 进程内已装载的 SM2 身份（`gm/sealed.go` 的 Open 签名根本没有 pubHex 参数，
-// 内部走 `VerifySignature` → `signIdent`）。pubHex 参数在此仅作**身份存在性
-// 守卫**：为空时拒绝，避免调用方在没有身份的情况下误以为已验签。要真正用
-// 外部公钥核对，须走 `gm.VerifyExternalSignature`（本函数不涉及该路径）。
-//
-// 用途：**服务端签发后自检**。客户端侧的同名核对由浏览器 WASM 的
-// `wasm_bindgen.gm_open_verify_sig` 用页面注入的公钥完成——那是唯一真正
-// 「用外部公钥」的验签路径，两边必须逐字节同构，否则会出现「服务端自检
-// 通过、客户端全体验签失败」的静默断链（跨语言对拍锁住这一点）。
-//
-// domain 必须传 gm.DomainPowShards（0x06）**具体值，不能传 0**：
-// Go 的 gm.Open 把 0 当通配（gm/sealed.go 的 `if domain != 0 && ...`），
-// 而 Rust 的 open_raw_signed 无此豁免（gm.rs 的 `raw[5] != domain`），
-// 两端不对称，传 0 会在客户端直接失败。
-//
-// ⚠️ **不缓存公钥**是这条链成立的前提：SM2 身份在进程内固定，但**跨重启会
-// 变化**（见 SetChallengeSecret 的注释）。公钥必须随每次信封下发新鲜注入
-// 页面，任何跨请求/跨进程的公钥缓存都会在重启后造成全体验签失败。
+/**
+ * VerifyShardEnvelopeSignature 核对 0x06 域信封的 SM2 签名并返回其明文
+ * （分片内层 JSON）；任一环节失败返回空串。
+ *
+ * ⚠️ **本函数不校验调用方传入的 pubHex**：`gm.Open(..., verifySig=true)` 用的是
+ * 进程内已装载的 SM2 身份（`gm/sealed.go` 的 Open 签名根本没有 pubHex 参数，
+ * 内部走 `VerifySignature` → `signIdent`）。pubHex 参数在此仅作**身份存在性
+ * 守卫**：为空时拒绝，避免调用方在没有身份的情况下误以为已验签。要真正用
+ * 外部公钥核对，须走 `gm.VerifyExternalSignature`（本函数不涉及该路径）。
+ *
+ * 用途：**服务端签发后自检**。客户端侧的同名核对由浏览器 WASM 的
+ * `wasm_bindgen.gm_open_verify_sig` 用页面注入的公钥完成——那是唯一真正
+ * 「用外部公钥」的验签路径，两边必须逐字节同构，否则会出现「服务端自检
+ * 通过、客户端全体验签失败」的静默断链（跨语言对拍锁住这一点）。
+ *
+ * domain 必须传 gm.DomainPowShards（0x06）**具体值，不能传 0**：
+ * Go 的 gm.Open 把 0 当通配（gm/sealed.go 的 `if domain != 0 && ...`），
+ * 而 Rust 的 open_raw_signed 无此豁免（gm.rs 的 `raw[5] != domain`），
+ * 两端不对称，传 0 会在客户端直接失败。
+ *
+ * ⚠️ **不缓存公钥**是这条链成立的前提：SM2 身份在进程内固定，但**跨重启会
+ * 变化**（见 SetChallengeSecret 的注释）。公钥必须随每次信封下发新鲜注入
+ * 页面，任何跨请求/跨进程的公钥缓存都会在重启后造成全体验签失败。
+ */
 func VerifyShardEnvelopeSignature(envelope, keyHex, pubHex string) string {
 	if pubHex == "" {
 		return ""
@@ -209,14 +211,16 @@ func VerifyShardEnvelopeSignature(envelope, keyHex, pubHex string) string {
 // 超大分配。与 captchaItemDataMaxPlaintext 同级取 512 KiB。
 const maxPowShardPlaintextBytes = 512 * 1024
 
-// powShardsAAD 是 PoW 代码分片信封的 AAD（标签生成器产物，禁止散落字面量）。
-//
-// ⚠️ 域 0x06（gm.DomainPowShards）被 PoW 分片、动态保护分片（internal/waf/dynamic）
-// 与本包的 C2 种子信封三方共用，而 gm.Seal/gm.Open 的 aad 参数**不参与认证**
-// （GCM 的 AAD 实为信封前 8 字节头部，见 gm/sealed.go 的注释）：本变量的标签
-// 只影响派生文本，不提供任何隔离。**域内多用途隔离完全依赖「三条链的密钥互不
-// 相同」**——改动任一条链时，不得让它与另两条共用密钥，否则其信封可被另一条
-// 链的解封路径接受。
+/**
+ * powShardsAAD 是 PoW 代码分片信封的 AAD（标签生成器产物，禁止散落字面量）。
+ *
+ * ⚠️ 域 0x06（gm.DomainPowShards）被 PoW 分片、动态保护分片（internal/waf/dynamic）
+ * 与本包的 C2 种子信封三方共用，而 gm.Seal/gm.Open 的 aad 参数**不参与认证**
+ * （GCM 的 AAD 实为信封前 8 字节头部，见 gm/sealed.go 的注释）：本变量的标签
+ * 只影响派生文本，不提供任何隔离。**域内多用途隔离完全依赖「三条链的密钥互不
+ * 相同」**——改动任一条链时，不得让它与另两条共用密钥，否则其信封可被另一条
+ * 链的解封路径接受。
+ */
 var powShardsAAD = gm.EnvelopeAAD(gm.EnvelopeLabel("pow-shards", gm.GMEnvelopeVersion), gm.PurposeChallengeData)
 
 // PowShardEnvelope 是加密分片的内层 JSON（v2）：分片已 XOR 单字节密钥并
@@ -235,10 +239,12 @@ type powShardEnvelopeItem struct {
 	Data string `json:"d"`
 }
 
-// powShardVMBootstrapTemplate 是 VM 内拼装引导薄壳的固定模板，占位符为
-// 2 个随机变量名（env/key）与 1 个用于信封/密钥 hidden input 的常量名。
-// 壳内不嵌任何分片数据，全部经 wasm_bindgen.vm_assemble_shards 在 WASM
-// 内存中完成，拼装产物交给 (0,eval).call(window, code)。
+/**
+ * powShardVMBootstrapTemplate 是 VM 内拼装引导薄壳的固定模板，占位符为
+ * 2 个随机变量名（env/key）与 1 个用于信封/密钥 hidden input 的常量名。
+ * 壳内不嵌任何分片数据，全部经 wasm_bindgen.vm_assemble_shards 在 WASM
+ * 内存中完成，拼装产物交给 (0,eval).call(window, code)。
+ */
 var powShardVMBootstrapTemplate = `(function(){
 function %s(id){var e=document.getElementById(id);return e?e.value:""}
 var %s=%s("__owaf_pow_env");

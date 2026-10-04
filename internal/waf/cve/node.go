@@ -16,7 +16,7 @@ func init() {
 		Category: "cve_node",
 		Enabled:  true,
 		CheckFunc: func(uri, body, ua string, headers map[string]string) *CVEMatch {
-			// Detect Flight protocol + prototype chain in body
+			// 在 body 中检测 Flight 协议与原型链组合
 			if reRSCFlightRef.MatchString(body) &&
 				(reRSCProtoConstructor.MatchString(body) || reRSCConstructorChain.MatchString(body)) {
 				return &CVEMatch{
@@ -58,7 +58,7 @@ func init() {
 	})
 }
 
-// NodeCVEDetector detects Node.js / React / Express specific CVE exploitation attempts.
+// NodeCVEDetector 检测 Node.js / React / Express 技术栈特有的 CVE 利用尝试。
 type NodeCVEDetector struct {
 	rules []nodeCVERule
 }
@@ -79,21 +79,21 @@ type nodePatternGate struct {
 	alts  []string
 }
 
-// Compiled Node.js CVE patterns (init-time).
+// Node.js CVE 正则，在 init 阶段编译。
 var (
-	// Prototype Pollution (CVE-2019-10744, CVE-2020-28469, etc.)
+	// 原型污染（CVE-2019-10744、CVE-2020-28469 等）
 	reProtoPollution1 = regexp.MustCompile(`(?i)"__proto__"\s*:`)
 	reProtoPollution2 = regexp.MustCompile(`(?i)__proto__\[`)
 	reProtoPollution3 = regexp.MustCompile(`(?i)__proto__=`)
 	reProtoPollution4 = regexp.MustCompile(`(?i)constructor\s*\[\s*"?prototype"?\s*\]`)
 	reProtoPollution5 = regexp.MustCompile(`(?i)constructor\.prototype`)
 
-	// React SSR injection
+	// React SSR 注入
 	reReactSSR1 = regexp.MustCompile(`(?i)dangerouslySetInnerHTML`)
 	reReactSSR2 = regexp.MustCompile(`(?i)__NEXT_DATA__`)
-	reReactSSR3 = regexp.MustCompile("(?i)`[^`]*\\$\\{[^}]+\\}[^`]*`") // template literal injection
+	reReactSSR3 = regexp.MustCompile("(?i)`[^`]*\\$\\{[^}]+\\}[^`]*`") // 模板字面量注入
 
-	// Node.js command injection
+	// Node.js 命令注入
 	reNodeCmd1 = regexp.MustCompile(`(?i)child_process`)
 	reNodeCmd2 = regexp.MustCompile(`(?i)require\s*\(\s*['"]child_process['"]`)
 	// 命令词后必须跟空白、shell 分隔符或串尾。仅用 \b 不够：URL 参数形态
@@ -107,24 +107,24 @@ var (
 	// 词边界不削弱真实形态：`ls`、`whoami`、`cat /etc/passwd`、`id` 均仍命中。
 	reNodeCmd5 = regexp.MustCompile("(?i)`[^`]*\\b(ls|cat|id|whoami|uname|pwd)\\b[^`]*`")
 
-	// Express/Koa path traversal (CVE-2017-14849, etc.)
+	// Express/Koa 路径遍历（CVE-2017-14849 等）
 	reNodePathTrav1 = regexp.MustCompile(`(?i)\.\.%2[fF]`)
 	reNodePathTrav2 = regexp.MustCompile(`(?i)\.\.%5[cC]`)
 	reNodePathTrav3 = regexp.MustCompile(`(?i)\.\.[;/]`)
 	reNodePathTrav4 = regexp.MustCompile(`(?i)\.\.\\`)
 
-	// EJS template injection (CVE-2022-29078)
+	// EJS 模板注入（CVE-2022-29078）
 	reEJS1 = regexp.MustCompile(`(?i)<%-?\s*(include|require|process|global|root|console)\b|<%=\s*(process|require|global|root|console)\b`)
 	reEJS2 = regexp.MustCompile(`(?i)settings\s*\[\s*['"]view\s*options`)
 
-	// vm2 sandbox escape (CVE-2023-32314)
+	// vm2 沙箱逃逸（CVE-2023-32314）
 	reVM2_1 = regexp.MustCompile(`(?i)this\.constructor\.constructor`)
 	reVM2_2 = regexp.MustCompile(`(?i)Function\s*\(\s*['"]return\s+process['"]`)
 
-	// Next.js SSRF (CVE-2024-34351)
+	// Next.js SSRF（CVE-2024-34351）
 	reNextSSRF1 = regexp.MustCompile(`(?i)x-middleware-subrequest`)
 
-	// React2Shell / React Server Components RCE (CVE-2025-55182, CVSS 10.0)
+	// React2Shell / React Server Components RCE（CVE-2025-55182，CVSS 10.0）
 	reRSCFlightRef        = regexp.MustCompile(`\$\d+:[A-Z]`)
 	reRSCProtoConstructor = regexp.MustCompile(`(?i)__proto__\s*[\[.]\s*["']?constructor`)
 	reRSCConstructorChain = regexp.MustCompile(`(?i)constructor\s*[\[.]\s*["']?constructor`)
@@ -134,15 +134,15 @@ var (
 	reRSCPromiseExec      = regexp.MustCompile(`(?i)\.then\s*\(.*(?:eval|Function|require)\s*\(`)
 	reRSCDynamicImport    = regexp.MustCompile(`(?i)import\s*\(\s*['"](?:child_process|fs|net|http|os)['"]`)
 
-	// Next.js middleware bypass (CVE-2025-29927)
+	// Next.js 中间件绕过（CVE-2025-29927）
 	reNextMiddlewareBypass = regexp.MustCompile(`(?i)x-middleware-subrequest:\s*middleware`)
 
-	// Next.js Server Actions path confusion (CVE-2025-55184)
+	// Next.js Server Actions 路径混淆（CVE-2025-55184）
 	reNextServerAction = regexp.MustCompile(`(?i)/_next/data/.*\.json\?.*__nextDataReq`)
 )
 
 var nodePatternGates = [][]nodePatternGate{
-	// [0] CVE-2019-10744 (5 patterns)
+	// 对应 [0] CVE-2019-10744（5 条正则）
 	{
 		{musts: []string{`"__proto__"`, ":"}},
 		{musts: []string{"__proto__["}},
@@ -150,7 +150,7 @@ var nodePatternGates = [][]nodePatternGate{
 		{musts: []string{"constructor", "[", "prototype", "]"}},
 		{musts: []string{"constructor.prototype"}},
 	},
-	// [1] CVE-2020-REACT-SSR (3 patterns)
+	// 对应 [1] CVE-2020-REACT-SSR（3 条正则）
 	{
 		{musts: []string{"dangerouslysetinnerhtml"}},
 		{musts: []string{"__next_data__"}},
@@ -158,7 +158,7 @@ var nodePatternGates = [][]nodePatternGate{
 		// 反引号成对也是必须字面量。
 		{musts: []string{"${", "`"}},
 	},
-	// [2] CVE-2019-NODE-CMD (5 patterns)
+	// 对应 [2] CVE-2019-NODE-CMD（5 条正则）
 	{
 		{musts: []string{"child_process"}},
 		{musts: []string{"require", "(", "child_process"}},
@@ -166,26 +166,26 @@ var nodePatternGates = [][]nodePatternGate{
 		{musts: []string{"|", "/"}, alts: []string{"cat", "id", "whoami", "uname"}},
 		{musts: []string{"`"}, alts: []string{"ls", "cat", "id", "whoami", "uname", "pwd"}},
 	},
-	// [3] CVE-2017-14849 (4 patterns)
+	// 对应 [3] CVE-2017-14849（4 条正则）
 	{
 		{musts: []string{"..%2f"}},
 		{musts: []string{"..%5c"}},
 		{musts: []string{".."}, alts: []string{";", "/"}},
 		{musts: []string{`..\`}},
 	},
-	// [4] CVE-2022-29078 (2 patterns)
+	// 对应 [4] CVE-2022-29078（2 条正则）
 	{
 		{musts: []string{"<%"}, alts: []string{"include", "require", "process", "global", "root", "console"}},
 		// \s* 允许 "settings" 与 "["、"[" 与 "view" 间存在空白,拆独立字面。
 		{musts: []string{"settings", "[", "view", "options"}},
 	},
-	// [5] CVE-2023-32314 (2 patterns)
+	// 对应 [5] CVE-2023-32314（2 条正则）
 	{
 		{musts: []string{"this.constructor.constructor"}},
 		// \s* 允许 "function" 与 "(" 间存在空白,故拆为两个独立必须字面量。
 		{musts: []string{"function", "(", "return", "process"}},
 	},
-	// [6] CVE-2024-34351 (1 pattern)
+	// 对应 [6] CVE-2024-34351（1 条正则）
 	{
 		{musts: []string{"x-middleware-subrequest"}},
 	},

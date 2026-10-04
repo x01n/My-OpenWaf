@@ -36,9 +36,8 @@ type Runtime struct {
 func NewRuntime(ctx context.Context) (*Runtime, error) {
 	cfg := LoadConfigFromEnv()
 	preflightCfg := cfg
-	// Redis can be overridden by the stored redis_config row, so bootstrap
-	// validation must not fail on environment Redis values before the database
-	// has been opened and the stored override applied.
+	// Redis 可被库中存储的 redis_config 行覆盖，因此引导阶段的校验不能因
+	// 环境变量里的 Redis 值而失败——此时数据库尚未打开、存储的覆盖值尚未应用。
 	preflightCfg.RedisAddr = ""
 	preflightCfg.RedisPassword = ""
 	preflightCfg.RedisDB = 0
@@ -134,7 +133,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	}, nil
 }
 
-// SetSnapshotDynamicKeyBase configures the process-stable secret material used by dynamic protection snapshots.
+// SetSnapshotDynamicKeyBase 配置动态防护快照所用的进程级稳定密钥材料。
 func (r *Runtime) SetSnapshotDynamicKeyBase(keyBase []byte) error {
 	if len(keyBase) != 32 {
 		return fmt.Errorf("dynamic protection key base must be 32 bytes")
@@ -195,9 +194,12 @@ func (r *Runtime) ReloadSnapshot() error {
 	return r.ReloadSnapshotWithPrePublish(nil)
 }
 
-// ReloadSnapshotWithPrePublish rebuilds the immutable snapshot and invokes
-// prePublish before making that generation visible to request handlers. A
-// callback error leaves the currently published snapshot unchanged.
+/**
+ * ReloadSnapshotWithPrePublish 重建不可变快照，并在该代快照对请求处理器
+ * 可见之前调用 prePublish。
+ *
+ * 回调返回错误时，当前已发布的快照保持不变。
+ */
 func (r *Runtime) ReloadSnapshotWithPrePublish(prePublish func(*snapshot.Snapshot) error) error {
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()

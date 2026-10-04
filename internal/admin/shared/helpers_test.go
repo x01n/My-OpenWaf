@@ -220,7 +220,7 @@ func TestSaveAndLoadProtectionConfig(t *testing.T) {
 	}
 }
 
-// TestValidateGlobalCaptchaType checks the shared four-value global CAPTCHA contract.
+// TestValidateGlobalCaptchaType 校验全局 CAPTCHA 的四值契约。
 func TestValidateGlobalCaptchaType(t *testing.T) {
 	for _, value := range []string{"math", "click", "slide", "rotate"} {
 		if err := ValidateGlobalCaptchaType(value); err != nil {
@@ -234,7 +234,7 @@ func TestValidateGlobalCaptchaType(t *testing.T) {
 	}
 }
 
-// TestSaveProtectionConfigRejectsInvalidCaptchaType ensures writes cannot persist an unsupported mode.
+// TestSaveProtectionConfigRejectsInvalidCaptchaType 确保写入无法持久化不受支持的模式。
 func TestSaveProtectionConfigRejectsInvalidCaptchaType(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	cfg := store.DefaultProtectionConfig()

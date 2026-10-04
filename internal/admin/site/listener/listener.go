@@ -15,10 +15,9 @@ import (
 	"My-OpenWaf/internal/utils"
 )
 
-// ListSiteListeners returns every listener row attached to a site.
-// When the site has no rows we synthesise a single virtual entry from the
-// legacy Site.Bind/TLSEnabled/CertID triplet so the UI can always render
-// at least one entry and offer "添加监听端口".
+// ListSiteListeners 返回挂在某个站点下的全部监听记录。
+// 站点没有任何记录时，用 legacy 的 Site.Bind/TLSEnabled/CertID 三元组
+// 合成一条虚拟条目，保证 UI 至少能渲染出条目并提供「添加监听端口」。
 func ListSiteListeners(siteRepo *repository.SiteRepo, repo *repository.SiteListenerRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		siteID, err := utils.ParseUint(c.Param("id"))
@@ -51,10 +50,9 @@ func ListSiteListeners(siteRepo *repository.SiteRepo, repo *repository.SiteListe
 	}
 }
 
-// CreateSiteListener attaches a new listener to a site.
-// First explicit listener migrates the legacy single-bind config: the
-// existing legacy entry is folded in by the snapshot fallback path, but
-// once an explicit row exists for the site the legacy fields are ignored.
+// CreateSiteListener 给站点挂上一条新的监听。
+// 第一条显式监听会迁移 legacy 的单 bind 配置：既有 legacy 条目由快照的
+// 兜底路径纳入，但一旦站点存在显式记录，legacy 字段就不再被采用。
 func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteListenerRepo, certRepo *repository.CertificateRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		siteID, err := utils.ParseUint(c.Param("id"))
@@ -94,9 +92,8 @@ func CreateSiteListener(siteRepo *repository.SiteRepo, repo *repository.SiteList
 			return
 		}
 
-		// Promote the legacy single-bind entry the first time the user
-		// explicitly defines a listener: persist it as a real row so the
-		// snapshot fallback path is never re-engaged afterwards.
+		// 用户第一次显式定义监听时把 legacy 的单 bind 条目提升上来：
+		// 把它持久化成真实记录，此后快照的兜底路径就再也不会被启用。
 		existing, _ := repo.ListBySite(site.ID)
 		var legacy *store.SiteListener
 		if len(existing) == 0 && site.Bind != "" && site.Bind != item.Bind {

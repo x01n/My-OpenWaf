@@ -4,20 +4,22 @@ import (
 	"My-OpenWaf/internal/pkg/schemealias"
 )
 
-// rpcSchemeAliases 描述 RPC 相关 URL 前缀到传输 scheme 的映射（小写、带 "://"）。
-//
-// gRPC 本身是 content-type 而非传输 scheme；用户希望通过 URL 前缀直接表达
-// gRPC 上游，因此这些别名只做传输层归一，不改变任何业务语义：
-//
-//   - tls://        -> https（TLS + ALPN 协商，与 https:// 完全同语义）
-//   - grpcs://      -> https（TLS 直连 gRPC 服务）
-//   - grpc+tls://   -> https（grpcs 的别名）
-//   - grpc+https:// -> https（同样归一为 https）
-//   - grpc://       -> h2c（h2 prior knowledge 明文）
-//
-// 别名表与归一逻辑实际收敛在 internal/pkg/schemealias；该包不依赖
-// internal/upstream，snapshot 等不能依赖 upstream 的包可直接复用，
-// 本文件只保留 upstream 包内部的查看入口（协议偏好等遍历用）。
+/**
+ * rpcSchemeAliases 描述 RPC 相关 URL 前缀到传输 scheme 的映射（小写、带 "://"）。
+ *
+ * gRPC 本身是 content-type 而非传输 scheme；用户希望通过 URL 前缀直接表达
+ * gRPC 上游，因此这些别名只做传输层归一，不改变任何业务语义：
+ *
+ *   - tls://        -> https（TLS + ALPN 协商，与 https:// 完全同语义）
+ *   - grpcs://      -> https（TLS 直连 gRPC 服务）
+ *   - grpc+tls://   -> https（grpcs 的别名）
+ *   - grpc+https:// -> https（同样归一为 https）
+ *   - grpc://       -> h2c（h2 prior knowledge 明文）
+ *
+ * 别名表与归一逻辑实际收敛在 internal/pkg/schemealias；该包不依赖
+ * internal/upstream，snapshot 等不能依赖 upstream 的包可直接复用，
+ * 本文件只保留 upstream 包内部的查看入口（协议偏好等遍历用）。
+ */
 var rpcSchemeAliases = map[string]string{
 	"tls://":        "https",
 	"grpcs://":      "https",

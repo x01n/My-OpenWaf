@@ -220,10 +220,12 @@ func buildDebugFunction(L *lua.LState, debugFn func(string), budget *apiBudget) 
 	})
 }
 
-// buildKVTable 构造 ctx.kv 的方法表。
-//
-// 后端不可用时各方法返回 nil/false 而非报错：Redis 故障应让策略降级，
-// 而不是让脚本抛错、进而使请求判定失败。
+/**
+ * buildKVTable 构造 ctx.kv 的方法表。
+ *
+ * 后端不可用时各方法返回 nil/false 而非报错：Redis 故障应让策略降级，
+ * 而不是让脚本抛错、进而使请求判定失败。
+ */
 func buildKVTable(L *lua.LState, runCtx context.Context, kv KVBackend, budget *apiBudget) *lua.LTable {
 	t := L.NewTable()
 

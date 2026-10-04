@@ -1,14 +1,14 @@
 package owasp
 
-// ruleMeta carries the human-readable metadata for one built-in detector rule.
+// ruleMeta 承载单条内置检测规则的可读元信息。
 type ruleMeta struct {
 	name string
 	desc string
 }
 
-// mergeRuleMeta merges the per-category metadata tables into the destination
-// map. The category split only exists to keep each map literal readable; the
-// lookup path is unchanged: registerPatternRules queries builtinRuleMeta only.
+// mergeRuleMeta 把按类别拆分的元信息表合并到目标 map。
+// 按类别拆分只为让每个 map 字面量保持可读；查找路径不变：
+// registerPatternRules 只查询 builtinRuleMeta。
 func mergeRuleMeta(dst map[string]ruleMeta, srcs ...map[string]ruleMeta) {
 	for _, src := range srcs {
 		for k, v := range src {

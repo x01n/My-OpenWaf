@@ -8,10 +8,10 @@ import (
 	"My-OpenWaf/internal/store"
 )
 
-// MaxRegexPattern limits application-route regex size at compile time.
+// MaxRegexPattern 限制应用路由正则的编译期大小。
 const MaxRegexPattern = 512
 
-// CompiledRule is a snapshot-time compiled application route rule.
+// CompiledRule 是快照构建期编译好的应用路由规则。
 type CompiledRule struct {
 	ID             uint
 	SiteID         uint
@@ -25,7 +25,7 @@ type CompiledRule struct {
 	NeedsResponse  bool
 }
 
-// TargetNeedsResponse is true when the subject is only known after upstream responds.
+// TargetNeedsResponse 为真表示该匹配对象要等上游响应之后才可知。
 func TargetNeedsResponse(target string) bool {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case store.AppRouteTargetResponseBody,
@@ -37,7 +37,14 @@ func TargetNeedsResponse(target string) bool {
 	}
 }
 
-// CompileRules turns DB rows into compiled runtime rules (invalid regex rows are skipped).
+/**
+ * CompileRules 把 DB 行转换为编译后的运行时规则。
+ *
+ * 正则非法的行会被跳过。返回结果按 Priority 降序、同优先级按 ID 升序排序。
+ *
+ * @param rules DB 中的启用状态应用路由规则。
+ * @return 编译并排序后的规则列表。
+ */
 func CompileRules(rules []store.ApplicationRouteRule) []CompiledRule {
 	out := make([]CompiledRule, 0, len(rules))
 	for i := range rules {

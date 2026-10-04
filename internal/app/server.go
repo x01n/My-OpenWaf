@@ -224,8 +224,8 @@ func Run() {
 		logger.Banner(bannerLines...)
 	}
 
-	// Resolve the persistent process secret before building snapshots so dynamic
-	// protection never falls back to its deterministic public key material.
+	// 构建快照前先解析持久化进程密钥，否则动态防护会退化到
+	// 那份确定性的公开密钥材料上。
 	jwtSecret, err := resolveJWTSecret(rt)
 	if err != nil {
 		log.Error("resolve persistent JWT secret failed", slog.Any("err", err))
@@ -240,7 +240,7 @@ func Run() {
 		os.Exit(1)
 	}
 
-	// Derive challenge cookie secret from JWT secret for persistence across restarts.
+	// 由 JWT 密钥派生挑战 cookie 密钥，使其在重启后保持稳定。
 	challenge.SetChallengeSecret(jwtSecret)
 
 	repos := repository.NewWithLogDB(rt.DB, rt.LogDB)
@@ -258,19 +258,18 @@ func Run() {
 		return cfg, redisEnabled
 	}
 
-	// Query count cache: reduces expensive COUNT(*) on access_logs/security_events.
+	// 计数缓存：减少 access_logs/security_events 上昂贵的 COUNT(*) 查询。
 	queryCache := cache.NewQueryCache(5 * time.Second)
 	defer queryCache.Close()
 	repos.AccessLog.SetCountCache(queryCache)
 	repos.SecurityEvent.SetCountCache(queryCache)
 	repos.DropEvent.SetCountCache(queryCache)
 
-	// Hot cache: Redis-backed read-through cache for hot data and large query results.
+	// 热缓存：Redis 支撑的读穿透缓存，面向热点数据与大结果集。
 	hotCache := cache.NewHotCache(rt.Redis, logger.New("hotcache"))
 	repos.SetHotCache(hotCache)
 
-	// Write queue: async write queue that batches all DB mutations through a single
-	// goroutine, merging high-frequency operations to reduce lock contention.
+	// 写队列：由单个 goroutine 异步批处理全部 DB 变更，合并高频操作以降低锁竞争。
 	// 容量与批大小从 rt.Config.Queue 注入，与 observability 包内的硬上限对齐。
 	writeQueue := observability.NewWriteQueueWithOptions(rt.LogDB, logger.New("writequeue"), observability.WriteQueueOptions{
 		Capacity:      rt.Config.Queue.WriteQueueCapacity,
@@ -280,8 +279,8 @@ func Run() {
 	defer writeQueue.Close()
 	repos.SetWriteQueue(writeQueue)
 
-	// Unified writer: single goroutine drains all observability channels and
-	// flushes them in one DB transaction, eliminating SQLite lock contention.
+	// 统一写入器：单个 goroutine 抽干全部可观测性通道，
+	// 在一个 DB 事务里落盘，消除 SQLite 写锁竞争。
 	// 容量、批大小、flush 周期全部从 rt.Config.Queue 注入。
 	unifiedWriter := observability.NewUnifiedWriterWithOptions(rt.LogDB, logger.New("writer"), observability.UnifiedWriterOptions{
 		EventBufferSize: rt.Config.Queue.EventBufferSize,
@@ -293,8 +292,8 @@ func Run() {
 	unifiedWriter.SetCountCacheInvalidator(queryCache)
 	defer unifiedWriter.Close()
 
-	// Event archiver (auto-delete security events, access logs and drop events based on retention config).
-	// Also performs lightweight SQLite planner/WAL maintenance or native server-DB optimization after each cycle.
+	// 事件归档器（按保留策略自动清理安全事件、访问日志与 drop 事件）。
+	// 每轮清理后还会做轻量的 SQLite planner/WAL 维护，或对原生后端执行服务侧优化。
 	archiver := observability.NewArchiver(rt.LogDB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	archiver.SetSettingsRepo(repos.SystemSettings)
 	archiver.SetSyncLogRepo(repos.ThreatIntelSyncLog)
@@ -306,7 +305,7 @@ func Run() {
 	stopMemReclaim := memreclaim.Start(memreclaim.Config{Logger: logger.New("memreclaim")})
 	defer stopMemReclaim()
 
-	// Data-plane metrics (shared across all data listeners).
+	// 数据面指标（所有数据监听共享）。
 	metrics := dataplane.NewMetrics()
 	upstreamPool := upstream.NewPool()
 	upstreamPool.StartWithResult(ctx, func() []string {
@@ -316,7 +315,7 @@ func Run() {
 		return nil
 	}, 10*time.Second, upstream.HTTPProbeWithResult(2*time.Second))
 
-	// Rate limiters — configured from snapshot protection settings.
+	// 频率限制器——按快照中的保护设置配置。
 	sn := rt.Snapshot.Load()
 	var prot store.ProtectionConfig
 	if sn != nil {
@@ -327,7 +326,7 @@ func Run() {
 	defer reqRL.Close()
 	defer errRL.Close()
 
-	// IP reputation (blacklist + whitelist + auto-ban).
+	// IP 信誉库（黑名单 + 白名单 + 自动封禁）。
 	ipRep := iprep.NewIPReputation()
 	defer ipRep.Close()
 	loadIPLists(ipRep, repos.IPList)
@@ -395,12 +394,12 @@ func Run() {
 	cveFeedMgr.Start()
 	defer cveFeedMgr.Stop()
 
-	// Drop executor (TCP connection close strategy).
+	// Drop 执行器（TCP 连接关闭策略）。
 	dropCfg := loadDropPolicy(repos.SystemSettings, rt.Config.Drop)
 	dropExec := drop.NewDropExecutor(dropCfg.Enabled, logger.New("drop"))
 	eng.SetDropExecutor(dropExec)
 
-	// GeoIP resolver for bot two-phase scoring (graceful degradation if DB missing).
+	// 供 bot 两阶段评分使用的 GeoIP 解析器（库文件缺失时优雅降级）。
 	var geoResolver *geoip.MaxMindResolver
 	botCfg := rt.Config.Bot
 	// loadedGeoIPPath 记录 resolver 当前打开的库路径，供 reload 时判断是否需要换库。
@@ -411,7 +410,7 @@ func Run() {
 		// 放在这里而不是函数开头：Close 会取锁，nil 接收者会 panic。
 		defer geoResolver.Close()
 		eng.SetGeoResolver(geoResolver, botCfg.ScoreThreshold)
-		// Also set the global GeoResolver so LookupGeo works everywhere.
+		// 同时设置全局 GeoResolver，使任意位置的 LookupGeo 都可用。
 		geoip.SetGeoResolver(geoResolver)
 	}
 
@@ -419,7 +418,7 @@ func Run() {
 	var configSyncMu sync.RWMutex
 	var configSync *coreredis.ConfigSync
 
-	// Prometheus-compatible metrics collector.
+	// Prometheus 兼容的指标收集器。
 	promMetrics := observability.NewMetrics()
 	promMetrics.SetUnifiedWriterStatsProvider(unifiedWriter)
 	promMetrics.SetWriteQueueStatsProvider(writeQueue)
@@ -507,7 +506,7 @@ func Run() {
 
 	dpLog := logger.New("dataplane")
 
-	// Challenge managers: CAPTCHA, Shield (5-second), Chain.
+	// 挑战管理器：CAPTCHA、Shield（5 秒盾）、Chain。
 	// 三者都会启动内存态会话清理协程，必须随进程优雅关闭一并停止。
 	captchaMgr := challenge.NewCaptchaManager(rt.Redis, time.Duration(prot.CaptchaTimeout)*time.Second)
 	defer captchaMgr.Close()
@@ -525,22 +524,22 @@ func Run() {
 	chainMgr := challenge.NewChainChallengeManager(captchaMgr, rt.Redis)
 	defer chainMgr.Close()
 
-	// Anti-replay nonce protection manager.
+	// 防重放 nonce 防护管理器。
 	antiReplayMgr := antireplay.NewAntiReplayManager("", rt.Redis, 5*time.Minute)
 	eng.SetAntiReplayManager(antiReplayMgr)
 
 	tokenMgr := auth.NewTokenManager(jwtSecret, rt.DB)
 	defer tokenMgr.Close()
-	// Readiness must include the persistent JWT blacklist. If the blacklist
-	// cannot be loaded, middleware fails closed and the instance must not report
-	// itself ready to receive authenticated traffic.
+	// 就绪判定必须包含持久化 JWT 黑名单。黑名单若加载失败，
+	// 中间件按失败关闭处理，实例不得对外声明自己已就绪、
+	// 可以接收需要鉴权的流量。
 	hc.SetReadyFunc(func() bool { return lm.Ready() && tokenMgr.Ready() })
 	bruteForce := auth.NewBruteForceDetector(prot.LoginMaxAttempts, time.Duration(prot.LoginLockoutMinutes)*time.Minute)
 	defer bruteForce.Close()
 	sessionMgr := auth.NewSessionManager(rt.DB)
 	defer sessionMgr.Close()
 
-	// Escalation (step-up response) manager.
+	// 升级（step-up 响应）管理器。
 	escalationMgr := escalation.NewEscalationManager(rt.Redis)
 	applyProtectionRuntimeConfig := func(p store.ProtectionConfig) {
 		reqRL.Reconfigure(p.RequestRateLimitWindow, p.RequestRateLimitMax, p.RequestRateLimitEnabled)
@@ -610,7 +609,7 @@ func Run() {
 		}
 	}
 
-	// dataListenerOpts holds the shared options for creating data-plane handlers.
+	// dataListenerOpts 保存创建数据面 handler 时的共享选项。
 	dataplane.SetAccessStoreRedisClients(rt.Redis)
 	dpOpts := dataplane.Options{
 		Holder:                rt.Snapshot,
@@ -629,8 +628,8 @@ func Run() {
 		JWTSecret:             jwtSecret,
 	}
 
-	// reconcileListeners compares current listeners with snapshot and starts/stops as needed.
-	// It also detects bind-level listener drift and restarts affected listeners automatically.
+	// reconcileListeners 对比当前监听与快照，按需启停。
+	// 它同时检测 bind 级别的监听漂移，并自动重启受影响的监听。
 	reconcileListeners := func() {
 		newSn := rt.Snapshot.Load()
 		if newSn == nil {
@@ -1388,8 +1387,15 @@ func resolveJWTSecretWithRandomRead(rt *core.Runtime, randomRead func([]byte) (i
 
 const dynamicProtectionKeyInfo = "my-openwaf/dynamic-protection/encryption-key-base/v1"
 
-// deriveDynamicProtectionKeyBase derives a dedicated 32-byte dynamic-protection
-// key base from the existing persistent JWT secret without reusing the JWT key directly.
+/**
+ * deriveDynamicProtectionKeyBase 从既有持久化 JWT 密钥派生 32 字节的动态防护密钥基值。
+ *
+ * 用 HKDF 派生而不是直接复用 JWT 密钥：两者用途不同，一旦动态防护侧出现泄露，
+ * 不应连带影响 JWT 的签名安全性。
+ *
+ * @param jwtSecret 持久化的 JWT 密钥。
+ * @return 32 字节的动态防护密钥基值。
+ */
 func deriveDynamicProtectionKeyBase(jwtSecret []byte) []byte {
 	reader := hkdf.New(sha256.New, jwtSecret, nil, []byte(dynamicProtectionKeyInfo))
 	key := make([]byte, 32)
@@ -1399,9 +1405,16 @@ func deriveDynamicProtectionKeyBase(jwtSecret []byte) []byte {
 	return key
 }
 
-// buildDataServer creates a Hertz server for a data-plane listener,
-// optionally configured with TLS termination when the listener has TLS enabled.
-// 支持 IPv4 和 IPv6 绑定地址。
+/**
+ * buildDataServer 为某个数据面监听创建 Hertz server。
+ *
+ * 支持 IPv4 与 IPv6 绑定地址；监听启用 TLS 时会一并配置 TLS 终止。
+ *
+ * @param siteRT 站点运行时。
+ * @param sn 当前快照。
+ * @param dpOpts 数据面 handler 选项。
+ * @return 配置完成的 Hertz server。
+ */
 func buildDataServer(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot, dpOpts dataplane.Options) *server.Hertz {
 	return buildDataServerWithHTTP3Plans(siteRT, sn, dpOpts, nil)
 }
@@ -1531,12 +1544,18 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 	return srv
 }
 
-// buildListenerTLS constructs a *tls.Config for a data listener.
-// 使用 GetCertificate 回调实现动态证书选择：
-//   - SNI 匹配到已知站点 → 返回该站点的真实证书
-//   - SNI 为空（IP 直接访问）或不匹配任何站点 → 返回自签证书
-//
-// 这样可以防止通过 IP 扫描泄露后端真实站点的域名信息。
+/**
+ * buildListenerTLS 为数据监听构造 *tls.Config。
+ * 使用 GetCertificate 回调实现动态证书选择：
+ *   - SNI 匹配到已知站点 → 返回该站点的真实证书
+ *   - SNI 为空（IP 直接访问）或不匹配任何站点 → 返回自签证书
+ *
+ * 这样可以防止通过 IP 扫描泄露后端真实站点的域名信息。
+ *
+ * @param siteRT 站点运行时。
+ * @param sn 当前快照。
+ * @return TLS 配置；快照为空时返回 nil。
+ */
 func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) *tls.Config {
 	if sn == nil {
 		return nil
@@ -1584,7 +1603,7 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 	minTLSVersion, maxTLSVersion, cipherSuiteNames := snapshotpkg.EffectiveSiteTLS(site.MinTLSVersion, site.MaxTLSVersion, site.CipherSuites, siteRT.TLSDefaults)
 	_, effectiveALPN := snapshotpkg.EffectiveSiteNetwork(site.ALPN, site.Network, siteRT.NetworkDefaults, siteRT.TLSDefaults)
 
-	// Parse TLS version bounds.
+	// 解析 TLS 版本上下界。
 	minVer := snapshotpkg.ParseTLSVersion(minTLSVersion)
 	maxVer := snapshotpkg.ParseTLSVersion(maxTLSVersion)
 	if minVer == 0 {
@@ -1594,7 +1613,7 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 		maxVer = tls.VersionTLS13
 	}
 
-	// Parse ALPN protocols.
+	// 解析 ALPN 协议列表。
 	alpn := tcpTLSALPNProtocols(effectiveALPN, siteRT.NetworkDefaults)
 	if maxTLSVersionBelow(maxVer, tls.VersionTLS12) {
 		alpn = removeALPNProtocol(alpn, "h2")
@@ -1889,7 +1908,7 @@ func tlsCertificateFingerprintMaterial(cert tls.Certificate) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// siteListenerFingerprint produces a short hash that changes whenever a bind-level listener changes.
+// siteListenerFingerprint 生成短哈希；只要该 bind 级监听发生任何变化，哈希即改变。
 func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "bind=%s", bind)

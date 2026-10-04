@@ -24,8 +24,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// appProcGRPCFrameWithFlag builds a gRPC frame with an explicit compressed
-// flag byte, a big-endian uint32 length and the payload.
+// appProcGRPCFrameWithFlag 构造一个带显式压缩标志字节的 gRPC 帧：
+// 1 字节标志、大端 uint32 长度，然后是负载。
+
 func appProcGRPCFrameWithFlag(flag byte, payload []byte) []byte {
 	out := make([]byte, 5+len(payload))
 	out[0] = flag
@@ -34,8 +35,9 @@ func appProcGRPCFrameWithFlag(flag byte, payload []byte) []byte {
 	return out
 }
 
-// appProcH2CGRPCUpstream starts an h2c upstream whose handler only accepts
-// prior-knowledge HTTP/2 requests, and returns its base address.
+// appProcH2CGRPCUpstream 启动一个 h2c 上游，其 handler 只接受
+// prior-knowledge HTTP/2 请求，并返回其基础地址。
+
 func appProcH2CGRPCUpstream(t *testing.T, handler http.HandlerFunc) string {
 	t.Helper()
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -57,8 +59,9 @@ func appProcH2CGRPCUpstream(t *testing.T, handler http.HandlerFunc) string {
 	return "grpc://" + upstream.Listener.Addr().String()
 }
 
-// appProcWaitHTTP3Ready polls a fresh HTTP/3 dial until the data-plane
-// listener accepts the call; the process harness may still be starting.
+// appProcWaitHTTP3Ready 轮询一次新的 HTTP/3 拨号，直到数据面
+// 监听接受该调用为止；子进程 harness 可能仍在启动中。
+
 func appProcWaitHTTP3Ready(t *testing.T, h *appProcessHarness, udpBind string, host string, method string, path string, contentType string, headers map[string]string, body []byte) (*http.Response, []byte, http.Header) {
 	t.Helper()
 
@@ -119,8 +122,9 @@ func appProcWaitHTTP3Ready(t *testing.T, h *appProcessHarness, udpBind string, h
 	return nil, nil, nil
 }
 
-// appProcSiteEnableCompression seeds the three compression system settings
-// with the values used by the compression-relevant black-box cases.
+// appProcSiteEnableCompression 写入三项响应压缩系统设置，
+// 取值与压缩相关的黑盒用例保持一致。
+
 func appProcSiteEnableCompression(db *gorm.DB) error {
 	settings := []store.SystemSettings{
 		{Key: "response_compression_enabled", Value: "true"},
@@ -135,8 +139,9 @@ func appProcSiteEnableCompression(db *gorm.DB) error {
 	return nil
 }
 
-// appProcCreateSite seeds a TLS-enabled tcp site bound to the reserved bind
-// and records its ID in siteID.
+// appProcCreateSite 写入一个绑定到预留 bind 的 TLS 站点，
+// 并把它的 ID 记入 siteID。
+
 func appProcCreateSite(db *gorm.DB, siteID *uint, host string, upstreamURL string, bind string) error {
 	site := store.Site{
 		Host:                  host,
@@ -155,9 +160,10 @@ func appProcCreateSite(db *gorm.DB, siteID *uint, host string, upstreamURL strin
 	return nil
 }
 
-// TestRunGRPCWebTextBase64OverH3InSeparateProcess proxies a gRPC-Web-Text
-// unary response (base64-encoded frames) from an H2 upstream through the WAF
-// to an H3 client and requires the base64 bytes to survive unchanged.
+// TestRunGRPCWebTextBase64OverH3InSeparateProcess 把一条 gRPC-Web-Text
+// unary 响应（base64 编码的帧）从 H2 上游经 WAF 代理到 H3 客户端，
+// 要求 base64 字节原样存活。
+
 func TestRunGRPCWebTextBase64OverH3InSeparateProcess(t *testing.T) {
 	for _, contentType := range []string{"application/grpc-web-text", "application/grpc-web-text+proto", "application/grpc-web-text+json"} {
 		t.Run(contentType, func(t *testing.T) {
@@ -218,10 +224,11 @@ func TestRunGRPCWebTextBase64OverH3InSeparateProcess(t *testing.T) {
 	}
 }
 
-// TestRunGRPCTrailersOnlyOverH3InSeparateProcess drives an h2c upstream with
-// the Trailers-Only form (no message frame, grpc-status only in the trailer)
-// through the H3 data plane: an empty body with a 200 status and a grpc-status
-// trailer must reach the H3 client exactly.
+// TestRunGRPCTrailersOnlyOverH3InSeparateProcess 驱动一个 h2c 上游，
+// 采用 Trailers-Only 形式（无消息帧，grpc-status 只出现在 trailer）
+// 经过 H3 数据面：空 body、200 状态以及 grpc-status
+// trailer 必须原样到达 H3 客户端。
+
 func TestRunGRPCTrailersOnlyOverH3InSeparateProcess(t *testing.T) {
 	const requestPath = "/grpc.Echo/TrailersOnly"
 	upstreamBase := appProcH2CGRPCUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -265,14 +272,15 @@ func TestRunGRPCTrailersOnlyOverH3InSeparateProcess(t *testing.T) {
 	}
 }
 
-// TestRunGRPCBidiLargeOverH2ToH3InSeparateProcess drives a large two-frame
-// request through an H2 client into an H3 upstream: both request frames are
-// sent before the reply, the upstream reads two frames and answers with a
-// 1MiB reply frame in six flushed blocks plus the grpc-status trailer. This
-// exercises h2-in/h3-out framing, chunked reverse streaming and the trailer
-// remap in a real process pair. It stops short of gated dual-direction
-// interleave; that pattern trips a cancellation in the h3 loopback path (see
-// temp/grpc-max-compat-report.md).
+// TestRunGRPCBidiLargeOverH2ToH3InSeparateProcess 驱动一个大体积双帧
+// 请求，从 H2 客户端进入 H3 上游：两个请求帧都在
+// 应答之前发出，上游读取两帧后以一个
+// 1MiB 应答帧（分六个 flush 块）加上 grpc-status trailer 作答。这
+// 在真实进程对中检验 h2 入/h3 出的分帧、chunked 反向流式传输与 trailer
+// 重映射。它没有走到双向门控交错的地步；
+// 那种模式会触发 h3 loopback 路径上的取消（见
+// temp/grpc-max-compat-report.md）。
+
 func TestRunGRPCBidiLargeOverH2ToH3InSeparateProcess(t *testing.T) {
 	chunk := []byte(strings.Repeat("h3-bidi-chunk-pattern-", 4096))
 	fill := func(target []byte) {
@@ -409,10 +417,11 @@ func TestRunGRPCBidiLargeOverH2ToH3InSeparateProcess(t *testing.T) {
 	}
 }
 
-// TestRunGRPCDeadlineAndTimeoutOverH3InSeparateProcess verifies the
-// grpc-timeout request header and the grpc-status=4 RPC error path through
-// the H3 data plane: upstream must see the untouched deadline value and the
-// deadline-exceeded trailer must reach the H3 client with HTTP status 200.
+// TestRunGRPCDeadlineAndTimeoutOverH3InSeparateProcess 验证
+// grpc-timeout 请求头与 grpc-status=4 的 RPC 错误路径穿过
+// H3 数据面：上游必须看到未被改动的 deadline 值，且
+// deadline-exceeded trailer 必须以 HTTP 200 到达 H3 客户端。
+
 func TestRunGRPCDeadlineAndTimeoutOverH3InSeparateProcess(t *testing.T) {
 	const grpcMessage = "deadline exceeded"
 	const requestPath = "/grpc.Echo/Expire"
@@ -469,10 +478,11 @@ func TestRunGRPCDeadlineAndTimeoutOverH3InSeparateProcess(t *testing.T) {
 	}
 }
 
-// TestRunGRPCEncodingCompressedFramesOverH3InSeparateProcess forwards
-// grpc-encoding:gzip compressed frames through the H3 data plane and requires
-// the compressed bytes and the grpc-encoding header to pass through
-// untouched: no decompression, no recompression, no Content-Encoding.
+// TestRunGRPCEncodingCompressedFramesOverH3InSeparateProcess 转发
+// grpc-encoding:gzip 压缩帧穿过 H3 数据面，要求
+// 压缩字节与 grpc-encoding 头原样通过：
+// 不减压、不重压、不出现 Content-Encoding。
+
 func TestRunGRPCEncodingCompressedFramesOverH3InSeparateProcess(t *testing.T) {
 	const requestPath = "/grpc.Echo/Compressed"
 	plain := []byte(strings.Repeat("grpc-encoding-gzip-blackbox-", 512))

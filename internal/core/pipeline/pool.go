@@ -16,7 +16,7 @@ const (
 	pooledHeaderKeysBaseCap = 24
 )
 
-// ctxPool reuses RequestCtx allocations to reduce GC pressure on the hot path.
+// ctxPool 复用 RequestCtx 分配，降低热路径上的 GC 压力。
 var ctxPool = sync.Pool{
 	New: func() any {
 		return &RequestCtx{
@@ -27,13 +27,13 @@ var ctxPool = sync.Pool{
 	},
 }
 
-// AcquireCtx gets a RequestCtx from the pool, pre-allocated with header map.
+// AcquireCtx 从池中取出一个 RequestCtx，已预分配请求头 map。
 func AcquireCtx() *RequestCtx {
 	ctx := ctxPool.Get().(*RequestCtx)
 	return ctx
 }
 
-// ReleaseCtx returns a RequestCtx to the pool after clearing its fields.
+// ReleaseCtx 清空字段后把 RequestCtx 归还池中。
 func ReleaseCtx(ctx *RequestCtx) {
 	ctx.Context = nil
 	ctx.RequestID = ""

@@ -15,9 +15,12 @@ const defaultQueryCacheMaxEntries = 8192
 const defaultQueryCacheTTL = 5 * time.Second
 const defaultQueryCacheMaxKeyBytes = 64 << 10
 
-// QueryCache is a simple in-memory TTL cache for expensive DB query results
-// (e.g., COUNT queries on large tables). It uses a sync.Map for concurrent
-// access and a periodic cleanup goroutine.
+/**
+ * QueryCache 是面向昂贵数据库查询结果的简易内存 TTL 缓存
+ * （例如大表上的 COUNT 查询）。
+ *
+ * 并发访问由 sync.Map 承担，并配有周期性清理协程。
+ */
 type QueryCache struct {
 	mu         sync.RWMutex
 	entries    map[string]*queryCacheEntry
@@ -37,7 +40,7 @@ type queryCacheEntry struct {
 	expiresAt time.Time
 }
 
-// NewQueryCache creates a query cache with the given default TTL.
+// NewQueryCache 按给定默认 TTL 创建查询缓存。
 func NewQueryCache(ttl time.Duration) *QueryCache {
 	if ttl <= 0 {
 		ttl = defaultQueryCacheTTL
@@ -107,7 +110,7 @@ func (qc *QueryCache) storeLocked(key string, e *queryCacheEntry) {
 	qc.indexKeyLocked(key)
 }
 
-// Get retrieves a cached value. Returns nil, false on miss or expiry.
+// Get 取出缓存值；未命中或已过期时返回 nil, false。
 func (qc *QueryCache) Get(key string) (any, bool) {
 	if qc == nil {
 		return nil, false
@@ -145,7 +148,7 @@ func (qc *QueryCache) HitStats() (hits, misses int64) {
 	return qc.hits.Load(), qc.misses.Load()
 }
 
-// Set stores a value with the default TTL.
+// Set 以默认 TTL 写入一个值。
 func (qc *QueryCache) Set(key string, value any) {
 	if qc == nil {
 		return
@@ -161,7 +164,7 @@ func (qc *QueryCache) Set(key string, value any) {
 	qc.mu.Unlock()
 }
 
-// SetWithTTL stores a value with a custom TTL.
+// SetWithTTL 以自定义 TTL 写入一个值。
 func (qc *QueryCache) SetWithTTL(key string, value any, ttl time.Duration) {
 	if qc == nil {
 		return
@@ -180,7 +183,7 @@ func (qc *QueryCache) SetWithTTL(key string, value any, ttl time.Duration) {
 	qc.mu.Unlock()
 }
 
-// Invalidate removes a specific key.
+// Invalidate 删除指定 key。
 func (qc *QueryCache) Invalidate(key string) {
 	if qc == nil {
 		return
@@ -190,9 +193,12 @@ func (qc *QueryCache) Invalidate(key string) {
 	qc.mu.Unlock()
 }
 
-// InvalidatePrefix removes entries belonging to one cache-key namespace.
-// A namespace is matched exactly before the first ":" or "|" delimiter;
-// unknown prefixes fall back to a starts-with scan for compatibility.
+/**
+ * InvalidatePrefix 删除属于某个缓存键命名空间的条目。
+ *
+ * 命名空间按第一个 ":" 或 "|" 分隔符之前的完整前缀精确匹配；
+ * 未知前缀为兼容旧行为回退为 starts-with 扫描。
+ */
 func (qc *QueryCache) InvalidatePrefix(prefix string) {
 	if qc == nil || prefix == "" {
 		return
@@ -214,7 +220,7 @@ func (qc *QueryCache) InvalidatePrefix(prefix string) {
 	qc.mu.Unlock()
 }
 
-// InvalidateAll clears the entire cache.
+// InvalidateAll 清空整个缓存。
 func (qc *QueryCache) InvalidateAll() {
 	if qc == nil {
 		return
@@ -225,7 +231,7 @@ func (qc *QueryCache) InvalidateAll() {
 	qc.mu.Unlock()
 }
 
-// Close stops the cleanup goroutine.
+// Close 停止清理协程。
 func (qc *QueryCache) Close() {
 	if qc == nil {
 		return

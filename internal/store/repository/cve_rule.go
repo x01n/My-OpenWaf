@@ -16,8 +16,8 @@ const (
 	cveCanonicalSnapshotRuleLimit = 10000
 )
 
-// CVERuleCanonicalSnapshot is the bounded canonical source used to build all
-// scoped CVE views. Callers receive a deep copy and may mutate it safely.
+// CVERuleCanonicalSnapshot 是构建全部作用域 CVE 视图所用的有界规范来源。
+// 调用方拿到的是深拷贝，可以安全修改。
 type CVERuleCanonicalSnapshot struct {
 	Rules           []cve.CVERuleModel
 	OverridesByRule map[uint][]store.CVERuleScopeOverride
@@ -44,8 +44,8 @@ func NewCVERuleRepo(db *gorm.DB) *CVERuleRepo {
 	return &CVERuleRepo{db: db}
 }
 
-// EnsureBuiltinCatalog provides a once-per-repository fallback for tests and
-// alternate entrypoints that do not run the application startup reconciler.
+// EnsureBuiltinCatalog 为测试以及不执行应用启动对账的备用入口
+// 提供「每个 repository 一次」的兜底。
 func (r *CVERuleRepo) EnsureBuiltinCatalog() error {
 	r.reconcileMu.Lock()
 	defer r.reconcileMu.Unlock()
@@ -60,17 +60,16 @@ func (r *CVERuleRepo) EnsureBuiltinCatalog() error {
 	return nil
 }
 
-// MarkBuiltinCatalogReady records that application startup already completed
-// catalog reconciliation, avoiding a redundant first-request fallback query.
+// MarkBuiltinCatalogReady 记录应用启动阶段已完成目录对账，
+// 从而避免首个请求再触发一次多余的兜底查询。
 func (r *CVERuleRepo) MarkBuiltinCatalogReady() {
 	r.reconcileMu.Lock()
 	r.reconcileReady = true
 	r.reconcileMu.Unlock()
 }
 
-// CanonicalSnapshot returns a deep copy of the current rules and scope
-// overrides. One cache entry is retained for ten seconds and concurrent cold
-// loads are collapsed into a single database read pair.
+// CanonicalSnapshot 返回当前规则与作用域覆盖的深拷贝。
+// 缓存条目保留十秒，并发的冷读会被合并成一对数据库读取。
 func (r *CVERuleRepo) CanonicalSnapshot() (CVERuleCanonicalSnapshot, error) {
 	if snapshot, ok := r.cachedCanonicalSnapshot(); ok {
 		return snapshot, nil
@@ -105,8 +104,8 @@ func (r *CVERuleRepo) CanonicalSnapshot() (CVERuleCanonicalSnapshot, error) {
 	return cloneCVERuleCanonicalSnapshot(value.(CVERuleCanonicalSnapshot)), nil
 }
 
-// InvalidateCanonicalSnapshot invalidates both a warm entry and any in-flight
-// load generation. An in-flight loader retries before publishing stale data.
+// InvalidateCanonicalSnapshot 同时让热条目与任何在途加载代际失效。
+// 在途加载器会重试，而不会发布陈旧数据。
 func (r *CVERuleRepo) InvalidateCanonicalSnapshot() {
 	r.snapshotMu.Lock()
 	r.snapshot = nil
@@ -201,7 +200,7 @@ func cloneCVERuleScopeOverride(source store.CVERuleScopeOverride) store.CVERuleS
 	return cloned
 }
 
-// CVERuleFilter holds query filters for listing CVE rules.
+// CVERuleFilter 保存列出 CVE 规则所用的查询过滤条件。
 type CVERuleFilter struct {
 	Category string
 	Severity string
@@ -286,7 +285,7 @@ func (r *CVERuleRepo) Toggle(id uint, enabled bool) error {
 	return nil
 }
 
-// PendingApprovalCount returns the number of rules that are not yet approved.
+// PendingApprovalCount 返回尚未审批通过的规则数。
 func (r *CVERuleRepo) PendingApprovalCount() (int64, error) {
 	var count int64
 	err := r.db.Model(&cve.CVERuleModel{}).Where("approved = ?", false).Count(&count).Error

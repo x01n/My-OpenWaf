@@ -25,11 +25,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestRunServesHTTP2RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess asserts that a
-// TCP/ALPN-h2 inbound connection records the full ClientHello fingerprint metadata (JA3, JA3Hash,
-// JA4 with 't' prefix, TLS version, SNI, ALPN, HTTP protocol) into the per-site access log and
-// security event via the request trace, mirroring the HTTP/3 coverage at
-// server_process_test.go TestRunServesHTTP3RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess.
+// TestRunServesHTTP2RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess 断言
+// 一条 TCP/ALPN-h2 入站连接会通过请求 trace 把完整的 ClientHello 指纹元数据
+// （JA3、JA3Hash、带 't' 前缀的 JA4、TLS 版本、SNI、ALPN、HTTP 协议）写入站点访问日志
+// 与安全事件，与 server_process_test.go 中 HTTP/3 的覆盖
+// TestRunServesHTTP3RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess 对应。
 func TestRunServesHTTP2RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -170,10 +170,9 @@ func TestRunServesHTTP2RequestsWithTraceableTLSFingerprintMetadataInSeparateProc
 	appProc.requireFingerprintSummaryForAccessLog(t, accessLog, "HTTP/2 intercept fingerprint")
 }
 
-// TestRunServesHTTP11RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess asserts that an
-// ALPN http/1.1 keep-alive connection records the full ClientHello fingerprint metadata into the
-// per-site access log, and that two requests reusing one TCP/TLS connection carry matching JA4
-// values (no new handshake fingerprint between them).
+// TestRunServesHTTP11RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess 断言
+// 一条 ALPN http/1.1 的长连接会把完整的 ClientHello 指纹元数据写入站点访问日志，
+// 且复用同一条 TCP/TLS 连接的两个请求携带一致的 JA4（二者之间不会产生新的握手指纹）。
 func TestRunServesHTTP11RequestsWithTraceableTLSFingerprintMetadataInSeparateProcess(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -357,10 +356,10 @@ func TestRunServesHTTP11RequestsWithTraceableTLSFingerprintMetadataInSeparatePro
 	appProc.requireFingerprintSummaryForAccessLog(t, accessLogB, "HTTP/1.1 request B fingerprint")
 }
 
-// TestRunServesTLSUpstreamCertificateVerificationFailureWithRecoveryInSeparateProcess asserts that
-// a site with upstream_tls_skip_verify=false answering against a self-signed upstream returns 502
-// (handler.go maps TLS handshake errors to 502, not 504), logs the failed attempt, and a subsequent
-// request also reaches the origin instead of replaying a dirty cached failure.
+// TestRunServesTLSUpstreamCertificateVerificationFailureWithRecoveryInSeparateProcess 断言
+// upstream_tls_skip_verify=false 的站点连到自签上游时返回 502（handler.go 把 TLS 握手错误
+// 映射为 502 而非 504）、记录这次失败尝试，且后续请求仍能到达源站，而不是重放一份被污染的
+// 缓存失败。
 func TestRunServesTLSUpstreamCertificateVerificationFailureWithRecoveryInSeparateProcess(t *testing.T) {
 	var originHits int64
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -545,10 +544,9 @@ func TestRunServesTLSUpstreamCertificateVerificationFailureWithRecoveryInSeparat
 	}
 }
 
-// TestRunHotReloadsHTTPSCertificateWithoutDroppingExistingConnectionInSeparateProcess asserts that
-// after a certificate hot reload, a pre-existing keep-alive TLS connection still serves requests
-// (the negotiated certificate cannot change on an established connection), while new connections
-// observe the updated certificate.
+// TestRunHotReloadsHTTPSCertificateWithoutDroppingExistingConnectionInSeparateProcess 断言
+// 证书热重载后，既有的长连接 TLS 仍能继续服务请求（已建立的连接上协商结果不可更改），
+// 而新连接会观察到更新后的证书。
 func TestRunHotReloadsHTTPSCertificateWithoutDroppingExistingConnectionInSeparateProcess(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

@@ -9,7 +9,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 )
 
-// ProtectionConfig is the global protection configuration stored as JSON in SystemSettings.
+// ProtectionConfig 是以 JSON 形式存放在 SystemSettings 中的全局防护配置。
 type ProtectionConfig struct {
 	RequestRateLimitEnabled bool   `json:"request_ratelimit_enabled"`
 	RequestRateLimitWindow  int    `json:"request_ratelimit_window"`
@@ -116,12 +116,12 @@ type ProtectionConfig struct {
 	BrowserSignAction string `json:"browser_sign_action"`
 }
 
-// BasicAuthCredentialsConfigured reports whether normalized Basic Auth credentials are complete.
+// BasicAuthCredentialsConfigured 报告归一化后的 Basic Auth 凭据是否完整。
 func (p ProtectionConfig) BasicAuthCredentialsConfigured() bool {
 	return strings.TrimSpace(p.BasicAuthUsername) != "" && strings.TrimSpace(p.BasicAuthPassword) != ""
 }
 
-// ValidateBasicAuth rejects enabled Basic Auth without complete normalized credentials.
+// ValidateBasicAuth 拒绝「已启用 Basic Auth 但归一化凭据不完整」的配置。
 func (p ProtectionConfig) ValidateBasicAuth() error {
 	if p.BasicAuthEnabled && !p.BasicAuthCredentialsConfigured() {
 		return errors.New("basic auth requires non-empty username and password")
@@ -129,9 +129,9 @@ func (p ProtectionConfig) ValidateBasicAuth() error {
 	return nil
 }
 
-// ValidateRateLimits rejects enabled limiters without a positive window and
-// quota. Keeping this invariant in the persisted model prevents a zero quota
-// from being interpreted as "block every request" by any runtime backend.
+// ValidateRateLimits 拒绝「已启用限流但窗口或配额非正」的配置。
+// 把这条不变式固化在持久化模型上，可避免任何运行时后端把零配额
+// 解读成「拦截每一个请求」。
 func (p ProtectionConfig) ValidateRateLimits() error {
 	if p.RequestRateLimitEnabled && (p.RequestRateLimitWindow <= 0 || p.RequestRateLimitMax <= 0) {
 		return errors.New("request rate limit requires a positive window and max")
@@ -202,9 +202,7 @@ func DefaultProtectionConfig() ProtectionConfig {
 	}
 }
 
-// ValidateProtectionCaptchaType rejects unsupported global CAPTCHA values.
-// IsValidCaptchaType reports whether a persisted global or rule-level CAPTCHA type is supported.
-// An empty value means use the runtime default.
+// normalizeProtectionSensitivityLevel 归一化单个灵敏度等级取值。
 func normalizeProtectionSensitivityLevel(level string) string {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "off", "none":
@@ -240,7 +238,7 @@ func normalizeProtectionSensitivityMap(m map[string]string) map[string]string {
 	return out
 }
 
-// GetCategorySensitivity parses the CategorySensitivity JSON field into a map.
+// GetCategorySensitivity 把 CategorySensitivity JSON 字段解析成 map。
 func (p *ProtectionConfig) GetCategorySensitivity() map[string]string {
 	if p.CategorySensitivity == "" || p.CategorySensitivity == "{}" {
 		return nil
@@ -252,7 +250,7 @@ func (p *ProtectionConfig) GetCategorySensitivity() map[string]string {
 	return normalizeProtectionSensitivityMap(m)
 }
 
-// GetOWASPModules parses the OWASPModules JSON field into a map.
+// GetOWASPModules 把 OWASPModules JSON 字段解析成 map。
 func (p *ProtectionConfig) GetOWASPModules() map[string]string {
 	if p.OWASPModules == "" || p.OWASPModules == "{}" {
 		return nil
@@ -264,7 +262,7 @@ func (p *ProtectionConfig) GetOWASPModules() map[string]string {
 	return normalizeProtectionSensitivityMap(m)
 }
 
-// EffectiveCategorySensitivity returns merged per-category overrides for runtime use.
+// EffectiveCategorySensitivity 返回合并后的按类别覆盖，供运行时使用。
 func (p *ProtectionConfig) EffectiveCategorySensitivity() map[string]string {
 	base := p.GetCategorySensitivity()
 	mods := p.GetOWASPModules()
@@ -281,7 +279,7 @@ func (p *ProtectionConfig) EffectiveCategorySensitivity() map[string]string {
 	return out
 }
 
-// SetCategorySensitivity serialises the map into the CategorySensitivity JSON field.
+// SetCategorySensitivity 把 map 序列化进 CategorySensitivity JSON 字段。
 func (p *ProtectionConfig) SetCategorySensitivity(m map[string]string) {
 	m = normalizeProtectionSensitivityMap(m)
 	if len(m) == 0 {
@@ -296,7 +294,7 @@ func (p *ProtectionConfig) SetCategorySensitivity(m map[string]string) {
 	p.CategorySensitivity = string(b)
 }
 
-// GetOWASPRulesConfig parses the OWASPRulesConfig JSON field into a map.
+// GetOWASPRulesConfig 把 OWASPRulesConfig JSON 字段解析成 map。
 func (p *ProtectionConfig) GetOWASPRulesConfig() map[string]interface{} {
 	if p.OWASPRulesConfig == "" || p.OWASPRulesConfig == "{}" {
 		return nil
@@ -308,7 +306,7 @@ func (p *ProtectionConfig) GetOWASPRulesConfig() map[string]interface{} {
 	return m
 }
 
-// SetOWASPRulesConfig serialises the map into the OWASPRulesConfig JSON field.
+// SetOWASPRulesConfig 把 map 序列化进 OWASPRulesConfig JSON 字段。
 func (p *ProtectionConfig) SetOWASPRulesConfig(config map[string]interface{}) {
 	if len(config) == 0 {
 		p.OWASPRulesConfig = "{}"
@@ -384,7 +382,7 @@ func normalizeSkipPathByPhase(m map[string][]string) map[string][]string {
 	return out
 }
 
-// GetSkipPathByPhase parses the SkipPathByPhase JSON field into a map.
+// GetSkipPathByPhase 把 SkipPathByPhase JSON 字段解析成 map。
 func (p *ProtectionConfig) GetSkipPathByPhase() map[string][]string {
 	if p.SkipPathByPhase == "" || p.SkipPathByPhase == "{}" {
 		return nil
@@ -396,7 +394,7 @@ func (p *ProtectionConfig) GetSkipPathByPhase() map[string][]string {
 	return normalizeSkipPathByPhase(m)
 }
 
-// SetSkipPathByPhase serialises the map into the SkipPathByPhase JSON field.
+// SetSkipPathByPhase 把 map 序列化进 SkipPathByPhase JSON 字段。
 func (p *ProtectionConfig) SetSkipPathByPhase(m map[string][]string) {
 	m = normalizeSkipPathByPhase(m)
 	if len(m) == 0 {
@@ -411,13 +409,13 @@ func (p *ProtectionConfig) SetSkipPathByPhase(m map[string][]string) {
 	p.SkipPathByPhase = string(b)
 }
 
-// EscalationStepDef is the JSON-friendly step definition stored in ProtectionConfig.
+// EscalationStepDef 是存放在 ProtectionConfig 中的 JSON 友好步骤定义。
 type EscalationStepDef struct {
 	Threshold int    `json:"threshold"`
 	Action    string `json:"action"`
 }
 
-// GetEscalationSteps parses the EscalationSteps JSON field.
+// GetEscalationSteps 解析 EscalationSteps JSON 字段。
 func (p *ProtectionConfig) GetEscalationSteps() []EscalationStepDef {
 	if p.EscalationSteps == "" || p.EscalationSteps == "[]" {
 		return nil
@@ -429,7 +427,7 @@ func (p *ProtectionConfig) GetEscalationSteps() []EscalationStepDef {
 	return steps
 }
 
-// SetEscalationSteps serialises the steps into the EscalationSteps JSON field.
+// SetEscalationSteps 把步骤序列化进 EscalationSteps JSON 字段。
 func (p *ProtectionConfig) SetEscalationSteps(steps []EscalationStepDef) {
 	if len(steps) == 0 {
 		p.EscalationSteps = "[]"
@@ -443,7 +441,7 @@ func (p *ProtectionConfig) SetEscalationSteps(steps []EscalationStepDef) {
 	p.EscalationSteps = string(b)
 }
 
-// BotProtectionConfig is a per-site bot protection override.
+// BotProtectionConfig 是站点级的 bot 防护覆盖。
 type BotProtectionConfig struct {
 	Enabled bool   `json:"enabled"`
 	Level   string `json:"level"`  // "low", "medium", "high"
@@ -458,7 +456,7 @@ func DefaultBotProtectionConfig() BotProtectionConfig {
 	}
 }
 
-// AttackProtectionConfig is a per-site OWASP/signature protection override.
+// AttackProtectionConfig 是站点级的 OWASP/签名防护覆盖。
 type AttackProtectionConfig struct {
 	OWASPEnabled     bool   `json:"owasp_enabled"`
 	OWASPSensitivity string `json:"owasp_sensitivity"`

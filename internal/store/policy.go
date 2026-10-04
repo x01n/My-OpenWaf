@@ -6,7 +6,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Policy is a named container for a group of rules.
+// Policy 是一组规则的具名容器。
 type Policy struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -49,12 +49,12 @@ const (
 	ActionRateLimit        RuleAction = "rate_limit"
 	ActionTag              RuleAction = "tag"
 
-	// Legacy values for backward compatibility with existing DB rows.
+	// legacy 取值，用于兼容既有数据库行。
 	ActionBlock   RuleAction = "block"
 	ActionLogOnly RuleAction = "log_only"
 )
 
-// NormalizeAction maps legacy action strings to canonical form.
+// NormalizeAction 把 legacy 动作字符串映射到规范形式。
 func NormalizeAction(a RuleAction) RuleAction {
 	switch a {
 	case ActionBlock:
@@ -66,7 +66,7 @@ func NormalizeAction(a RuleAction) RuleAction {
 	}
 }
 
-// Rule is a single rule entry that belongs to a Policy.
+// Rule 是属于某个 Policy 的单条规则。
 type Rule struct {
 	ID        uint           `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time      `json:"created_at"`

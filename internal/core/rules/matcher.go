@@ -17,7 +17,7 @@ import (
 	"My-OpenWaf/internal/tlsmeta"
 )
 
-// Matcher tests a single condition against request fields.
+// Matcher 对请求字段检验单个条件。
 type Matcher interface {
 	Match(ctx MatchCtx) bool
 }
@@ -242,8 +242,8 @@ func containsFoldASCII(s, substr string) bool {
 	return false
 }
 
-// containsFoldASCIIBytes performs case-insensitive substring search on []byte
-// without allocating a string copy.
+// containsFoldASCIIBytes 在 []byte 上做大小写不敏感的子串查找，
+// 无需分配字符串副本。
 func containsFoldASCIIBytes(s []byte, substr string) bool {
 	n := len(substr)
 	if n == 0 {
@@ -300,8 +300,8 @@ func (m *notMatcher) Match(ctx MatchCtx) bool {
 	return !m.child.Match(ctx)
 }
 
-// exactNotMatcher negates an exact matcher without changing the exact side's semantics.
-// It is used by the UI `ne` mappings so `ne` is not implemented as not-contains.
+// exactNotMatcher 取反一个精确匹配器，而不改变精确语义本身。
+// 它服务于 UI 的 `ne` 映射，使 `ne` 不被实现成「不包含」。
 type exactNotMatcher struct{ child Matcher }
 
 func (m *exactNotMatcher) Match(ctx MatchCtx) bool {
@@ -513,10 +513,10 @@ func (m *bodyRegexMatcher) Match(ctx MatchCtx) bool {
 	return len(ctx.Body) > 0 && m.re.Match(ctx.Body)
 }
 
-// bodyJSONPathMatcher checks if a dot-notation JSON path exists and optionally matches a pattern.
+// bodyJSONPathMatcher 检查点号记法的 JSON 路径是否存在，并可选地匹配一个模式。
 type bodyJSONPathMatcher struct {
-	jsonPath string   // e.g. "$.user.role"
-	parts    []string // jsonPath split by "." at compile time, "$." prefix removed
+	jsonPath string   // 如 "$.user.role"
+	parts    []string // 编译期按 "." 切分后的 jsonPath，已去掉 "$." 前缀
 	pattern  *regexp.Regexp
 }
 
@@ -543,11 +543,11 @@ func (m *bodyJSONPathMatcher) Match(ctx MatchCtx) bool {
 			return false
 		}
 	}
-	// Path exists. If no pattern, just check existence.
+	// 路径存在。未配置 pattern 时只判存在性。
 	if m.pattern == nil {
 		return true
 	}
-	// Convert value to string for pattern match.
+	// 把值转为字符串再做模式匹配。
 	var val string
 	switch v := current.(type) {
 	case string:
@@ -559,10 +559,12 @@ func (m *bodyJSONPathMatcher) Match(ctx MatchCtx) bool {
 	return m.pattern.MatchString(val)
 }
 
-// cachedJSONBodyObject returns the lazily parsed JSON object for the request
-// body carried on the shared RequestCtx, so N block_body_json_path rules
-// unmarshal the body at most once per request. done 为 true 时 loaded 可能为
-// nil（解析失败已缓存）。
+/**
+ * cachedJSONBodyObject 返回挂在共享 RequestCtx 上的请求体懒解析 JSON 对象，
+ * 使 N 条 block_body_json_path 规则每请求至多反序列化一次。
+ *
+ * done 为 true 时 loaded 可能为 nil（解析失败已缓存）。
+ */
 func cachedJSONBodyObject(ctx MatchCtx) (loaded map[string]any, done bool) {
 	if ctx.reqCtx == nil {
 		return nil, false
@@ -577,15 +579,18 @@ func storeJSONBodyObject(ctx MatchCtx, obj map[string]any) {
 	}
 }
 
-// splitJSONPathParts pre-splits a dot-notation JSON path at compile time,
-// removing the optional "$." prefix. 空段原样保留：与原实现的
-// strings.Split 结果逐 token 一致，"" 段会按字面查找对应键（与旧行为相同）。
+/**
+ * splitJSONPathParts 在编译期预切分点号记法的 JSON 路径，去掉可选的 "$." 前缀。
+ *
+ * 空段原样保留：与原实现的 strings.Split 结果逐 token 一致，"" 段会按字面
+ * 查找对应键（与旧行为相同）。
+ */
 func splitJSONPathParts(jsonPath string) []string {
 	path := strings.TrimPrefix(jsonPath, "$.")
 	return strings.Split(path, ".")
 }
 
-// multipartMatcher checks multipart upload filenames for suspicious extensions.
+// multipartMatcher 检查 multipart 上传文件名是否命中可疑扩展名。
 type multipartMatcher struct{ re *regexp.Regexp }
 
 func (m *multipartMatcher) Match(ctx MatchCtx) bool {
@@ -596,7 +601,7 @@ func (m *multipartMatcher) Match(ctx MatchCtx) bool {
 	if !containsFoldASCII(ct, "multipart/form-data") {
 		return false
 	}
-	// Extract boundary and scan part headers for filenames.
+	// 提取 boundary 并扫描各 part 的头部找文件名。
 	if lower, changed := lowerASCIIIfNeeded(ct); changed {
 		ct = lower
 	}
@@ -612,7 +617,7 @@ func (m *multipartMatcher) Match(ctx MatchCtx) bool {
 	if boundary == "" {
 		return false
 	}
-	// Scan raw body for Content-Disposition filename values.
+	// 扫描原始请求体中的 Content-Disposition filename 值。
 	bodyStr := string(ctx.Body)
 	parts := strings.Split(bodyStr, "--"+boundary)
 	for _, part := range parts {
@@ -624,7 +629,7 @@ func (m *multipartMatcher) Match(ctx MatchCtx) bool {
 			fnStart := fi + len("filename=")
 			if fnStart < len(part) {
 				fname := part[fnStart:]
-				// Trim quotes and extract until end of line.
+				// 去掉引号，并截取到行尾。
 				fname = strings.TrimLeft(fname, `"' `)
 				if nl := strings.IndexAny(fname, "\r\n\""); nl >= 0 {
 					fname = fname[:nl]
@@ -638,7 +643,7 @@ func (m *multipartMatcher) Match(ctx MatchCtx) bool {
 	return false
 }
 
-// geoBlockMatcher blocks requests based on geo country code headers.
+// geoBlockMatcher 依据 geo 国家码请求头拦截请求。
 type geoBlockMatcher struct{ countries map[string]bool }
 
 func (m *geoBlockMatcher) Match(ctx MatchCtx) bool {
@@ -767,11 +772,13 @@ func (m *queryParamRegexMatcher) Match(ctx MatchCtx) bool {
 	return false
 }
 
-// cachedQueryValues returns the lazily parsed query values carried on the
-// shared RequestCtx. 与 Lua 语义的 RequestCtx.QueryValues 不同：这里以
-// net/url.QueryUnescape 规则解析 raw query 的完整值列表，只服务编译后
-// query_param 类匹配器。MatchCtx 缺 RequestCtx（纯值测试）时回退为
-// url.ParseQuery，保持与原实现一致。
+/**
+ * cachedQueryValues 返回挂在共享 RequestCtx 上的懒解析查询值。
+ *
+ * 与 Lua 语义的 RequestCtx.QueryValues 不同：这里以 net/url.QueryUnescape
+ * 规则解析 raw query 的完整值列表，只服务编译后 query_param 类匹配器。
+ * MatchCtx 缺 RequestCtx（纯值测试）时回退为 url.ParseQuery，保持与原实现一致。
+ */
 var errQueryParseFailed = errors.New("query parse failed")
 
 func cachedQueryValues(ctx MatchCtx) (url.Values, error) {
@@ -800,7 +807,7 @@ func (m *pathNotContainsMatcher) Match(ctx MatchCtx) bool {
 	return !strings.Contains(ctx.Path, m.substr)
 }
 
-// hostMatcher matches the Host header exactly or with wildcard prefix.
+// hostMatcher 精确匹配 Host 请求头，或按通配前缀匹配。
 type hostMatcher struct{ pattern string }
 
 func hostValue(ctx MatchCtx) string {
@@ -833,15 +840,14 @@ func splitHostPortHeader(host string) (nameOnly, fullLower string) {
 		return nameOnly, fullLower
 	}
 
-	// A bare IPv6 literal contains colons but no port separator. Check it
-	// before the hostname:port fallback so the final numeric hextet is kept.
+	// 裸 IPv6 字面量含冒号但没有端口分隔符。要先于 hostname:port 的分支判断，
+	// 才能保住末尾那段数字 hextet。
 	if net.ParseIP(fullLower) != nil {
 		return fullLower, fullLower
 	}
 
-	// Normalize bracketed IPv6 literals to the same hostname form as bare
-	// literals. Only a numeric suffix is treated as a port, preserving the
-	// existing behavior for non-numeric port-like text.
+	// 把方括号形式的 IPv6 字面量归一化成与裸字面量相同的主机名形态。
+	// 只有全数字后缀才当作端口，非数字的类端口文本保持既有行为。
 	if strings.HasPrefix(fullLower, "[") {
 		if close := strings.IndexByte(fullLower, ']'); close > 0 {
 			literal := fullLower[1:close]
@@ -899,7 +905,7 @@ func hostPortHeaderPort(host string) (string, bool) {
 	return "", false
 }
 
-// hostFullMatcher matches Host including explicit port; wildcard applies to hostname only.
+// hostFullMatcher 匹配含显式端口的 Host；通配符只作用于主机名。
 type hostFullMatcher struct{ pattern string }
 
 func (m *hostFullMatcher) Match(ctx MatchCtx) bool {
@@ -930,8 +936,8 @@ func (m *hostFullMatcher) Match(ctx MatchCtx) bool {
 	}
 	patPort, hasPatPort := hostPortHeaderPort(patFull)
 	if !hasPatPort {
-		// Keep the existing compatibility behavior: a portless pattern
-		// matches the same hostname whether the request supplies a port.
+		// 保持既有兼容行为：不带端口的模式无论请求是否给出端口，
+		// 都匹配同一主机名。
 		return true
 	}
 	hostPort, hasHostPort := hostPortHeaderPort(fullLower)
@@ -979,21 +985,21 @@ func requestURLValue(ctx MatchCtx) string {
 	return u
 }
 
-// fullURLContainsMatcher matches path + raw query (lowercased) for a substring.
+// fullURLContainsMatcher 对「路径 + 原始查询串」（已小写）做子串匹配。
 type fullURLContainsMatcher struct{ substr string }
 
 func (m *fullURLContainsMatcher) Match(ctx MatchCtx) bool {
 	return containsFoldASCII(requestURLValue(ctx), m.substr)
 }
 
-// fullURLRegexMatcher matches path + raw query against a regex.
+// fullURLRegexMatcher 对「路径 + 原始查询串」做正则匹配。
 type fullURLRegexMatcher struct{ re *regexp.Regexp }
 
 func (m *fullURLRegexMatcher) Match(ctx MatchCtx) bool {
 	return m.re.MatchString(requestURLValue(ctx))
 }
 
-// cookieContainsMatcher checks if any cookie contains the given substring.
+// cookieContainsMatcher 检查任一 cookie 是否包含给定子串。
 type cookieContainsMatcher struct{ substr string }
 
 func (m *cookieContainsMatcher) Match(ctx MatchCtx) bool {
@@ -1001,7 +1007,7 @@ func (m *cookieContainsMatcher) Match(ctx MatchCtx) bool {
 	return ok && strings.Contains(value, m.substr)
 }
 
-// refererContainsMatcher checks if the Referer header contains a substring.
+// refererContainsMatcher 检查 Referer 请求头是否包含子串。
 type refererContainsMatcher struct{ substr string }
 
 func (m *refererContainsMatcher) Match(ctx MatchCtx) bool {
@@ -1292,10 +1298,10 @@ type wildcardShape uint8
 const (
 	wcRegex    wildcardShape = iota // 一般形态，交给 RE2
 	wcAny                           // 纯星号，恒真
-	wcExact                         // "abc"
-	wcContains                      // "*abc*"
-	wcPrefix                        // "abc*"
-	wcSuffix                        // "*abc"
+	wcExact                         // 精确匹配，如 "abc"
+	wcContains                      // 含子串，如 "*abc*"
+	wcPrefix                        // 前缀匹配，如 "abc*"
+	wcSuffix                        // 后缀匹配，如 "*abc"
 )
 
 /**
@@ -1457,7 +1463,7 @@ func (m *headerWildcardMatcher) Match(ctx MatchCtx) bool {
 	return ok && m.w.matchString(value)
 }
 
-// buildMatcher creates a Matcher from a parsed kind:arg pattern.
+// buildMatcher 由解析好的 kind:arg 模式创建 Matcher。
 func buildMatcher(kind, arg string) Matcher {
 	switch kind {
 	case "allow_ip", "block_ip":
@@ -1719,7 +1725,7 @@ func buildMatcher(kind, arg string) Matcher {
 		return &refererContainsMatcher{substr: arg}
 
 	case "block_body_json_path":
-		// arg format: "$.path.to.field" or "$.path.to.field:regex_pattern"
+		// arg 格式："$.path.to.field" 或 "$.path.to.field:regex_pattern"
 		jsonPath, pattern := splitHeaderArg(arg)
 		var re *regexp.Regexp
 		if pattern != "" {
@@ -1732,7 +1738,7 @@ func buildMatcher(kind, arg string) Matcher {
 		return &bodyJSONPathMatcher{jsonPath: jsonPath, parts: splitJSONPathParts(jsonPath), pattern: re}
 
 	case "block_multipart":
-		// arg is a regex pattern to match against uploaded filenames
+		// arg 是用于匹配上传文件名的正则
 		if arg == "" {
 			arg = `(?i)\.(php[0-9]?|phtml|jsp|jspx|asp|aspx|exe|dll|sh|bat|cmd|cgi|pl|py|rb|war|ear)$`
 		}
@@ -1743,7 +1749,7 @@ func buildMatcher(kind, arg string) Matcher {
 		return &multipartMatcher{re: re}
 
 	case "geo_block":
-		// arg is comma-separated country codes, e.g. "CN,RU,KP"
+		// arg 是逗号分隔的国家码，如 "CN,RU,KP"
 		codes := strings.Split(arg, ",")
 		countries := make(map[string]bool, len(codes))
 		for _, c := range codes {
@@ -1762,7 +1768,7 @@ func buildMatcher(kind, arg string) Matcher {
 	}
 }
 
-// splitHeaderArg splits "Header-Name:value" into (name, value).
+// splitHeaderArg 把 "Header-Name:value" 拆成 (name, value)。
 func splitHeaderArg(arg string) (string, string) {
 	if i := strings.Index(arg, ":"); i > 0 {
 		return arg[:i], arg[i+1:]
@@ -1775,7 +1781,7 @@ var regexCache = struct {
 	cache map[string]*regexp.Regexp
 }{cache: make(map[string]*regexp.Regexp)}
 
-// cachedCompile returns a compiled regexp, reusing a cached instance if available.
+// cachedCompile 返回编译好的 regexp，命中缓存时直接复用已有实例。
 func cachedCompile(pattern string) (*regexp.Regexp, error) {
 	regexCache.mu.RLock()
 	if re, ok := regexCache.cache[pattern]; ok {

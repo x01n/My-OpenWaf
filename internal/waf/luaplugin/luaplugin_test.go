@@ -401,12 +401,14 @@ func TestEngineDecisionCarriesPluginIdentity(t *testing.T) {
 	}
 }
 
-// ---- 沙箱：死循环必须被中断 ----
+// 沙箱：死循环必须被中断
 
-// TestInfiniteLoopIsInterrupted 是沙箱最关键的一条断言。
-//
-// 脚本在数据面同步执行，一个 while true 就能挂死整个站点。
-// 若本用例挂住不返回，说明超时机制根本没生效。
+/**
+ * TestInfiniteLoopIsInterrupted 是沙箱最关键的一条断言。
+ *
+ * 脚本在数据面同步执行，一个 while true 就能挂死整个站点。
+ * 若本用例挂住不返回，说明超时机制根本没生效。
+ */
 func TestInfiniteLoopIsInterrupted(t *testing.T) {
 	script := mustCompile(t, StagePre, `function handle(ctx) while true do end end`)
 	script.SetTimeout(80 * time.Millisecond)
@@ -492,7 +494,7 @@ func TestCanceledContextNeverAdoptsLuaDecision(t *testing.T) {
 	}
 }
 
-// ---- 沙箱：危险能力必须不可达 ----
+// 沙箱：危险能力必须不可达
 
 // TestDangerousGlobalsUnavailable 验证能触达文件系统、动态求值与运行时内部的
 // 全局名一律不可用。任一项可用都意味着沙箱被穿透。
@@ -512,11 +514,13 @@ func TestDangerousGlobalsUnavailable(t *testing.T) {
 	}
 }
 
-// TestScriptCannotEscapeViaMetatable 验证脚本无法借元表改写字符串方法。
-//
-// 曾实测可穿透：getmetatable("").__index.upper = ... 能改写字符串方法，
-// 而字符串元表是状态机级共享对象，池化复用下会污染后续所有脚本。
-// 现已移除 getmetatable，脚本连入口都拿不到。
+/**
+ * TestScriptCannotEscapeViaMetatable 验证脚本无法借元表改写字符串方法。
+ *
+ * 曾实测可穿透：getmetatable("").__index.upper = ... 能改写字符串方法，
+ * 而字符串元表是状态机级共享对象，池化复用下会污染后续所有脚本。
+ * 现已移除 getmetatable，脚本连入口都拿不到。
+ */
 func TestScriptCannotEscapeViaMetatable(t *testing.T) {
 	src := `
 function handle(ctx)
@@ -532,10 +536,12 @@ end`
 	}
 }
 
-// TestMetatablePollutionDoesNotCrossScripts 验证状态机隔离阻止元表污染跨运行传播。
-//
-// 若状态机被复用，脚本改写共享元表后会影响后续脚本；单个恶意/出错脚本
-// 不应影响整个策略体系。
+/**
+ * TestMetatablePollutionDoesNotCrossScripts 验证状态机隔离阻止元表污染跨运行传播。
+ *
+ * 若状态机被复用，脚本改写共享元表后会影响后续脚本；单个恶意/出错脚本
+ * 不应影响整个策略体系。
+ */
 func TestMetatablePollutionDoesNotCrossScripts(t *testing.T) {
 	e := silentEngine(nil)
 
@@ -565,7 +571,7 @@ end`)})
 	}
 }
 
-// ---- panic 隔离 ----
+// panic 隔离
 
 // TestScriptErrorDoesNotPropagate 验证脚本报错只被记录，不影响判定流程。
 func TestScriptErrorDoesNotPropagate(t *testing.T) {
@@ -596,7 +602,7 @@ func TestMissingHandlerIsError(t *testing.T) {
 	}
 }
 
-// ---- 请求上下文可读性 ----
+// 请求上下文可读性
 
 func TestScriptReadsRequestFields(t *testing.T) {
 	req := RequestView{
@@ -646,7 +652,7 @@ end`)})
 	}
 }
 
-// ---- 返回值形态 ----
+// 返回值形态
 
 // TestTopLevelReturnValuesAreDiscarded 验证顶层 chunk 的返回值不会残留在池化状态机栈上。
 func TestTopLevelReturnValuesAreDiscarded(t *testing.T) {
@@ -822,7 +828,7 @@ end`
 	}
 }
 
-// ---- 编译期校验 ----
+// 编译期校验
 
 func TestCompileRejectsBadInput(t *testing.T) {
 	if _, err := Compile("x", StagePre, `function handle( end`); err == nil {
@@ -836,7 +842,7 @@ func TestCompileRejectsBadInput(t *testing.T) {
 	}
 }
 
-// ---- 阶段隔离与零开销 ----
+// 阶段隔离与零开销
 
 func TestStageIsolation(t *testing.T) {
 	e := silentEngine(nil)
@@ -855,7 +861,6 @@ func TestStageIsolation(t *testing.T) {
 
 // TestSiteScopedScriptsExecuteInIsolation 验证站点脚本不会泄漏到其他站点，
 // 同时全局脚本在每个站点继续执行。
-// TestSiteScopedScriptsExecuteInIsolation verifies scoped scripts only execute for their site while global scripts continue to run.
 func TestSiteScopedScriptsExecuteInIsolation(t *testing.T) {
 	global := mustCompile(t, StagePre, `function handle(ctx) return nil end`)
 	site1 := mustCompile(t, StagePre, `function handle(ctx) return "intercept" end`)
@@ -898,11 +903,13 @@ func TestNilEngineSafe(t *testing.T) {
 	}
 }
 
-// ---- 全局隔离 ----
+// 全局隔离
 
-// TestGlobalsDoNotLeakBetweenRuns 验证脚本无法借全局变量在请求间传递状态。
-//
-// 每次执行都创建新状态机；此用例防止未来改回复用时重新引入跨请求全局污染。
+/**
+ * TestGlobalsDoNotLeakBetweenRuns 验证脚本无法借全局变量在请求间传递状态。
+ *
+ * 每次执行都创建新状态机；此用例防止未来改回复用时重新引入跨请求全局污染。
+ */
 func TestGlobalsDoNotLeakBetweenRuns(t *testing.T) {
 	e := silentEngine(nil)
 	e.Reload([]*Script{mustCompile(t, StagePre, `
@@ -957,7 +964,7 @@ end`)})
 	}
 }
 
-// ---- 并发安全 ----
+// 并发安全
 
 func TestConcurrentEvaluate(t *testing.T) {
 	e := silentEngine(nil)

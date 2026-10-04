@@ -63,7 +63,7 @@ func IsValidJSProtectionMode(mode string) bool {
 // Processor 是动态防护处理器。
 type Processor struct {
 	cfg        ProtectionConfig
-	cek        []byte // Content Encryption Key (AES-256)
+	cek        []byte // 内容加密密钥（AES-256）
 	kek        []byte // Key Encryption Key（用于包装 CEK 交付给客户端）
 	signTicket KeyTicketSigner
 }
@@ -74,20 +74,24 @@ type derivedKeys struct {
 	kek []byte
 }
 
-// keyCacheKey 标识一组站点密钥。
-//
-// EncryptionKeyBase 以 string 承载（Go 中 string 可比较且 []byte→string 只是一次
-// 小额复制，比再算一次摘要便宜）。
+/**
+ * keyCacheKey 标识一组站点密钥。
+ *
+ * EncryptionKeyBase 以 string 承载（Go 中 string 可比较且 []byte→string 只是一次
+ * 小额复制，比再算一次摘要便宜）。
+ */
 type keyCacheKey struct {
 	base   string
 	siteID uint
 }
 
-// keyCacheMaxEntries 是密钥缓存的条目上限。
-//
-// 键的数量约等于「站点数 × 配置变体数」，本身有界；设上限只为防御异常场景
-// （例如快照反复重建导致 base 不断变化）下的无界增长。超限即整体清空重建，
-// 代价仅是下一批请求重新派生一次。
+/**
+ * keyCacheMaxEntries 是密钥缓存的条目上限。
+ *
+ * 键的数量约等于「站点数 × 配置变体数」，本身有界；设上限只为防御异常场景
+ * （例如快照反复重建导致 base 不断变化）下的无界增长。超限即整体清空重建，
+ * 代价仅是下一批请求重新派生一次。
+ */
 const keyCacheMaxEntries = 1024
 
 var (
@@ -150,7 +154,7 @@ func (p *Processor) ProcessHTML(html []byte) ([]byte, error) {
 	return p.encryptHTML(html)
 }
 
-// ProcessHTMLWithScriptNonce encrypts HTML and returns the nonce used by the bootstrap script.
+// ProcessHTMLWithScriptNonce 加密 HTML 并返回引导脚本所用的 nonce。
 func (p *Processor) ProcessHTMLWithScriptNonce(html []byte) ([]byte, string, error) {
 	if !p.cfg.HTMLObfuscationEnabled {
 		return html, "", nil

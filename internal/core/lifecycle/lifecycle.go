@@ -14,27 +14,27 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 )
 
-// Default graceful shutdown timeout for individual servers.
+// defaultShutdownTimeout 是单个服务器的默认优雅关闭超时。
 const defaultShutdownTimeout = 10 * time.Second
 
-// Hot reload removes must release the caller quickly; full process shutdown keeps the longer timeout above.
+// 热重载移除必须尽快归还调用方；完整进程关闭则沿用上面的较长超时。
 const defaultRemoveShutdownTimeout = 500 * time.Millisecond
 
 const hertzEngineNotRunningError = "engine is not running"
 
-// Server is any stoppable server managed by the lifecycle manager.
+// Server 是生命周期管理器管辖的任意可停止服务器。
 type Server interface {
 	Spin()
 	Shutdown(ctx context.Context) error
 }
 
-// Readiness reports whether a server has completed listener startup.
+// Readiness 报告服务器是否已完成监听启动。
 type Readiness interface {
 	Ready() bool
 	Err() error
 }
 
-// hertzServer adapts *server.Hertz to the Server interface.
+// hertzServer 把 *server.Hertz 适配到 Server 接口。
 type hertzServer struct {
 	h    *server.Hertz
 	done chan struct{}
@@ -62,7 +62,7 @@ func serverAlreadyStopped(err error) bool {
 	return err != nil && strings.TrimSpace(err.Error()) == hertzEngineNotRunningError
 }
 
-// Manager coordinates startup, shutdown, and signal handling for multiple servers.
+// Manager 协调多个服务器的启动、关闭与信号处理。
 type Manager struct {
 	log     *slog.Logger
 	entries map[string]entry
@@ -72,47 +72,46 @@ type Manager struct {
 type entry struct {
 	name string
 	srv  Server
-	// tag is an opaque fingerprint used to detect configuration drift.
-	// When reconciling, if the tag for an existing name has changed the
-	// caller should Remove+Add to restart the server with new settings.
+	// tag 是用于检测配置漂移的不透明指纹。调谐时，若已存在同名服务器的
+	// tag 发生变化，调用方应当执行 Remove+Add，用新配置重启该服务器。
 	tag string
 }
 
-// New creates a lifecycle manager with the given logger.
+// New 使用给定日志器创建生命周期管理器。
 func New(log *slog.Logger) *Manager {
 	return &Manager{log: log, entries: make(map[string]entry)}
 }
 
-// AddHertz registers a Hertz server under a human-readable name.
+// AddHertz 以可读名称注册一个 Hertz 服务器。
 func (m *Manager) AddHertz(name string, h *server.Hertz) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries[name] = entry{name: name, srv: &hertzServer{h: h, done: make(chan struct{})}}
 }
 
-// AddHertzWithTag registers a Hertz server with a configuration tag.
-// The tag is used for drift detection during reconciliation.
+// AddHertzWithTag 注册带配置标签的 Hertz 服务器。
+// 标签用于调谐时的漂移检测。
 func (m *Manager) AddHertzWithTag(name string, h *server.Hertz, tag string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries[name] = entry{name: name, srv: &hertzServer{h: h, done: make(chan struct{})}, tag: tag}
 }
 
-// Add registers a generic server.
+// Add 注册一个通用服务器。
 func (m *Manager) Add(name string, srv Server) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries[name] = entry{name: name, srv: srv}
 }
 
-// AddWithTag registers a generic server with a configuration tag for drift detection.
+// AddWithTag 注册带配置标签的通用服务器，标签用于漂移检测。
 func (m *Manager) AddWithTag(name string, srv Server, tag string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries[name] = entry{name: name, srv: srv, tag: tag}
 }
 
-// Tag returns the configuration tag for the named server, or empty string.
+// Tag 返回具名服务器的配置标签，不存在时返回空字符串。
 func (m *Manager) Tag(name string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -122,7 +121,7 @@ func (m *Manager) Tag(name string) string {
 	return ""
 }
 
-// Has returns true if a server with the given name is registered.
+// Has 报告是否已注册给定名称的服务器。
 func (m *Manager) Has(name string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -130,7 +129,7 @@ func (m *Manager) Has(name string) bool {
 	return ok
 }
 
-// Names returns all registered server names.
+// Names 返回全部已注册服务器的名称。
 func (m *Manager) Names() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -141,7 +140,7 @@ func (m *Manager) Names() []string {
 	return out
 }
 
-// Remove gracefully shuts down and removes a server by name.
+// Remove 优雅关闭并按名称移除一个服务器。
 func (m *Manager) Remove(name string) {
 	m.mu.Lock()
 	ent, ok := m.entries[name]
@@ -166,7 +165,7 @@ func (m *Manager) Remove(name string) {
 	}
 }
 
-// StartOne starts a single named server in a background goroutine.
+// StartOne 在后台 goroutine 中启动单个具名服务器。
 func (m *Manager) StartOne(name string) error {
 	m.mu.Lock()
 	ent, ok := m.entries[name]
@@ -182,7 +181,7 @@ func (m *Manager) StartOne(name string) error {
 	return waitReady(name, ent.srv)
 }
 
-// Start spins up all registered servers in background goroutines.
+// Start 在后台 goroutine 中启动全部已注册服务器。
 func (m *Manager) Start() error {
 	m.mu.Lock()
 	entries := make([]entry, 0, len(m.entries))
@@ -227,7 +226,7 @@ func waitReady(name string, srv Server) error {
 	}
 }
 
-// Ready returns true only when every registered server reports a ready listener.
+// Ready 仅在全部已注册服务器都报告监听就绪时才返回 true。
 func (m *Manager) Ready() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -243,7 +242,7 @@ func (m *Manager) Ready() bool {
 	return true
 }
 
-// Shutdown gracefully stops all servers with the given context deadline.
+// Shutdown 按给定 context 截止时间优雅停止全部服务器。
 func (m *Manager) Shutdown(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -287,7 +286,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	}
 }
 
-// WaitForSignal blocks until SIGINT or SIGTERM, then calls Shutdown.
+// WaitForSignal 阻塞直到收到 SIGINT 或 SIGTERM，然后调用 Shutdown。
 func (m *Manager) WaitForSignal() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

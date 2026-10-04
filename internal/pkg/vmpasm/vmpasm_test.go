@@ -19,7 +19,7 @@ func buildContainerFor(layout Layout, code []byte) []byte {
 	return buildContainer(layout, code)
 }
 
-// --- 正向：编码 ---
+// 正向：编码
 
 func TestAssembleEncodesMinimalProgram(t *testing.T) {
 	prog := []Instr{{Op: OpHalt}}
@@ -151,7 +151,7 @@ func TestAssembleRejectsBadLayout(t *testing.T) {
 	}
 }
 
-// --- 正向/反向：解码往返 ---
+// 正向/反向：解码往返
 
 func TestDisassembleRoundTripsThroughParser(t *testing.T) {
 	prog := []Instr{
@@ -189,7 +189,7 @@ func TestDisassembleRoundTripsThroughParser(t *testing.T) {
 	}
 }
 
-// --- 反向：校验器必须拒绝缺陷形态 ---
+// 反向：校验器必须拒绝缺陷形态
 
 func TestVerifyRejectsUnreachableInstruction(t *testing.T) {
 	// HALT; HALT —— 第二条不可达
@@ -342,7 +342,7 @@ func TestVerifyDoesNotFlagZeroCompareAcrossBranchMerge(t *testing.T) {
 	}
 }
 
-// --- 反向：opcode 表镜像 ---
+// 反向：opcode 表镜像
 
 func TestOpcodeTableIsCompleteAndUnique(t *testing.T) {
 	if len(OpcodeTable) != 35 {

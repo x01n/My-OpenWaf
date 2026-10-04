@@ -1,8 +1,10 @@
-// B3 签名接线：密码学层。
-//
-// 本文件只承载**与传输形态无关**的部分：把「用签名验封信封」收敛成一个
-// 类型与一个方法。它不关心信封是内联在页面 hidden input 里、还是走独立
-// 路由（L4 A′ 路线），因此 A′ 结论落地后只需替换调用点，不必改这里。
+/**
+ * B3 签名接线：密码学层。
+ *
+ * 本文件只承载**与传输形态无关**的部分：把「用签名验封信封」收敛成一个
+ * 类型与一个方法。它不关心信封是内联在页面 hidden input 里、还是走独立
+ * 路由（L4 A′ 路线），因此 A′ 结论落地后只需替换调用点，不必改这里。
+ */
 package dataplane
 
 import (
@@ -39,17 +41,19 @@ func NewEnvelopeVerifier(log *slog.Logger) EnvelopeVerifier {
 	return EnvelopeVerifier{log: log}
 }
 
-// Verify 对域 0x06（DomainPowShards）的信封做验签并返回明文。
-// 返回 ok=false 表示必须拒绝，plaintext 恒为空串。
-//
-// 为什么域固定为 0x06：PoW 分片信封、动态保护分片信封、C2 种子信封三者
-// 同域，且域字段参与签名覆盖范围（`gm.Seal` 的 toSign 含整个头部），因此
-// 域不匹配会先被 Rust 侧 `raw[5] != domain` 拒掉，落到失败分支。
-//
-// 为什么必须传具体域而不能传 0：Go 的 `gm.Open` 把 `domain == 0` 当通配
-// （`gm/sealed.go` 的 `if domain != 0 && ...`），而 Rust 的 `open_raw_signed`
-// 无此豁免（`gm.rs` 的 `raw[5] != domain`）。两端不对称，传 0 会在客户端
-// 直接失败。
+/**
+ * Verify 对域 0x06（DomainPowShards）的信封做验签并返回明文。
+ * 返回 ok=false 表示必须拒绝，plaintext 恒为空串。
+ *
+ * 为什么域固定为 0x06：PoW 分片信封、动态保护分片信封、C2 种子信封三者
+ * 同域，且域字段参与签名覆盖范围（`gm.Seal` 的 toSign 含整个头部），因此
+ * 域不匹配会先被 Rust 侧 `raw[5] != domain` 拒掉，落到失败分支。
+ *
+ * 为什么必须传具体域而不能传 0：Go 的 `gm.Open` 把 `domain == 0` 当通配
+ * （`gm/sealed.go` 的 `if domain != 0 && ...`），而 Rust 的 `open_raw_signed`
+ * 无此豁免（`gm.rs` 的 `raw[5] != domain`）。两端不对称，传 0 会在客户端
+ * 直接失败。
+ */
 func (v EnvelopeVerifier) Verify(envelope, keyHex string) (plaintext string, ok bool) {
 	pub := gm.PubKeyHex()
 	if pub == "" {

@@ -108,11 +108,13 @@ func TestLuaRevisionIncrementsOnEveryReload(t *testing.T) {
 	}
 }
 
-// TestPostLuaCanOverrideBuiltinIntercept 是后置阶段存在的理由。
-//
-// 管道遇终止动作即 return，挂在链尾的普通阶段永远读不到「已被拦截」的判定。
-// 后置策略因此在 Process 中于管道之后执行——本用例锁定该行为：
-// 脚本既能看到内置判定，也能用 allow 推翻它（对误报放行）。
+/**
+ * TestPostLuaCanOverrideBuiltinIntercept 是后置阶段存在的理由。
+ *
+ * 管道遇终止动作即 return，挂在链尾的普通阶段永远读不到「已被拦截」的判定。
+ * 后置策略因此在 Process 中于管道之后执行——本用例锁定该行为：
+ * 脚本既能看到内置判定，也能用 allow 推翻它（对误报放行）。
+ */
 func TestPostLuaCanOverrideBuiltinIntercept(t *testing.T) {
 	lp := luaEngineWith(t, luaplugin.StagePost, `
 function handle(ctx)
@@ -140,10 +142,12 @@ end`)
 	}
 }
 
-// TestPostLuaCannotEscalateOverBuiltinTerminal 验证脚本无法绕过内置的终止优先级。
-//
-// 否则脚本能把 ACL 的 drop 改写成 redirect，使 drop > intercept > challenge
-// 的既有语义失效。
+/**
+ * TestPostLuaCannotEscalateOverBuiltinTerminal 验证脚本无法绕过内置的终止优先级。
+ *
+ * 否则脚本能把 ACL 的 drop 改写成 redirect，使 drop > intercept > challenge
+ * 的既有语义失效。
+ */
 func TestPostLuaCannotEscalateOverBuiltinTerminal(t *testing.T) {
 	lp := luaEngineWith(t, luaplugin.StagePost, `
 function handle(ctx) return {action="redirect", redirect_to="/evil"} end`)

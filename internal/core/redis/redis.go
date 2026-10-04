@@ -8,7 +8,7 @@ import (
 	rueidis "github.com/redis/rueidis"
 )
 
-// RedisOptions avoids importing package core (same fields as [core.Config] Redis slice).
+// RedisOptions 避免导入 core 包（字段与 [core.Config] 的 Redis 部分一致）。
 type RedisOptions struct {
 	Addr     string
 	Password string
@@ -33,7 +33,7 @@ func OptionalClient(opt RedisOptions) rueidis.Client {
 	return client
 }
 
-// Ping checks connectivity when client is non-nil.
+// Ping 在 client 非 nil 时检查连通性。
 func Ping(ctx context.Context, c rueidis.Client) error {
 	if c == nil {
 		return nil

@@ -9,7 +9,7 @@ import (
 
 var errInvalidHostHeaderValue = errors.New("invalid host header")
 
-// NormalizeHostHeaderValue trims, punycodes, and validates a Host header value.
+// NormalizeHostHeaderValue 对 Host 头取值做去空白、punycode 与合法性校验。
 func NormalizeHostHeaderValue(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

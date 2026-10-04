@@ -52,7 +52,7 @@ func countSessionRows(t *testing.T, db *gorm.DB, jti string) int64 {
 	return n
 }
 
-// ---------- 启动加载 ----------
+// 启动加载
 
 // TestNewSessionManagerLoadsFromDB 重启场景：仅未过期会话应恢复到内存。
 func TestNewSessionManagerLoadsFromDB(t *testing.T) {
@@ -98,7 +98,7 @@ func TestNewSessionManagerNilDBNoPanic(t *testing.T) {
 	}
 }
 
-// ---------- 持久化分支 ----------
+// 持久化分支
 
 func TestCreateSessionPersistsToDB(t *testing.T) {
 	db := newAuthTestDB(t)
@@ -192,7 +192,7 @@ func TestRemoveUserSessionsUnknownUser(t *testing.T) {
 	}
 }
 
-// ---------- 序列化脱敏 ----------
+// 序列化脱敏
 
 // TestSessionInfoJSONHasNoCredentialFields 会话对象序列化后不得包含口令/令牌等凭据字段。
 func TestSessionInfoJSONHasNoCredentialFields(t *testing.T) {

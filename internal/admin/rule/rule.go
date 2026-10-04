@@ -207,7 +207,7 @@ func DeleteRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 	}
 }
 
-// TestRuleRequest is the request body for the rule-test API.
+// TestRuleRequest 是规则测试 API 的请求体。
 type TestRuleRequest struct {
 	Pattern  string            `json:"pattern"`
 	ClientIP string            `json:"client_ip"`
@@ -218,8 +218,7 @@ type TestRuleRequest struct {
 	Body     string            `json:"body"`
 }
 
-// TestRule lets callers dry-run a pattern against a synthetic request
-// without persisting the rule.
+// TestRule 让调用方针对一个合成请求试跑规则，而不做持久化。
 func TestRule() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req TestRuleRequest
@@ -265,7 +264,7 @@ func TestRule() app.HandlerFunc {
 	}
 }
 
-// validatePersistedRuleAction checks persisted rule Action values and returns the canonical store.RuleAction.
+// validatePersistedRuleAction 校验持久化规则的动作取值，并返回规范化的 store.RuleAction。
 func validatePersistedRuleAction(phase store.RulePhase, a store.RuleAction) (store.RuleAction, bool) {
 	s := strings.TrimSpace(string(a))
 	if s == "" {
@@ -391,7 +390,7 @@ func validateImportedRulePriorityConflicts(repo *repository.RuleRepo, items []st
 	return "", nil
 }
 
-// ExportRules returns all rules as a JSON array for backup/migration.
+// ExportRules 以 JSON 数组形式返回全部规则，供备份/迁移使用。
 func ExportRules(repo *repository.RuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		items, _, err := repo.List(0, 10000)
@@ -403,7 +402,7 @@ func ExportRules(repo *repository.RuleRepo) app.HandlerFunc {
 	}
 }
 
-// ImportRules accepts a JSON array of rules and bulk-creates them.
+// ImportRules 接收 JSON 数组形式的规则并批量创建。
 func ImportRules(repo *repository.RuleRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var body struct {

@@ -17,12 +17,12 @@ func TestResponseCacheBasic(t *testing.T) {
 	key := CacheKey("GET", "example.com", "/page", "")
 	body := []byte("<html>hello</html>")
 
-	// Miss
+	// 未命中
 	if entry := rc.Get(key); entry != nil {
 		t.Fatal("expected cache miss")
 	}
 
-	// Set and hit
+	// 写入并命中
 	rc.Set(key, 200, "text/html", body, 60, nil)
 	entry := rc.Get(key)
 	if entry == nil {
@@ -35,7 +35,7 @@ func TestResponseCacheBasic(t *testing.T) {
 		t.Errorf("unexpected body")
 	}
 
-	// Stats
+	// 统计
 	entries, size := rc.Stats()
 	if entries != 1 {
 		t.Errorf("expected 1 entry, got %d", entries)
@@ -125,7 +125,7 @@ func TestResponseCacheExpiry(t *testing.T) {
 	defer rc.Close()
 
 	key := CacheKey("GET", "example.com", "/", "")
-	rc.Set(key, 200, "text/html", []byte("x"), 0, nil) // TTL=0 → uses defaultTTL=1s
+	rc.Set(key, 200, "text/html", []byte("x"), 0, nil) // TTL=0 → 使用默认 TTL 1s
 
 	entry := rc.Get(key)
 	if entry == nil {
@@ -447,8 +447,8 @@ func TestResponseCachePurgeSiteTargetKeepsUnrelatedEntries(t *testing.T) {
 		t.Fatalf("target index groups after purge = %d, want 2", got)
 	}
 
-	// Replacing a key must move it between target groups so a later purge cannot
-	// remove an entry using stale reverse-index state.
+	// 替换 key 必须让它在目标分组之间迁移，否则后续 purge 会依据过期的
+	// 反向索引状态误删条目。
 	set("site7-asset-query1", 7, "/other.js")
 	rc.PurgeSiteTarget(7, "/asset.js")
 	if rc.Get("site7-asset-query1") == nil {
@@ -505,8 +505,8 @@ func TestResponseCacheLargeTTLIsNotEvictedByOverflow(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		rc.Set("regular-"+strconv.Itoa(i), http.StatusOK, "text/plain", body, 60, nil)
 	}
-	// Keep the large-TTL entry newest, then force a size eviction. A wrapped
-	// CachedAt+TTL check would treat it as expired before the LRU pass.
+	// 让大 TTL 条目保持最新，再强制触发一次容量驱逐：若 CachedAt+TTL
+	// 用回绕判定，它会在 LRU 阶段之前就被当成过期条目。
 	rc.Set(key, http.StatusOK, "text/plain", []byte("body"), int64(^uint64(0)>>1), nil)
 	rc.Set("regular-final-1", http.StatusOK, "text/plain", body, 60, nil)
 	rc.Set("regular-final-2", http.StatusOK, "text/plain", body, 60, nil)

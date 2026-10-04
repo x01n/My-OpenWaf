@@ -32,17 +32,16 @@ type v13CVERuleReferencesTable struct {
 func (v13CVERuleReferencesTable) TableName() string { return "cve_rules" }
 
 /**
- * V13MigrateSecurityEventRuleInfo adds the rule-explanation columns used by the
- * security-event detail view: rule name/description, OWASP match score and
- * snippet, and the CVE severity/source/CVSS/CWE/reference fields.
+ * V13MigrateSecurityEventRuleInfo 新增安全事件详情页所需的规则解释列：
+ * 规则名/描述、OWASP 命中分与命中片段，以及 CVE 的
+ * severity/source/CVSS/CWE/reference 字段。
  *
- * Also adds cve_rules.references, which the CVE feed fills from NVD. That table
- * is defined by cve.CVERuleModel (internal/waf/cve/feed.go) rather than a store
- * model, so GORM's AutoMigrate does not cover it.
+ * 同时新增 cve_rules.references，由 CVE feed 从 NVD 填充。该表由
+ * cve.CVERuleModel（internal/waf/cve/feed.go）定义而非 store 模型，
+ * 因此 GORM 的 AutoMigrate 覆盖不到它。
  *
- * Columns carry database defaults or are nullable, so historical rows stay
- * readable and no backfill is required. Called after AutoMigrateLogs so a
- * fresh database has already created security_events.
+ * 这些列带数据库默认值或可为空，历史行仍可正常读取，无需回填。
+ * 本函数在 AutoMigrateLogs 之后调用，此时全新数据库已建好 security_events。
  */
 func V13MigrateSecurityEventRuleInfo(db *gorm.DB) error {
 	if db != nil && db.Migrator().HasTable("security_events") {
@@ -71,9 +70,8 @@ func V13MigrateSecurityEventRuleInfo(db *gorm.DB) error {
 }
 
 /**
- * V13MigrateCVERuleReferences is the main-database half of V13: it only adds
- * cve_rules.references, which the catalog reconciler writes during startup
- * before AutoMigrateLogs runs.
+ * V13MigrateCVERuleReferences 是 V13 的主库部分：只新增 cve_rules.references，
+ * 该列由目录对账器在启动阶段写入，早于 AutoMigrateLogs 执行。
  */
 func V13MigrateCVERuleReferences(db *gorm.DB) error {
 	if db == nil || !db.Migrator().HasTable("cve_rules") {
