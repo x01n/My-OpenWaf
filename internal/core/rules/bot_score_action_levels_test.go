@@ -12,6 +12,8 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/geoip"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/iprep"
 )
 
@@ -128,7 +130,7 @@ const bsaGeoIPFixtureB64 = "" +
 
 // bsaGeoResolver 从内嵌夹具构造一个 MaxMind 解析器，命中
 // 数据中心 ASN + VPN ASN + 高风险国家（ScoreIP 上限 60）。
-func bsaGeoResolver(t *testing.T) *bot.MaxMindResolver {
+func bsaGeoResolver(t *testing.T) *geoip.MaxMindResolver {
 	t.Helper()
 	raw, err := base64.StdEncoding.DecodeString(bsaGeoIPFixtureB64)
 	if err != nil {
@@ -138,7 +140,7 @@ func bsaGeoResolver(t *testing.T) *bot.MaxMindResolver {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("写入 GeoIP 夹具失败: %v", err)
 	}
-	geo := bot.NewMaxMindResolver(path, path, core.BotConfig{
+	geo := geoip.NewMaxMindResolver(path, path, core.BotConfig{
 		DataCenterASNs:    []uint{64500},
 		VPNProxyASNs:      []uint{64500},
 		HighRiskCountries: []string{"CN"},
@@ -331,7 +333,7 @@ func TestBSAFiveTierDispositionsReachExpectedActions(t *testing.T) {
 			ctx := bsaCtx(tc.headers)
 			ctx.Method, ctx.Path = tc.method, tc.path
 			if tc.tls10 {
-				ctx.TLS = bot.TLSClientFingerprint{TLSVersion: "TLS10"}
+				ctx.TLS = tlsfp.TLSClientFingerprint{TLSVersion: "TLS10"}
 			}
 			var rep *iprep.IPReputation
 			switch tc.repKind {
@@ -598,7 +600,7 @@ func TestBSALoggedActionMatchesDisposition(t *testing.T) {
 			ctx := bsaCtx(s.headers)
 			ctx.Method, ctx.Path = s.method, s.path
 			if s.tls10 {
-				ctx.TLS = bot.TLSClientFingerprint{TLSVersion: "TLS10"}
+				ctx.TLS = tlsfp.TLSClientFingerprint{TLSVersion: "TLS10"}
 			}
 			var rep *iprep.IPReputation
 			if s.ip != "" {
@@ -813,7 +815,7 @@ func TestBSAThresholdGovernsDropBoundary(t *testing.T) {
 		ctx := bsaCtx(headers)
 		ctx.Method, ctx.Path = method, path
 		if tls10 {
-			ctx.TLS = bot.TLSClientFingerprint{TLSVersion: "TLS10"}
+			ctx.TLS = tlsfp.TLSClientFingerprint{TLSVersion: "TLS10"}
 		}
 		ctx.ClientIP = net.ParseIP("203.0.113.70")
 		rep := bsaBlacklistIPRep(t, "203.0.113.70")
@@ -858,7 +860,7 @@ func TestBSADropReachableAtDefaultThreshold(t *testing.T) {
 
 	ctx := bsaCtx(map[string]string{"Connection": "close"})
 	ctx.Method, ctx.Path = "POST", "/.env"
-	ctx.TLS = bot.TLSClientFingerprint{TLSVersion: "TLS10"}
+	ctx.TLS = tlsfp.TLSClientFingerprint{TLSVersion: "TLS10"}
 	ctx.ClientIP = net.ParseIP(ip)
 
 	rep := bsaBlacklistIPRep(t, ip)

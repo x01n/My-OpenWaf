@@ -25,7 +25,7 @@ import (
 	"My-OpenWaf/internal/dataplane"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/upstream"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -249,7 +249,7 @@ type http3HandshakeFingerprintStore struct {
 }
 
 type http3HandshakeFingerprintEntry struct {
-	fingerprint bot.TLSClientFingerprint
+	fingerprint tlsfp.TLSClientFingerprint
 	createdAt   time.Time
 }
 
@@ -1250,15 +1250,15 @@ func newHTTP3HandshakeFingerprintStore() *http3HandshakeFingerprintStore {
 	}
 }
 
-func contextWithHTTP3TLSFingerprint(ctx context.Context, fp bot.TLSClientFingerprint) context.Context {
+func contextWithHTTP3TLSFingerprint(ctx context.Context, fp tlsfp.TLSClientFingerprint) context.Context {
 	if !fp.HasValue() {
 		return ctx
 	}
 	return context.WithValue(ctx, http3TLSFingerprintContextKey{}, fp)
 }
 
-func http3TLSFingerprintFromContext(ctx context.Context) (bot.TLSClientFingerprint, bool) {
-	fp, ok := ctx.Value(http3TLSFingerprintContextKey{}).(bot.TLSClientFingerprint)
+func http3TLSFingerprintFromContext(ctx context.Context) (tlsfp.TLSClientFingerprint, bool) {
+	fp, ok := ctx.Value(http3TLSFingerprintContextKey{}).(tlsfp.TLSClientFingerprint)
 	return fp, ok && fp.HasValue()
 }
 
@@ -1348,9 +1348,9 @@ func applyHTTP3ProxyTLSHeaders(r *http.Request) {
 	}
 }
 
-func http3RequestTLSFingerprint(r *http.Request) bot.TLSClientFingerprint {
+func http3RequestTLSFingerprint(r *http.Request) tlsfp.TLSClientFingerprint {
 	if r == nil {
-		return bot.TLSClientFingerprint{}
+		return tlsfp.TLSClientFingerprint{}
 	}
 	fp, _ := http3TLSFingerprintFromContext(r.Context())
 	if r.TLS != nil {
@@ -1377,10 +1377,10 @@ func (s *http3HandshakeFingerprintStore) StoreFromClientHello(hello *tls.ClientH
 	if s == nil || hello == nil || hello.Conn == nil {
 		return
 	}
-	s.Store(hello.Conn.LocalAddr(), hello.Conn.RemoteAddr(), bot.TLSFingerprintFromClientHelloInfo(hello, 'q'))
+	s.Store(hello.Conn.LocalAddr(), hello.Conn.RemoteAddr(), tlsfp.TLSFingerprintFromClientHelloInfo(hello, 'q'))
 }
 
-func (s *http3HandshakeFingerprintStore) Store(localAddr net.Addr, remoteAddr net.Addr, fp bot.TLSClientFingerprint) {
+func (s *http3HandshakeFingerprintStore) Store(localAddr net.Addr, remoteAddr net.Addr, fp tlsfp.TLSClientFingerprint) {
 	if s == nil || !fp.HasValue() {
 		return
 	}
@@ -1397,20 +1397,20 @@ func (s *http3HandshakeFingerprintStore) Store(localAddr net.Addr, remoteAddr ne
 	s.mu.Unlock()
 }
 
-func (s *http3HandshakeFingerprintStore) Take(localAddr net.Addr, remoteAddr net.Addr) (bot.TLSClientFingerprint, bool) {
+func (s *http3HandshakeFingerprintStore) Take(localAddr net.Addr, remoteAddr net.Addr) (tlsfp.TLSClientFingerprint, bool) {
 	if s == nil {
-		return bot.TLSClientFingerprint{}, false
+		return tlsfp.TLSClientFingerprint{}, false
 	}
 	key := http3HandshakeFingerprintKey(localAddr, remoteAddr)
 	if key == "" {
-		return bot.TLSClientFingerprint{}, false
+		return tlsfp.TLSClientFingerprint{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneExpiredLocked(time.Now())
 	entry, ok := s.items[key]
 	if !ok {
-		return bot.TLSClientFingerprint{}, false
+		return tlsfp.TLSClientFingerprint{}, false
 	}
 	delete(s.items, key)
 	return entry.fingerprint, entry.fingerprint.HasValue()

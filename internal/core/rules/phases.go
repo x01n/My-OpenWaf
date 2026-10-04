@@ -19,6 +19,8 @@ import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/geoip"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/iprep"
@@ -38,7 +40,7 @@ type MatchCtx struct {
 	HeaderOrder      string
 	TLSALPN          string
 	TLSCipherSuites  string
-	TLS              *bot.TLSClientFingerprint
+	TLS              *tlsfp.TLSClientFingerprint
 	Body             []byte
 	// reqCtx 指向共享 RequestCtx，供 bodyJSONPath/queryParam 匹配器挂
 	// per-request 懒解析缓存。未填充（纯值构造）时为 nil，匹配器会直接
@@ -413,7 +415,7 @@ func (p *ipReputationPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 
 type botPhase struct {
 	rep       *iprep.IPReputation          // optional, for recording violations
-	geo       *bot.MaxMindResolver         // optional, for GeoIP scoring
+	geo       *geoip.MaxMindResolver       // optional, for GeoIP scoring
 	threshold int                          // score threshold for blocking
 	limiter   ratelimit.RateLimiterBackend // optional, for behaviour (request rate) scoring
 	rateMax   int                          // 限流窗口阈值，行为分换算基准
@@ -427,7 +429,7 @@ func NewBotPhase(rep *iprep.IPReputation) pipeline.Phase {
 
 // NewBotPhaseWithGeo creates a bot-detection pipeline phase that uses the
 // two-phase PreScreen → DeepScore flow with GeoIP weighting.
-func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *bot.MaxMindResolver, threshold int) pipeline.Phase {
+func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *geoip.MaxMindResolver, threshold int) pipeline.Phase {
 	return NewBotPhaseWithGeoAndLimiter(rep, geo, threshold, nil, 0)
 }
 
@@ -445,7 +447,7 @@ func NewBotPhaseWithGeo(rep *iprep.IPReputation, geo *bot.MaxMindResolver, thres
  * @param rateMax 与 limiter 同窗口的请求阈值（ProtectionConfig.RequestRateLimitMax）。
  * @return bot 检测阶段。
  */
-func NewBotPhaseWithGeoAndLimiter(rep *iprep.IPReputation, geo *bot.MaxMindResolver, threshold int, limiter ratelimit.RateLimiterBackend, rateMax int) pipeline.Phase {
+func NewBotPhaseWithGeoAndLimiter(rep *iprep.IPReputation, geo *geoip.MaxMindResolver, threshold int, limiter ratelimit.RateLimiterBackend, rateMax int) pipeline.Phase {
 	if threshold <= 0 {
 		threshold = 80
 	}

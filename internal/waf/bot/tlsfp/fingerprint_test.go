@@ -1,4 +1,4 @@
-package bot
+package tlsfp
 
 import (
 	"crypto/md5"
@@ -12,13 +12,6 @@ import (
 	utls "github.com/refraction-networking/utls"
 	ja4 "github.com/wu238121-a11y/go-ja4"
 )
-
-func TestHeaderOrderScoreDetectsAlphabeticOrder(t *testing.T) {
-	score, reasons := headerOrderScore(BotRequest{HeaderKeys: []string{"accept", "accept-encoding", "host", "user-agent", "x-test"}})
-	if score == 0 || len(reasons) == 0 {
-		t.Fatalf("expected suspicious score for alphabetic header order, score=%d reasons=%v", score, reasons)
-	}
-}
 
 func TestTLSVersionStringSupportsSSL3(t *testing.T) {
 	if got := tlsVersionString(0x0300); got != "SSL3" {
@@ -1246,22 +1239,6 @@ func BenchmarkMD5SumBytes(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		benchmarkJA3MD5Sum = md5.Sum([]byte(ja3))
-	}
-}
-
-func TestDeepScoreDoesNotTreatJA4PresenceAsRisk(t *testing.T) {
-	bs := DeepScore(BotRequest{
-		UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-		AcceptHeader:   "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-		AcceptLanguage: "en-US,en;q=0.9",
-		AcceptEncoding: "gzip, deflate, br",
-		TLS:            TLSClientFingerprint{JA4: "t13d1516h2_8daaf6152771_e5627efa2ab1"},
-	}, nil, nil)
-	if bs.FingerprintScore != 0 {
-		t.Fatalf("JA4 presence alone should not add fingerprint score, got %d", bs.FingerprintScore)
-	}
-	if bs.IsHighRisk {
-		t.Fatal("benign request with JA4 presence alone should not be high risk")
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 	"My-OpenWaf/internal/dataplane"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 
 	"github.com/andybalholm/brotli"
 	"github.com/quic-go/quic-go/http3"
@@ -4659,7 +4659,7 @@ func TestInstrumentHTTP3TLSConfigStoresClientHelloFingerprintWithoutExistingHook
 
 func TestApplyHTTP3ProxyTLSHeadersUsesContextFingerprint(t *testing.T) {
 	req := httptest.NewRequest("GET", "https://example.com/resource", nil)
-	req = req.WithContext(contextWithHTTP3TLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	req = req.WithContext(contextWithHTTP3TLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		JA3:          "771,4865-4866,0-16-43,29,0",
 		JA3Hash:      "0123456789abcdef0123456789abcdef",
 		JA4:          "q13d0511h3_fea09b2e4d67_1234567890ab",

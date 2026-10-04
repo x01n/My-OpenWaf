@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"My-OpenWaf/internal/core/action"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
 // RequestCtx carries all decoded request data through the pipeline.
@@ -38,7 +38,7 @@ type RequestCtx struct {
 	HeaderKeys       []string // Ordered header keys for fingerprinting
 	Body             []byte
 	ContentType      string
-	TLS              bot.TLSClientFingerprint
+	TLS              tlsfp.TLSClientFingerprint
 
 	// AntiReplayTTL is per-site nonce window in seconds (0 = engine default).
 	AntiReplayTTL int

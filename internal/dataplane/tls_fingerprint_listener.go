@@ -1,11 +1,10 @@
 package dataplane
 
 import (
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"io"
 	"net"
 	"sync"
-
-	"My-OpenWaf/internal/waf/bot"
 )
 
 // maxClientHelloRecord is the TLS record payload limit; the 5-byte header is read separately.
@@ -37,7 +36,7 @@ type peekConn struct {
 	net.Conn
 	prefixBuf   []byte
 	prefixPos   int
-	fingerprint bot.TLSClientFingerprint
+	fingerprint tlsfp.TLSClientFingerprint
 	mu          sync.Mutex
 }
 
@@ -134,7 +133,7 @@ func (c *peekConn) SetTLSHandshakeInfo(version string, sni string, alpn string) 
 	c.fingerprint.SetNegotiatedALPN(alpn)
 }
 
-func (c *peekConn) TLSFingerprint() (bot.TLSClientFingerprint, bool) {
+func (c *peekConn) TLSFingerprint() (tlsfp.TLSClientFingerprint, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.fingerprint, c.fingerprint.HasValue()
@@ -166,24 +165,24 @@ func setTLSHandshakeInfoOnConn(conn net.Conn, version string, sni string, alpn s
 	}
 }
 
-func readTLSFingerprintPrefix(conn net.Conn) ([]byte, bot.TLSClientFingerprint) {
+func readTLSFingerprintPrefix(conn net.Conn) ([]byte, tlsfp.TLSClientFingerprint) {
 	var header [5]byte
 	n, err := io.ReadFull(conn, header[:])
 	if err != nil {
 		prefix := make([]byte, n)
 		copy(prefix, header[:n])
-		return prefix, bot.TLSClientFingerprint{}
+		return prefix, tlsfp.TLSClientFingerprint{}
 	}
 	if header[0] != 0x16 {
 		prefix := make([]byte, len(header))
 		copy(prefix, header[:])
-		return prefix, bot.TLSClientFingerprint{}
+		return prefix, tlsfp.TLSClientFingerprint{}
 	}
 	recordLen := int(header[3])<<8 | int(header[4])
 	if recordLen <= 0 || recordLen > maxClientHelloRecord {
 		prefix := make([]byte, len(header))
 		copy(prefix, header[:])
-		return prefix, bot.TLSClientFingerprint{}
+		return prefix, tlsfp.TLSClientFingerprint{}
 	}
 
 	prefix := acquireTLSFingerprintPrefixBuffer(len(header) + recordLen)
@@ -192,7 +191,7 @@ func readTLSFingerprintPrefix(conn net.Conn) ([]byte, bot.TLSClientFingerprint) 
 	var body []byte
 	prefix, body, _, err = readFullIntoPrefix(conn, prefix, recordLen)
 	if err != nil {
-		return prefix, bot.TLSClientFingerprint{}
+		return prefix, tlsfp.TLSClientFingerprint{}
 	}
 
 	parseRecord, prefix, parseRecordBuf, ok := readCompleteClientHelloRecord(conn, prefix, body)
@@ -200,11 +199,11 @@ func readTLSFingerprintPrefix(conn net.Conn) ([]byte, bot.TLSClientFingerprint) 
 		defer releaseTLSFingerprintParseRecordBuffer(parseRecordBuf)
 	}
 	if !ok {
-		return prefix, bot.TLSClientFingerprint{}
+		return prefix, tlsfp.TLSClientFingerprint{}
 	}
-	fp, err := bot.ParseTLSClientHello(parseRecord)
+	fp, err := tlsfp.ParseTLSClientHello(parseRecord)
 	if err != nil {
-		return prefix, bot.TLSClientFingerprint{}
+		return prefix, tlsfp.TLSClientFingerprint{}
 	}
 	return prefix, fp
 }

@@ -38,7 +38,7 @@ import (
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/visitorfusion"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/drop"
 	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
@@ -89,7 +89,7 @@ const (
 
 type tlsFingerprintContextValueKey struct{}
 
-func ContextWithTLSFingerprint(ctx context.Context, fp bot.TLSClientFingerprint) context.Context {
+func ContextWithTLSFingerprint(ctx context.Context, fp tlsfp.TLSClientFingerprint) context.Context {
 	if !fp.HasValue() {
 		return ctx
 	}
@@ -109,8 +109,8 @@ func ContextWithTLSHandshakeInfo(ctx context.Context, version string, sni string
 	return ContextWithTLSFingerprint(ctx, fp)
 }
 
-func tlsFingerprintFromContext(ctx context.Context) (bot.TLSClientFingerprint, bool) {
-	fp, ok := ctx.Value(tlsFingerprintContextValueKey{}).(bot.TLSClientFingerprint)
+func tlsFingerprintFromContext(ctx context.Context) (tlsfp.TLSClientFingerprint, bool) {
+	fp, ok := ctx.Value(tlsFingerprintContextValueKey{}).(tlsfp.TLSClientFingerprint)
 	return fp, ok && fp.HasValue()
 }
 
@@ -1704,7 +1704,7 @@ type accessLogInfo struct {
 	Upstream             string
 	HTTPProtocol         string
 	UpstreamHTTPProtocol string
-	TLSFingerprint       bot.TLSClientFingerprint
+	TLSFingerprint       tlsfp.TLSClientFingerprint
 	// HeaderOrder 是已 join 的请求头顺序字符串，主路径直接复用 DerivedHeaderOrder，避免再次 Join。
 	HeaderOrder          string
 	UpstreamLatencyMs    int64
@@ -1815,7 +1815,7 @@ func buildAccessLogEntry(c *app.RequestContext, info accessLogInfo) store.Access
 		if fp, ok := tlsFingerprintFromRequestContext(c); ok {
 			info.TLSFingerprint = fp
 		} else {
-			info.TLSFingerprint = bot.TLSClientFingerprint{}
+			info.TLSFingerprint = tlsfp.TLSClientFingerprint{}
 		}
 	} else {
 		if fp, ok := tlsFingerprintFromRequestContext(c); ok {
@@ -1954,7 +1954,7 @@ func buildVisitorFusionResult(c *app.RequestContext, info accessLogInfo) visitor
 	})
 }
 
-func mergeTLSFingerprint(base bot.TLSClientFingerprint, extra bot.TLSClientFingerprint) bot.TLSClientFingerprint {
+func mergeTLSFingerprint(base tlsfp.TLSClientFingerprint, extra tlsfp.TLSClientFingerprint) tlsfp.TLSClientFingerprint {
 	if base.JA3 == "" {
 		base.JA3 = extra.JA3
 	}
@@ -2402,20 +2402,20 @@ func firstPositive(value, fallback int64) int64 {
 	return fallback
 }
 
-func tlsFingerprintFromRequestContext(c *app.RequestContext) (bot.TLSClientFingerprint, bool) {
+func tlsFingerprintFromRequestContext(c *app.RequestContext) (tlsfp.TLSClientFingerprint, bool) {
 	if value, ok := c.Get(tlsFingerprintContextKey); ok {
-		if fp, ok := value.(bot.TLSClientFingerprint); ok && fp.HasValue() {
+		if fp, ok := value.(tlsfp.TLSClientFingerprint); ok && fp.HasValue() {
 			return fp, true
 		}
 	}
 	if isInternalHTTP3Request(c) {
-		return bot.TLSClientFingerprint{}, false
+		return tlsfp.TLSClientFingerprint{}, false
 	}
-	if fp, ok := bot.TLSFingerprintFromConn(c.GetConn()); ok {
+	if fp, ok := tlsfp.TLSFingerprintFromConn(c.GetConn()); ok {
 		c.Set(tlsFingerprintContextKey, fp)
 		return fp, true
 	}
-	return bot.TLSClientFingerprint{}, false
+	return tlsfp.TLSClientFingerprint{}, false
 }
 
 func enqueueAccessLog(writer accessLogRecorder, al store.AccessLog) {

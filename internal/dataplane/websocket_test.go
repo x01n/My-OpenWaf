@@ -32,7 +32,7 @@ import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/antireplay"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
 func TestForwardWebSocketUsesTLS10ConfigForWSSUpstream(t *testing.T) {
@@ -970,7 +970,7 @@ func TestBuildAccessLogEntryDoesNotRecordProxyTLSFingerprintForHTTP3(t *testing.
 	defer client.Close()
 	defer server.Close()
 
-	wrapped := bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+	wrapped := tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		JA3Hash:    "proxy-ja3",
 		JA4:        "proxy-ja4",
@@ -998,7 +998,7 @@ func TestBuildAccessLogEntryUsesCachedTLSFingerprintForHTTP3(t *testing.T) {
 	ctx := app.NewContext(0)
 	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
 	ctx.Set(internalHTTP3ContextKey, true)
-	ctx.Set(tlsFingerprintContextKey, bot.TLSClientFingerprint{
+	ctx.Set(tlsFingerprintContextKey, tlsfp.TLSClientFingerprint{
 		JA3:        "771,4865-4866,0-16-43,29,0",
 		JA3Hash:    "0123456789abcdef0123456789abcdef",
 		JA4:        "q13d0511h3_fea09b2e4d67_1234567890ab",
@@ -1023,7 +1023,7 @@ func TestBuildAccessLogEntryPrefersCachedHTTP3TLSFingerprintOverProxyTLS(t *test
 	ctx := app.NewContext(0)
 	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
 	ctx.Set(internalHTTP3ContextKey, true)
-	ctx.Set(tlsFingerprintContextKey, bot.TLSClientFingerprint{
+	ctx.Set(tlsFingerprintContextKey, tlsfp.TLSClientFingerprint{
 		JA3:          "771,4865-4866,0-16-43,29,0",
 		JA3Hash:      "0123456789abcdef0123456789abcdef",
 		JA4:          "q13d0511h3_fea09b2e4d67_1234567890ab",
@@ -1035,7 +1035,7 @@ func TestBuildAccessLogEntryPrefersCachedHTTP3TLSFingerprintOverProxyTLS(t *test
 
 	entry := buildAccessLogEntry(ctx, accessLogInfo{
 		SiteID: 1,
-		TLSFingerprint: bot.TLSClientFingerprint{
+		TLSFingerprint: tlsfp.TLSClientFingerprint{
 			JA3:          "proxy-ja3",
 			JA3Hash:      "proxy-ja3-hash",
 			JA4:          "t13i2511h2_b78ed14e2fd0_ab7e3b40a677",
@@ -1064,7 +1064,7 @@ func TestRequestProtocolPrefersTLSOverSpoofedForwardedProto(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	wrapped := bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
+	wrapped := tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
 	ctx := app.NewContext(0)
 	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
 	ctx.SetConn(&testHertzConn{Conn: wrapped})
@@ -1079,7 +1079,7 @@ func TestRequestProtocolPrefersNegotiatedALPNOverSpoofedForwardedProto(t *testin
 	defer client.Close()
 	defer server.Close()
 
-	wrapped := bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+	wrapped := tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		JA3Hash:    "real",
 		ALPN:       []string{"h2"},
@@ -1107,7 +1107,7 @@ func TestRequestProtocolPrefersRequestHeaderProtocolOverTLSFingerprint(t *testin
 	defer client.Close()
 	defer server.Close()
 
-	wrapped := bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+	wrapped := tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		JA3Hash:    "real",
 		ALPN:       []string{"h2"},
@@ -1126,7 +1126,7 @@ func TestRequestProtocolReturnsHTTPSWhenTLSHasNoALPN(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	wrapped := bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
+	wrapped := tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
 	ctx := app.NewContext(0)
 	ctx.SetConn(&testHertzConn{Conn: wrapped})
 
@@ -1140,7 +1140,7 @@ func TestRequestProtocolIgnoresSpoofedInternalHTTP3Header(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	wrapped := bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
+	wrapped := tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
 	ctx := app.NewContext(0)
 	ctx.Request.Header.Set("X-OpenWaf-Internal-Proto", "h3")
 	ctx.SetConn(&testHertzConn{Conn: wrapped})
@@ -1159,11 +1159,11 @@ func TestTLSFingerprintCarrierPreservesHandshakeUpdates(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	pc := &peekConn{Conn: server, fingerprint: bot.TLSClientFingerprint{JA3Hash: "ja3"}}
-	wrapped := bot.WrapFingerprintConn(pc, pc.fingerprint)
+	pc := &peekConn{Conn: server, fingerprint: tlsfp.TLSClientFingerprint{JA3Hash: "ja3"}}
+	wrapped := tlsfp.WrapFingerprintConn(pc, pc.fingerprint)
 	pc.SetTLSHandshakeInfo("TLS13", "client.example", "h2")
 
-	fp, ok := bot.TLSFingerprintFromConn(wrapped)
+	fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("expected fingerprint from wrapped connection")
 	}
@@ -1174,7 +1174,7 @@ func TestTLSFingerprintCarrierPreservesHandshakeUpdates(t *testing.T) {
 
 func TestBuildAccessLogEntryMergesHandshakeTLSMetadata(t *testing.T) {
 	ctx := app.NewContext(0)
-	ctx.Set(tlsFingerprintContextKey, bot.TLSClientFingerprint{
+	ctx.Set(tlsFingerprintContextKey, tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		SNI:        "client.example",
 		ALPN:       []string{"h2"},
@@ -1183,7 +1183,7 @@ func TestBuildAccessLogEntryMergesHandshakeTLSMetadata(t *testing.T) {
 	entry := buildAccessLogEntry(ctx, accessLogInfo{
 		SiteID:       1,
 		HTTPProtocol: "h2",
-		TLSFingerprint: bot.TLSClientFingerprint{
+		TLSFingerprint: tlsfp.TLSClientFingerprint{
 			JA3Hash: "ja3",
 			JA4:     "ja4",
 		},
@@ -1277,7 +1277,7 @@ func TestInspectWebSocketPayloadUsesCachedTLSHandshakeMetadata(t *testing.T) {
 	ctx.Request.Header.SetMethod("GET")
 	ctx.Request.SetRequestURI("/ws")
 	ctx.Request.Header.SetHost("ws-tls.example.com")
-	ctx.Set(tlsFingerprintContextKey, bot.TLSClientFingerprint{
+	ctx.Set(tlsFingerprintContextKey, tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		SNI:        "client.example",
 		ALPN:       []string{"h2"},
@@ -1300,9 +1300,9 @@ func TestFixURIConnForwardsTLSFingerprint(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	wrapped := bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
+	wrapped := tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "real"})
 	fixed := &FixURIConn{Conn: wrapped}
-	fp, ok := bot.TLSFingerprintFromConn(fixed)
+	fp, ok := tlsfp.TLSFingerprintFromConn(fixed)
 	if !ok || fp.TLSVersion != "TLS13" || fp.JA3Hash != "real" {
 		t.Fatalf("expected FixURIConn to forward TLS fingerprint, got ok=%v fp=%+v", ok, fp)
 	}
@@ -1313,7 +1313,7 @@ func TestFixURIWrappersForwardHandshakeInfoThroughNetConn(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	parsed := bot.TLSClientFingerprint{
+	parsed := tlsfp.TLSClientFingerprint{
 		JA3Hash:    "ja3",
 		JA4:        "ja4",
 		TLSVersion: "TLS13",
@@ -1337,7 +1337,7 @@ func TestFixURIWrappersForwardHandshakeInfoThroughNetConn(t *testing.T) {
 	if fp.TLSVersion != "TLS12" || fp.SNI != "client.example" || len(fp.ALPN) != 1 || fp.ALPN[0] != "http/1.1" {
 		t.Fatalf("expected final handshake metadata to reach peekConn, got %+v", fp)
 	}
-	got, ok := bot.TLSFingerprintFromConn(hertzConn)
+	got, ok := tlsfp.TLSFingerprintFromConn(hertzConn)
 	if !ok {
 		t.Fatal("expected Hertz connection to expose TLS fingerprint")
 	}
@@ -1347,7 +1347,7 @@ func TestFixURIWrappersForwardHandshakeInfoThroughNetConn(t *testing.T) {
 }
 
 func TestContextWithTLSHandshakeInfoPreservesParsedFingerprint(t *testing.T) {
-	ctx := ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	ctx := ContextWithTLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		JA3Hash: "ja3",
 		JA4:     "ja4",
 		SNI:     "client.example",
@@ -1369,7 +1369,7 @@ func TestContextWithTLSHandshakeInfoPreservesParsedFingerprint(t *testing.T) {
 }
 
 func TestContextWithTLSHandshakeInfoClearsOfferedALPNWhenNegotiatedEmpty(t *testing.T) {
-	ctx := ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	ctx := ContextWithTLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		JA3Hash: "ja3",
 		JA4:     "ja4",
 		SNI:     "client.example",
@@ -1392,7 +1392,7 @@ func TestContextWithTLSHandshakeInfoClearsOfferedALPNWhenNegotiatedEmpty(t *test
 
 func TestTLSFingerprintFromRequestContextUsesCachedValue(t *testing.T) {
 	ctx := app.NewContext(0)
-	want := bot.TLSClientFingerprint{JA3Hash: "cached-ja3", JA4: "cached-ja4", TLSVersion: "TLS13"}
+	want := tlsfp.TLSClientFingerprint{JA3Hash: "cached-ja3", JA4: "cached-ja4", TLSVersion: "TLS13"}
 	ctx.Set(tlsFingerprintContextKey, want)
 
 	got, ok := tlsFingerprintFromRequestContext(ctx)
@@ -1409,9 +1409,9 @@ func TestTLSFingerprintFromRequestContextFallsBackToConnectionCarrier(t *testing
 	defer client.Close()
 	defer server.Close()
 
-	want := bot.TLSClientFingerprint{JA3Hash: "conn-ja3", JA4: "conn-ja4", TLSVersion: "TLS13"}
+	want := tlsfp.TLSClientFingerprint{JA3Hash: "conn-ja3", JA4: "conn-ja4", TLSVersion: "TLS13"}
 	ctx := app.NewContext(0)
-	ctx.SetConn(&testHertzConn{Conn: bot.WrapFingerprintConn(server, want)})
+	ctx.SetConn(&testHertzConn{Conn: tlsfp.WrapFingerprintConn(server, want)})
 
 	got, ok := tlsFingerprintFromRequestContext(ctx)
 	if !ok {
@@ -1424,7 +1424,7 @@ func TestTLSFingerprintFromRequestContextFallsBackToConnectionCarrier(t *testing
 	if !exists {
 		t.Fatal("expected connection fingerprint to be cached in request context")
 	}
-	if cachedFP, ok := cached.(bot.TLSClientFingerprint); !ok || cachedFP.JA3Hash != want.JA3Hash {
+	if cachedFP, ok := cached.(tlsfp.TLSClientFingerprint); !ok || cachedFP.JA3Hash != want.JA3Hash {
 		t.Fatalf("unexpected cached connection fingerprint: %+v", cached)
 	}
 }

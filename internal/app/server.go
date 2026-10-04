@@ -53,7 +53,8 @@ import (
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/antireplay"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/geoip"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/drop"
@@ -400,18 +401,18 @@ func Run() {
 	eng.SetDropExecutor(dropExec)
 
 	// GeoIP resolver for bot two-phase scoring (graceful degradation if DB missing).
-	var geoResolver *bot.MaxMindResolver
+	var geoResolver *geoip.MaxMindResolver
 	botCfg := rt.Config.Bot
 	// loadedGeoIPPath 记录 resolver 当前打开的库路径，供 reload 时判断是否需要换库。
 	loadedGeoIPPath := botCfg.GeoIPDBPath
 	if botCfg.Enabled {
-		geoResolver = bot.NewMaxMindResolver(botCfg.GeoIPDBPath, botCfg.GeoIPDBPath, botCfg)
+		geoResolver = geoip.NewMaxMindResolver(botCfg.GeoIPDBPath, botCfg.GeoIPDBPath, botCfg)
 		// 持有 city/asn 两个 maxminddb 文件句柄，与本函数里其余资源一样在退出时释放。
 		// 放在这里而不是函数开头：Close 会取锁，nil 接收者会 panic。
 		defer geoResolver.Close()
 		eng.SetGeoResolver(geoResolver, botCfg.ScoreThreshold)
 		// Also set the global GeoResolver so LookupGeo works everywhere.
-		bot.SetGeoResolver(geoResolver)
+		geoip.SetGeoResolver(geoResolver)
 	}
 
 	configSyncLog := logger.New("config_sync")
@@ -1486,7 +1487,7 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 					state := tlsConn.ConnectionState()
 					setTLSHandshakeInfo(conn, state)
 					if needsClientHelloFingerprint {
-						if fp, ok := bot.TLSFingerprintFromConn(conn); ok {
+						if fp, ok := tlsfp.TLSFingerprintFromConn(conn); ok {
 							ctx = dataplane.ContextWithTLSFingerprint(ctx, fp)
 						}
 					}

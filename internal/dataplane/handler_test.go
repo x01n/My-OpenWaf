@@ -36,7 +36,7 @@ import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/antireplay"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/challenge/gm"
 	"My-OpenWaf/internal/waf/challenge/powdata"
@@ -492,7 +492,7 @@ func TestHandlerFinalizesInternalEndpointAccessLogWithFingerprint(t *testing.T) 
 	ctx := app.NewContext(0)
 	ctx.Request.SetMethod(http.MethodGet)
 	ctx.Request.SetRequestURI("/__owaf/pow_glue.js")
-	fp := bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-internal", JA4: "ja4-internal"}
+	fp := tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-internal", JA4: "ja4-internal"}
 	handler(ContextWithTLSFingerprint(context.Background(), fp), ctx)
 	writer.Close()
 
@@ -1353,7 +1353,7 @@ func TestHandlerChallengeVerifyWritesSpecificAccessLog(t *testing.T) {
 		"__waf_captcha_session": {"missing"},
 		"__waf_captcha_answer":  {"wrong"},
 	})
-	fp := bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-challenge-log", JA4: "ja4-challenge-log"}
+	fp := tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-challenge-log", JA4: "ja4-challenge-log"}
 	handler(ContextWithTLSFingerprint(context.Background(), fp), ctx)
 	requestID := string(ctx.Response.Header.Peek("X-Request-ID"))
 	if requestID == "" {
@@ -2321,7 +2321,7 @@ func TestBuildAccessLogEntryPersistsTLSCipherSuites(t *testing.T) {
 		SiteID:     1,
 		StatusCode: 403,
 		WAFAction:  "intercept",
-		TLSFingerprint: bot.TLSClientFingerprint{
+		TLSFingerprint: tlsfp.TLSClientFingerprint{
 			CipherSuites: []uint16{4865, 4866},
 		},
 	})
@@ -2336,7 +2336,7 @@ func TestBuildAccessLogEntryPersistsTLSShapeMetadata(t *testing.T) {
 		SiteID:     1,
 		StatusCode: 403,
 		WAFAction:  "intercept",
-		TLSFingerprint: bot.TLSClientFingerprint{
+		TLSFingerprint: tlsfp.TLSClientFingerprint{
 			Extensions:   []uint16{0, 16, 43},
 			Curves:       []uint16{29, 23},
 			PointFormats: []uint8{0},
@@ -2358,7 +2358,7 @@ func TestBuildAccessLogEntryPersistsVisitorFusionOnlyForReleasedHTTPS(t *testing
 	ctx.Request.Header.Set("Sec-CH-UA", `"Chromium";v="123"`)
 	ctx.Request.Header.Set("Accept", "text/html")
 	ctx.Request.Header.Set("Accept-Encoding", "gzip, br")
-	fp := bot.TLSClientFingerprint{
+	fp := tlsfp.TLSClientFingerprint{
 		JA3:        "771,4865,0,29,0",
 		JA4:        "t13d1516h2_0123456789ab_0123456789ab",
 		TLSVersion: "TLS13",
@@ -2406,7 +2406,7 @@ func TestBuildAccessLogEntryPersistsVisitorFusionOnlyForReleasedHTTPS(t *testing
 func TestShouldEvaluateVisitorFusionRejectsTerminalActions(t *testing.T) {
 	base := accessLogInfo{
 		VisitorFusionEligible: true,
-		TLSFingerprint:        bot.TLSClientFingerprint{TLSVersion: "TLS13"},
+		TLSFingerprint:        tlsfp.TLSClientFingerprint{TLSVersion: "TLS13"},
 		VisitorFusionAction:   action.Result{Matched: true, Type: action.Observe},
 	}
 	if !shouldEvaluateVisitorFusion(base) {
@@ -2447,7 +2447,7 @@ func TestRecordSecurityEventAddsTLSMetadata(t *testing.T) {
 	ctx.Request.SetRequestURI("/tls-security-event?q=1")
 	ctx.Request.Header.Set("Host", "127.0.0.1")
 	ctx.Request.Header.Set("User-Agent", "tls-security-event-test")
-	reqCtx := ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	reqCtx := ContextWithTLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		JA3:          "771,4865-4866,0-11,29,0",
 		JA3Hash:      "0123456789abcdef0123456789abcdef",
 		JA4:          "t13d1516h2_aaaaaaaaaaaa_bbbbbbbbbbbb",
@@ -2792,7 +2792,7 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 	ctx.Request.Header.Set("Authorization", "Bearer req-secret")
 	ctx.Request.SetBody([]byte(`{"username":"alice","password":"secret"}`))
 
-	handler(ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	handler(ContextWithTLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		SNI:        "client.example",
 		ALPN:       []string{"h3"},
@@ -2929,7 +2929,7 @@ func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 	ctx.Request.Header.Set(InternalHTTP3TLSJA3HashHeader, "0123456789abcdef0123456789abcdef")
 	ctx.Request.Header.Set(InternalHTTP3TLSJA4Header, "q13d0511h3_fea09b2e4d67_1234567890ab")
 	ctx.SetConn(&loopbackHertzConn{
-		Conn: &testHertzConn{Conn: bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+		Conn: &testHertzConn{Conn: tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{
 			TLSVersion: "TLS13",
 			SNI:        "proxy.example",
 			ALPN:       []string{"h2"},
@@ -3050,7 +3050,7 @@ func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalB
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	ctx.Request.SetBody([]byte(`{"token":"body-secret","status":"attempt"}`))
 
-	handler(ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	handler(ContextWithTLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		SNI:        "blocked.example.com",
 		ALPN:       []string{"h2"},
@@ -3169,7 +3169,7 @@ func TestHandlerRecordsProtocolEarlyAccessLog(t *testing.T) {
 	ctx.Request.SetRequestURI("/protocol-limit")
 	ctx.Request.Header.SetHost("headers.example.test")
 	ctx.Request.Header.Add("X-Header", "v")
-	fp := bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-431", JA4: "ja4-431"}
+	fp := tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-431", JA4: "ja4-431"}
 	handler(ContextWithTLSFingerprint(context.Background(), fp), ctx)
 	writer.Close()
 
@@ -4090,7 +4090,7 @@ func TestHandlerMatchesInternalHTTP3TLSFingerprintRules(t *testing.T) {
 				ctx.Request.Header.Set(key, value)
 			}
 			ctx.SetConn(&loopbackHertzConn{
-				Conn: &testHertzConn{Conn: bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+				Conn: &testHertzConn{Conn: tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{
 					TLSVersion: "TLS13",
 					JA3Hash:    "proxy-ja3",
 					JA4:        "proxy-ja4",
@@ -4422,7 +4422,7 @@ func TestHandlerFinalizesEarlyExitAccessLog(t *testing.T) {
 	ctx.Request.SetMethod(http.MethodGet)
 	ctx.Request.SetRequestURI("/unmatched")
 	ctx.Request.SetHost("unknown.example.test")
-	handler(ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	handler(ContextWithTLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		JA3Hash:    "ja3-early",
 		JA4:        "ja4-early",
 		TLSVersion: "TLS13",
@@ -4491,7 +4491,7 @@ func TestFinalizeUnrecordedAccessLogRecordsClientCancelWithStatusZero(t *testing
 	c.Request.SetMethod(http.MethodGet)
 	c.Request.SetRequestURI("/client-cancelled")
 	c.Request.SetHost("cancelled.example.test")
-	fp := bot.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-cancelled", JA4: "ja4-cancelled"}
+	fp := tlsfp.TLSClientFingerprint{TLSVersion: "TLS13", JA3Hash: "ja3-cancelled", JA4: "ja4-cancelled"}
 	c.Set(tlsFingerprintContextKey, fp)
 	c.Response.SetStatusCode(http.StatusOK)
 
@@ -4526,7 +4526,7 @@ func TestHandlerRecordsAccessLogForUnmatchedSiteRoute(t *testing.T) {
 	ctx.Request.SetMethod(http.MethodGet)
 	ctx.Request.SetRequestURI("/unmatched")
 	ctx.Request.SetHost("unknown.example.test")
-	handler(ContextWithTLSFingerprint(context.Background(), bot.TLSClientFingerprint{
+	handler(ContextWithTLSFingerprint(context.Background(), tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		JA3Hash:    "ja3-unmatched",
 		JA4:        "ja4-unmatched",

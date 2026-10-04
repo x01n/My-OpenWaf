@@ -3,10 +3,13 @@ package bot
 import (
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"My-OpenWaf/internal/waf/bot/geoip"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/iprep"
 )
 
@@ -193,7 +196,7 @@ type BotRequest struct {
 	Connection     string
 	HasCookie      bool
 	ClientIP       net.IP
-	TLS            TLSClientFingerprint
+	TLS            tlsfp.TLSClientFingerprint
 }
 
 func NewBotRequest(method, path string, headers map[string]string) BotRequest {
@@ -335,7 +338,7 @@ func verifyGoodBotDNS(ip net.IP, patternIdx int) bool {
 	return verified
 }
 
-func PreScreen(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver) bool {
+func PreScreen(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindResolver) bool {
 	ua := strings.TrimSpace(r.UserAgent)
 	if _, _, ok := matchMaliciousToolUA(ua); ok {
 		return true
@@ -669,16 +672,16 @@ func clampModule(score int) int {
 }
 
 // DeepScore 计算完整 bot 评分（不带行为信号）。
-func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver) BotScore {
+func DeepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindResolver) BotScore {
 	return deepScore(r, ipRepSvc, geo, 0)
 }
 
 // DeepScoreWithBehavior 在完整评分中并入行为模块原始分（请求频率）。
-func DeepScoreWithBehavior(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver, behaviorScore int) BotScore {
+func DeepScoreWithBehavior(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindResolver, behaviorScore int) BotScore {
 	return deepScore(r, ipRepSvc, geo, behaviorScore)
 }
 
-func deepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver, behaviorScore int) BotScore {
+func deepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindResolver, behaviorScore int) BotScore {
 	// Details 保持 nil 直到首个 detail 写入：干净流量不产生 map 分配。
 	// 写入统一走 setDetail，nil map 时提前分配，天然保持旧行为。
 	var bs BotScore
@@ -713,7 +716,7 @@ func deepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver,
 	}
 
 	fpScore, fpReasons := fingerprintScore(r)
-	hoScore, hoReasons := headerOrderScore(r)
+	hoScore, hoReasons := headerOrderScore(r.HeaderKeys)
 	raw.Fingerprint = fpScore + hoScore
 	fpReasons = append(fpReasons, hoReasons...)
 	if len(fpReasons) > 0 {
@@ -857,7 +860,7 @@ func fingerprintScore(r BotRequest) (score int, reasons []string) {
  * @param threshold 处置阈值，默认 80。
  * @return 判定结果与完整加权评分。
  */
-func CheckBotTwoPhase(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver, threshold int) (BotVerdict, BotScore) {
+func CheckBotTwoPhase(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindResolver, threshold int) (BotVerdict, BotScore) {
 	if !PreScreen(r, ipRepSvc, geo) {
 		return BotVerdict{IsBot: false, Score: 0, Tier: TierPass, Category: "human", Reason: "pre-screen passed", RuleID: "bot:prescreen"}, BotScore{}
 	}
@@ -892,7 +895,7 @@ func CheckBotTwoPhase(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindRe
  * @param behaviorScore 行为模块原始分。
  * @return 判定结果与完整加权评分。
  */
-func CheckBotTwoPhaseWithBehavior(r BotRequest, ipRepSvc *iprep.IPReputation, geo *MaxMindResolver, threshold, behaviorScore int) (BotVerdict, BotScore) {
+func CheckBotTwoPhaseWithBehavior(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindResolver, threshold, behaviorScore int) (BotVerdict, BotScore) {
 	if !PreScreen(r, ipRepSvc, geo) {
 		return BotVerdict{IsBot: false, Score: 0, Tier: TierPass, Category: "human", Reason: "pre-screen passed", RuleID: "bot:prescreen"}, BotScore{}
 	}
@@ -979,4 +982,36 @@ func (bs *BotScore) TotalReason() string {
 		return "two-phase score"
 	}
 	return b.String()
+}
+
+func headerOrderScore(headerKeys []string) (int, []string) {
+	if len(headerKeys) == 0 {
+		return 0, nil
+	}
+	lower := make([]string, 0, len(headerKeys))
+	for _, key := range headerKeys {
+		lower = append(lower, strings.ToLower(strings.TrimSpace(key)))
+	}
+	score := 0
+	var reasons []string
+	if sort.StringsAreSorted(lower) && len(lower) >= 5 {
+		score += 8
+		reasons = append(reasons, "alphabetic_header_order")
+	}
+	if containsHeader(lower, "user-agent") && containsHeader(lower, "host") && indexHeader(lower, "user-agent") < indexHeader(lower, "host") {
+		score += 6
+		reasons = append(reasons, "ua_before_host")
+	}
+	return score, reasons
+}
+
+func containsHeader(keys []string, target string) bool { return indexHeader(keys, target) >= 0 }
+
+func indexHeader(keys []string, target string) int {
+	for i, key := range keys {
+		if key == target {
+			return i
+		}
+	}
+	return -1
 }

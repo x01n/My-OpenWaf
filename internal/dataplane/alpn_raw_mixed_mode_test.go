@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -8,8 +9,6 @@ import (
 	"net"
 	"reflect"
 	"testing"
-
-	"My-OpenWaf/internal/waf/bot"
 )
 
 // TestPeekConnALPNRawSurvivesNegotiatedH1 is the end-to-end guard for the
@@ -34,7 +33,7 @@ func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
 		t.Fatal("prefix read altered the payload")
 	}
 
-	fp, ok := bot.TLSFingerprintFromConn(wrapped)
+	fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("fingerprint missing after first read")
 	}
@@ -45,7 +44,7 @@ func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
 	// Server negotiates http/1.1 (e.g. max TLS version below 1.2 strips h2).
 	setTLSHandshakeInfoOnConn(wrapped, "TLS13", "example.com", "http/1.1")
 
-	after, ok := bot.TLSFingerprintFromConn(wrapped)
+	after, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("fingerprint missing after handshake info")
 	}
@@ -69,7 +68,7 @@ func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
 func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
 	inner := &bytesConnForBenchmark{}
 	conn := NewFixURIConn(inner).(*FixURIConn)
-	conn.fingerprint = bot.TLSClientFingerprint{
+	conn.fingerprint = tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS12",
 		SNI:        "example.com",
 		ALPN:       []string{"h2", "http/1.1"},
@@ -78,7 +77,7 @@ func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
 
 	setTLSHandshakeInfoOnConn(conn, "TLS13", "example.com", "http/1.1")
 
-	fp, ok := bot.TLSFingerprintFromConn(conn)
+	fp, ok := tlsfp.TLSFingerprintFromConn(conn)
 	if !ok {
 		t.Fatal("fingerprint missing")
 	}
@@ -99,11 +98,11 @@ func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
 func TestFixURIConnALPNRawBackfilledWhenAbsent(t *testing.T) {
 	inner := &bytesConnForBenchmark{}
 	conn := NewFixURIConn(inner).(*FixURIConn)
-	conn.fingerprint = bot.TLSClientFingerprint{TLSVersion: "TLS12", ALPN: []string{"h2"}}
+	conn.fingerprint = tlsfp.TLSClientFingerprint{TLSVersion: "TLS12", ALPN: []string{"h2"}}
 
 	setTLSHandshakeInfoOnConn(conn, "", "", "h2")
 
-	fp, _ := bot.TLSFingerprintFromConn(conn)
+	fp, _ := tlsfp.TLSFingerprintFromConn(conn)
 	if want := []string{"h2"}; !reflect.DeepEqual(fp.ALPNRaw, want) {
 		t.Fatalf("ALPNRaw = %+v, want %+v", fp.ALPNRaw, want)
 	}
@@ -113,7 +112,7 @@ func TestFixURIConnALPNRawBackfilledWhenAbsent(t *testing.T) {
 // point: the context-carried fingerprint must keep the declared list when the
 // handshake reports a different negotiated protocol.
 func TestContextWithTLSHandshakeInfoKeepsALPNRaw(t *testing.T) {
-	base := bot.TLSClientFingerprint{
+	base := tlsfp.TLSClientFingerprint{
 		JA3Hash: "a1f6c4ad2b63a0149a2e61e4bcc30c8c",
 		JA4:     "t13d1312h2_f57a46bbacb6_f50d94e863eb",
 		ALPN:    []string{"h2", "http/1.1"},

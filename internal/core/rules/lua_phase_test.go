@@ -10,7 +10,7 @@ import (
 
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/pipeline"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/luaplugin"
 )
 
@@ -197,7 +197,7 @@ func TestBuildLuaRequestViewMapsFields(t *testing.T) {
 		ContentType: "application/json",
 		Headers:     map[string]string{"x-forwarded-for": "1.2.3.4"},
 		Body:        []byte(`{"u":"admin"}`),
-		TLS: bot.TLSClientFingerprint{
+		TLS: tlsfp.TLSClientFingerprint{
 			TLSVersion: "TLS13", JA3Hash: "abc", JA4: "t13d", SNI: "app.example.com",
 		},
 	}

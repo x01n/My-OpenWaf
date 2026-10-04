@@ -1,4 +1,4 @@
-package bot
+package tlsfp
 
 import (
 	"crypto/md5"
@@ -7,12 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"sort"
 	"strconv"
-	"strings"
 	"unsafe"
 
 	"My-OpenWaf/internal/tlsmeta"
+
 	utls "github.com/refraction-networking/utls"
 )
 
@@ -952,36 +951,4 @@ func isGREASE(v uint16) bool {
 
 func tlsVersionString(v uint16) string {
 	return tlsmeta.CanonicalVersionName(v)
-}
-
-func headerOrderScore(r BotRequest) (int, []string) {
-	if len(r.HeaderKeys) == 0 {
-		return 0, nil
-	}
-	lower := make([]string, 0, len(r.HeaderKeys))
-	for _, key := range r.HeaderKeys {
-		lower = append(lower, strings.ToLower(strings.TrimSpace(key)))
-	}
-	score := 0
-	var reasons []string
-	if sort.StringsAreSorted(lower) && len(lower) >= 5 {
-		score += 8
-		reasons = append(reasons, "alphabetic_header_order")
-	}
-	if containsHeader(lower, "user-agent") && containsHeader(lower, "host") && indexHeader(lower, "user-agent") < indexHeader(lower, "host") {
-		score += 6
-		reasons = append(reasons, "ua_before_host")
-	}
-	return score, reasons
-}
-
-func containsHeader(keys []string, target string) bool { return indexHeader(keys, target) >= 0 }
-
-func indexHeader(keys []string, target string) int {
-	for i, key := range keys {
-		if key == target {
-			return i
-		}
-	}
-	return -1
 }

@@ -1,4 +1,4 @@
-package bot
+package geoip
 
 import (
 	"crypto/sha256"

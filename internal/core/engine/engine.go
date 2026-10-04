@@ -12,7 +12,7 @@ import (
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/antireplay"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/geoip"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/drop"
 	"My-OpenWaf/internal/waf/escalation"
@@ -73,7 +73,7 @@ type phasesSnapshot struct {
 type phaseRuntimeConfig struct {
 	reqRateLimiter ratelimit.RateLimiterBackend
 	antiReplay     *antireplay.AntiReplayManager
-	geoResolver    *bot.MaxMindResolver
+	geoResolver    *geoip.MaxMindResolver
 	botThreshold   int
 }
 
@@ -160,7 +160,7 @@ func (e *Engine) updatePhaseDeps(mutator func(*phaseRuntimeConfig)) {
 }
 
 // SetGeoResolver attaches a MaxMind GeoIP resolver for bot two-phase scoring.
-func (e *Engine) SetGeoResolver(geo *bot.MaxMindResolver, threshold int) {
+func (e *Engine) SetGeoResolver(geo *geoip.MaxMindResolver, threshold int) {
 	if e == nil {
 		return
 	}

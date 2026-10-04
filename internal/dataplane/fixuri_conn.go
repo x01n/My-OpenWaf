@@ -1,18 +1,17 @@
 package dataplane
 
 import (
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"bytes"
 	"crypto/tls"
 	"net"
-
-	"My-OpenWaf/internal/waf/bot"
 )
 
 type FixURIConn struct {
 	net.Conn
 	checked     bool
 	prefix      []byte
-	fingerprint bot.TLSClientFingerprint
+	fingerprint tlsfp.TLSClientFingerprint
 }
 
 func NewFixURIConn(conn net.Conn) net.Conn {
@@ -37,8 +36,8 @@ func (c *FixURIConn) ConnectionState() tls.ConnectionState {
 	return tls.ConnectionState{}
 }
 
-func (c *FixURIConn) TLSFingerprint() (bot.TLSClientFingerprint, bool) {
-	if fp, ok := bot.TLSFingerprintFromConn(c.Conn); ok {
+func (c *FixURIConn) TLSFingerprint() (tlsfp.TLSClientFingerprint, bool) {
+	if fp, ok := tlsfp.TLSFingerprintFromConn(c.Conn); ok {
 		return fp, true
 	}
 	return c.fingerprint, c.fingerprint.HasValue()

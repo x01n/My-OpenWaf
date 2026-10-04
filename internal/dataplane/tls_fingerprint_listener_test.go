@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"bytes"
 	"crypto/tls"
 	"fmt"
@@ -10,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"My-OpenWaf/internal/waf/bot"
 )
 
 func TestTLSFingerprintListenerParsesLargeClientHello(t *testing.T) {
@@ -28,7 +27,7 @@ func TestTLSFingerprintListenerParsesLargeClientHello(t *testing.T) {
 	defer conn.Close()
 
 	wrapped := newTLSFingerprintConn(conn)
-	if _, ok := bot.TLSFingerprintFromConn(wrapped); ok {
+	if _, ok := tlsfp.TLSFingerprintFromConn(wrapped); ok {
 		t.Fatal("fingerprint should be empty before the first read")
 	}
 
@@ -40,7 +39,7 @@ func TestTLSFingerprintListenerParsesLargeClientHello(t *testing.T) {
 		t.Fatal("wrapped connection did not replay the complete client hello record")
 	}
 
-	fp, ok := bot.TLSFingerprintFromConn(wrapped)
+	fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("expected parsed TLS fingerprint after the first read")
 	}
@@ -61,7 +60,7 @@ func TestTLSFingerprintListenerParsesMaxPayloadClientHello(t *testing.T) {
 	if recordLen != maxClientHelloRecord {
 		t.Fatalf("TLS record payload length = %d, want %d", recordLen, maxClientHelloRecord)
 	}
-	if _, err := bot.ParseTLSClientHello(record); err != nil {
+	if _, err := tlsfp.ParseTLSClientHello(record); err != nil {
 		t.Fatalf("test ClientHello must be parseable: %v", err)
 	}
 
@@ -77,7 +76,7 @@ func TestTLSFingerprintListenerParsesMaxPayloadClientHello(t *testing.T) {
 		t.Fatal("wrapped connection did not replay the max payload client hello record")
 	}
 
-	fp, ok := bot.TLSFingerprintFromConn(wrapped)
+	fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("expected parsed TLS fingerprint for max payload ClientHello")
 	}
@@ -91,7 +90,7 @@ func TestTLSFingerprintListenerParsesFragmentedClientHello(t *testing.T) {
 		ServerName: "fragmented.example",
 		NextProtos: []string{"h2", "http/1.1"},
 	})
-	want, err := bot.ParseTLSClientHello(record)
+	want, err := tlsfp.ParseTLSClientHello(record)
 	if err != nil {
 		t.Fatalf("test ClientHello must be parseable: %v", err)
 	}
@@ -112,7 +111,7 @@ func TestTLSFingerprintListenerParsesFragmentedClientHello(t *testing.T) {
 		t.Fatal("wrapped connection did not replay the complete fragmented client hello")
 	}
 
-	fp, ok := bot.TLSFingerprintFromConn(wrapped)
+	fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("expected parsed TLS fingerprint for fragmented ClientHello")
 	}
@@ -132,7 +131,7 @@ func TestTLSFingerprintListenerParsesClientHelloHeaderSplitAcrossRecords(t *test
 		ServerName: "split-header.example",
 		NextProtos: []string{"h2", "http/1.1"},
 	})
-	want, err := bot.ParseTLSClientHello(record)
+	want, err := tlsfp.ParseTLSClientHello(record)
 	if err != nil {
 		t.Fatalf("test ClientHello must be parseable: %v", err)
 	}
@@ -153,7 +152,7 @@ func TestTLSFingerprintListenerParsesClientHelloHeaderSplitAcrossRecords(t *test
 				t.Fatal("wrapped connection did not replay the split ClientHello header")
 			}
 
-			fp, ok := bot.TLSFingerprintFromConn(wrapped)
+			fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 			if !ok {
 				t.Fatal("expected parsed TLS fingerprint for split ClientHello header")
 			}
@@ -175,7 +174,7 @@ func TestTLSFingerprintListenerParsesClientHelloWithTrailingHandshakeBytes(t *te
 		ServerName: "trailing.example",
 		NextProtos: []string{"http/1.1"},
 	})
-	want, err := bot.ParseTLSClientHello(record)
+	want, err := tlsfp.ParseTLSClientHello(record)
 	if err != nil {
 		t.Fatalf("test ClientHello must be parseable: %v", err)
 	}
@@ -200,7 +199,7 @@ func TestTLSFingerprintListenerParsesClientHelloWithTrailingHandshakeBytes(t *te
 		t.Fatal("wrapped connection did not replay trailing handshake bytes")
 	}
 
-	fp, ok := bot.TLSFingerprintFromConn(wrapped)
+	fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
 		t.Fatal("expected parsed TLS fingerprint for ClientHello with trailing handshake bytes")
 	}
@@ -222,7 +221,7 @@ func TestPeekConnSetTLSHandshakeInfoClearsOfferedALPNWhenNegotiatedEmpty(t *test
 
 	pc := &peekConn{
 		Conn: server,
-		fingerprint: bot.TLSClientFingerprint{
+		fingerprint: tlsfp.TLSClientFingerprint{
 			JA3Hash: "ja3",
 			JA4:     "ja4",
 			SNI:     "client.example",
@@ -250,7 +249,7 @@ func TestTLSFingerprintListenerReplaysNonTLSPrefix(t *testing.T) {
 	defer conn.Close()
 
 	wrapped := newTLSFingerprintConn(conn)
-	if _, ok := bot.TLSFingerprintFromConn(wrapped); ok {
+	if _, ok := tlsfp.TLSFingerprintFromConn(wrapped); ok {
 		t.Fatal("non-TLS payload should not produce a TLS fingerprint before read")
 	}
 
@@ -261,7 +260,7 @@ func TestTLSFingerprintListenerReplaysNonTLSPrefix(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("wrapped payload = %q, want %q", got, payload)
 	}
-	if _, ok := bot.TLSFingerprintFromConn(wrapped); ok {
+	if _, ok := tlsfp.TLSFingerprintFromConn(wrapped); ok {
 		t.Fatal("non-TLS payload should not produce a TLS fingerprint after read")
 	}
 }
@@ -292,7 +291,7 @@ func TestTLSFingerprintListenerAcceptDoesNotReadClientHello(t *testing.T) {
 			t.Fatal("Accept returned nil connection")
 		}
 		defer res.conn.Close()
-		if _, ok := bot.TLSFingerprintFromConn(res.conn); ok {
+		if _, ok := tlsfp.TLSFingerprintFromConn(res.conn); ok {
 			t.Fatal("fingerprint should be empty before the first read")
 		}
 	case <-time.After(200 * time.Millisecond):
@@ -367,7 +366,7 @@ func benchmarkTLSFingerprintConn(b *testing.B, record []byte) {
 		if _, err := io.ReadFull(wrapped, buf); err != nil {
 			b.Fatalf("read wrapped record: %v", err)
 		}
-		fp, ok := bot.TLSFingerprintFromConn(wrapped)
+		fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 		if !ok || fp.JA3 == "" || fp.JA3Hash == "" || fp.JA4 == "" {
 			b.Fatalf("unexpected fingerprint: %+v, ok=%v", fp, ok)
 		}
@@ -386,7 +385,7 @@ func benchmarkTLSFingerprintConnCore(b *testing.B, record []byte) {
 		if _, err := io.ReadFull(wrapped, buf); err != nil {
 			b.Fatalf("read wrapped record: %v", err)
 		}
-		fp, ok := bot.TLSFingerprintFromConn(wrapped)
+		fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 		if !ok || fp.JA3 == "" || fp.JA3Hash == "" || fp.JA4 == "" {
 			b.Fatalf("unexpected fingerprint: %+v, ok=%v", fp, ok)
 		}

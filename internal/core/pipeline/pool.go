@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	"My-OpenWaf/internal/core/action"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
 // 池对象容量上限：超过则在 Release 时重建，避免高并发偶发超大请求
@@ -52,7 +52,7 @@ func ReleaseCtx(ctx *RequestCtx) {
 	ctx.HeadersLowercase = false
 	ctx.Body = nil
 	ctx.ContentType = ""
-	ctx.TLS = bot.TLSClientFingerprint{}
+	ctx.TLS = tlsfp.TLSClientFingerprint{}
 	ctx.AntiReplayTTL = 0
 	ctx.AntiReplayConsumedNonce = ""
 	ctx.QueryParams = nil

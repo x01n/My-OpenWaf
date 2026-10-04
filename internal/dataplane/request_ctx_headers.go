@@ -12,7 +12,7 @@ import (
 
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/security"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
 const (
@@ -270,7 +270,7 @@ func applyInternalHTTP3RequestMetadata(c *app.RequestContext) {
 		return
 	}
 
-	fp := bot.TLSClientFingerprint{}
+	fp := tlsfp.TLSClientFingerprint{}
 	if version != "" {
 		fp.TLSVersion = version
 	}

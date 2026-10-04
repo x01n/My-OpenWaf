@@ -25,6 +25,7 @@ import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/iprep"
 )
@@ -263,7 +264,7 @@ func (l *botTestLimiter) Close()                      {}
 func TestCtxFromPipelineAddsTLSSNIHeader(t *testing.T) {
 	ctx := &pipeline.RequestCtx{
 		Headers: map[string]string{"User-Agent": "Mozilla/5.0"},
-		TLS: bot.TLSClientFingerprint{
+		TLS: tlsfp.TLSClientFingerprint{
 			SNI: "login.example.com",
 		},
 	}
@@ -280,7 +281,7 @@ func TestCtxFromPipelineAddsTLSSNIHeader(t *testing.T) {
 func TestCtxFromPipelineAddsTLSCipherSuitesHeader(t *testing.T) {
 	ctx := &pipeline.RequestCtx{
 		Headers: map[string]string{"User-Agent": "Mozilla/5.0"},
-		TLS: bot.TLSClientFingerprint{
+		TLS: tlsfp.TLSClientFingerprint{
 			CipherSuites: []uint16{4865, 4866},
 		},
 	}
@@ -296,7 +297,7 @@ func TestCtxFromPipelinePreservesDerivedContextFields(t *testing.T) {
 	ctx := &pipeline.RequestCtx{
 		Headers: map[string]string{"User-Agent": "Mozilla/5.0"},
 		Host:    "cached.example.com",
-		TLS: bot.TLSClientFingerprint{
+		TLS: tlsfp.TLSClientFingerprint{
 			SNI: "login.example.com",
 		},
 		HeaderKeys: []string{"Host", "User-Agent", "Accept"},
@@ -360,7 +361,7 @@ func TestCustomPhaseUsesDirectTLSContextFields(t *testing.T) {
 	phase := NewCustomPhasePrecompiled(rules)
 	ctx := &pipeline.RequestCtx{
 		Path: "/admin/panel",
-		TLS: bot.TLSClientFingerprint{
+		TLS: tlsfp.TLSClientFingerprint{
 			SNI:        "login.example.com",
 			TLSVersion: "TLS13",
 		},

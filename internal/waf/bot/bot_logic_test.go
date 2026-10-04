@@ -2,6 +2,8 @@ package bot
 
 import (
 	"testing"
+
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
 // --- containsASCIIFold ---
@@ -290,11 +292,28 @@ func TestFingerprintScoreLegacyTLS(t *testing.T) {
 		AcceptHeader:   "text/html",
 		AcceptLanguage: "en-US",
 		AcceptEncoding: "gzip",
-		TLS:            TLSClientFingerprint{TLSVersion: "TLS10"},
+		TLS:            tlsfp.TLSClientFingerprint{TLSVersion: "TLS10"},
 	}
 	_, reasons := fingerprintScore(r)
 	if !containsReason(reasons, "legacy_tls_version") {
 		t.Errorf("TLS10 should trigger legacy_tls_version, got %v", reasons)
+	}
+}
+
+// TestDeepScoreDoesNotTreatJA4PresenceAsRisk 归位自 tlsfp 子包：断言的是 bot 评分模块的语义。
+func TestDeepScoreDoesNotTreatJA4PresenceAsRisk(t *testing.T) {
+	bs := DeepScore(BotRequest{
+		UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+		AcceptHeader:   "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		AcceptLanguage: "en-US,en;q=0.9",
+		AcceptEncoding: "gzip, deflate, br",
+		TLS:            tlsfp.TLSClientFingerprint{JA4: "t13d1516h2_8daaf6152771_e5627efa2ab1"},
+	}, nil, nil)
+	if bs.FingerprintScore != 0 {
+		t.Fatalf("JA4 presence alone should not add fingerprint score, got %d", bs.FingerprintScore)
+	}
+	if bs.IsHighRisk {
+		t.Fatal("benign request with JA4 presence alone should not be high risk")
 	}
 }
 
@@ -440,7 +459,7 @@ func TestDeepScoreEmptyRequestStaysBelowIntercept(t *testing.T) {
 
 func TestDeepScoreTLSDetailsRecorded(t *testing.T) {
 	r := cleanBrowserBotRequest()
-	r.TLS = TLSClientFingerprint{
+	r.TLS = tlsfp.TLSClientFingerprint{
 		JA4:        "t13d1516h2_8daaf6152771_e5627efa2ab1",
 		JA3Hash:    "abc123",
 		TLSVersion: "TLS13",
@@ -622,6 +641,14 @@ func TestPreScreenEmptyUAPassesWhenNoIPRep(t *testing.T) {
 }
 
 // --- helper ---
+
+// TestHeaderOrderScoreDetectsAlphabeticOrder 归位自 tlsfp 子包：被测函数属 bot 评分职责。
+func TestHeaderOrderScoreDetectsAlphabeticOrder(t *testing.T) {
+	score, reasons := headerOrderScore([]string{"accept", "accept-encoding", "host", "user-agent", "x-test"})
+	if score == 0 || len(reasons) == 0 {
+		t.Fatalf("expected suspicious score for alphabetic header order, score=%d reasons=%v", score, reasons)
+	}
+}
 
 func containsReason(reasons []string, target string) bool {
 	for _, r := range reasons {

@@ -9,7 +9,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/core/pipeline"
-	"My-OpenWaf/internal/waf/bot"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
 type stringAddrForTest string
@@ -274,7 +274,7 @@ func TestTLSFingerprintFromRequestContextSkipsProxyConnForInternalHTTP3(t *testi
 	ctx.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
 	ctx.Request.Header.Set("X-Forwarded-Proto", "h3")
 	ctx.SetConn(&loopbackHertzConn{
-		Conn: &testHertzConn{Conn: bot.WrapFingerprintConn(server, bot.TLSClientFingerprint{
+		Conn: &testHertzConn{Conn: tlsfp.WrapFingerprintConn(server, tlsfp.TLSClientFingerprint{
 			TLSVersion: "TLS13",
 			JA3Hash:    "proxy-ja3",
 			JA4:        "proxy-ja4",
@@ -297,7 +297,7 @@ func TestApplyInternalHTTP3RequestMetadataDoesNotMergeProxyTLSFingerprint(t *tes
 	ctx.Request.Header.Set(InternalHTTP3TLSVersionHeader, "TLS13")
 	ctx.Request.Header.Set(InternalHTTP3TLSSNIHeader, "client.example")
 	ctx.Request.Header.Set(InternalHTTP3TLSALPNHeader, "h3")
-	ctx.Set(tlsFingerprintContextKey, bot.TLSClientFingerprint{
+	ctx.Set(tlsFingerprintContextKey, tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS13",
 		SNI:        "proxy.example",
 		ALPN:       []string{"h2"},
