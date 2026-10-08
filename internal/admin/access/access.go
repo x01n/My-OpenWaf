@@ -10,7 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
@@ -45,7 +45,7 @@ type accessConfigResp struct {
  * @param cfg 站点访问控制配置存储模型。
  * @return 脱敏后的响应体，仅暴露共享密码是否已设置。
  */
-func newAccessConfigResp(cfg *store.SiteAccessConfig) accessConfigResp {
+func newAccessConfigResp(cfg *access.SiteAccessConfig) accessConfigResp {
 	return accessConfigResp{
 		SiteID:            cfg.SiteID,
 		Enabled:           cfg.Enabled,
@@ -71,7 +71,7 @@ func GetAccessConfig(repo *repository.AccessControlRepo) app.HandlerFunc {
 		cfg, err := repo.GetSiteAccessConfig(siteID)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(200, newAccessConfigResp(&store.SiteAccessConfig{SiteID: siteID, SessionTTL: defaultSessionTTL}))
+				c.JSON(200, newAccessConfigResp(&access.SiteAccessConfig{SiteID: siteID, SessionTTL: defaultSessionTTL}))
 				return
 			}
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -109,7 +109,7 @@ func SaveAccessConfig(repo *repository.AccessControlRepo, reload func() error) a
 				c.JSON(500, map[string]string{"error": err.Error()})
 				return
 			}
-			cfg = &store.SiteAccessConfig{SiteID: siteID}
+			cfg = &access.SiteAccessConfig{SiteID: siteID}
 		}
 
 		if req.Enabled != nil {

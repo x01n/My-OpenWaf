@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/core/database"
+	"My-OpenWaf/internal/store/approute"
 )
 
 // TestAutoMigrateOnExternalDialect 在真实 MySQL / PostgreSQL 上跑完整 AutoMigrate。
@@ -143,14 +144,14 @@ func assertLogPaginationIndexes(t *testing.T, db *gorm.DB, dialect string) {
 func assertDedupKeyIndexUsable(t *testing.T, db *gorm.DB, dialect string) {
 	t.Helper()
 	now := time.Now().UTC()
-	mk := func() *RecordedResource {
-		return &RecordedResource{
+	mk := func() *approute.RecordedResource {
+		return &approute.RecordedResource{
 			SiteID: 990, Method: "GET", Host: "dialect.test", Path: "/idx", QueryString: "k=1",
 			FirstSeen: now, LastSeen: now, HitCount: 1,
 		}
 	}
 
-	db.Where("site_id = ?", 990).Delete(&RecordedResource{})
+	db.Where("site_id = ?", 990).Delete(&approute.RecordedResource{})
 
 	first := mk()
 	if err := db.Create(first).Error; err != nil {
@@ -164,7 +165,7 @@ func assertDedupKeyIndexUsable(t *testing.T, db *gorm.DB, dialect string) {
 		t.Errorf("%s: 相同 dedup_key 的第二次插入应被唯一索引拒绝", dialect)
 	}
 
-	db.Where("site_id = ?", 990).Delete(&RecordedResource{})
+	db.Where("site_id = ?", 990).Delete(&approute.RecordedResource{})
 }
 
 // assertHourBucketFormat 验证方言相关的小时分桶表达式产出 "YYYY-MM-DD HH:00"。

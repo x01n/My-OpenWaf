@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	dptlsfp "My-OpenWaf/internal/dataplane/tlsfp"
 	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"bytes"
 	"crypto/tls"
@@ -52,7 +53,7 @@ func (c *FixURIConn) SetTLSHandshakeInfo(version string, sni string, alpn string
 	}
 	// 只写协商结果（ALPN）；ALPNRaw 是 ClientHello 声明列表，保持只读。
 	c.fingerprint.SetNegotiatedALPN(alpn)
-	setTLSHandshakeInfoOnConn(c.Conn, version, sni, alpn)
+	dptlsfp.SetTLSHandshakeInfoOnConn(c.Conn, version, sni, alpn)
 }
 
 func (c *FixURIConn) Read(b []byte) (int, error) {

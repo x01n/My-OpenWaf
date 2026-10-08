@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/store"
+	owaspstore "My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/owasp"
 )
@@ -28,8 +29,8 @@ func newSystemSettingsRepoForTest(t *testing.T) *repository.SystemSettingsRepo {
 	if err := db.AutoMigrate(
 		&store.SystemSettings{},
 		&store.Policy{},
-		&store.OWASPRuleCatalog{},
-		&store.PolicyOWASPRuleConfig{},
+		&owaspstore.OWASPRuleCatalog{},
+		&owaspstore.PolicyOWASPRuleConfig{},
 	); err != nil {
 		t.Fatalf("migrate settings: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestUpdateSingleOWASPRuleClearsActionOverride(t *testing.T) {
 		"status_code": 403,
 		"redirect_to": "https://example.com/blocked",
 	})
-	var config store.PolicyOWASPRuleConfig
+	var config owaspstore.PolicyOWASPRuleConfig
 	if err := repo.DB().Where("rule_id = ?", ruleID).First(&config).Error; err != nil {
 		t.Fatalf("load override: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestUpdateSingleOWASPRuleClearsActionOverride(t *testing.T) {
 func TestUpdateSingleOWASPRuleRejectsRetiredNumericCatalogID(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	ruleID := firstOWASPRuleID(t)
-	var catalog store.OWASPRuleCatalog
+	var catalog owaspstore.OWASPRuleCatalog
 	if err := repo.DB().Where("rule_id = ?", ruleID).First(&catalog).Error; err != nil {
 		t.Fatalf("load catalog: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestUpdateSingleOWASPRuleSavesSensitivityOverride(t *testing.T) {
 		"sensitivity": "strict",
 	})
 
-	var config store.PolicyOWASPRuleConfig
+	var config owaspstore.PolicyOWASPRuleConfig
 	if err := repo.DB().Where("rule_id = ?", ruleID).First(&config).Error; err != nil {
 		t.Fatalf("load override: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestUpdateSingleOWASPRuleRejectsPartialUpdateThatLeavesInvalidEffectiveConf
 
 	redirect := "redirect"
 	disabled := false
-	if err := repo.DB().Create(&store.PolicyOWASPRuleConfig{
+	if err := repo.DB().Create(&owaspstore.PolicyOWASPRuleConfig{
 		PolicyID: 1,
 		RuleID:   ruleID,
 		Enabled:  &disabled,
@@ -213,7 +214,7 @@ func TestUpdateSingleOWASPRuleRejectsPartialUpdateThatLeavesInvalidEffectiveConf
 		t.Fatalf("enabling redirect without target: want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 
-	var config store.PolicyOWASPRuleConfig
+	var config owaspstore.PolicyOWASPRuleConfig
 	if err := repo.DB().Where("policy_id = ? AND rule_id = ?", 1, ruleID).First(&config).Error; err != nil {
 		t.Fatalf("load redirect override: %v", err)
 	}
@@ -329,7 +330,7 @@ func newBrokenBatchRepo(t *testing.T) *repository.SystemSettingsRepo {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.Policy{}, &store.OWASPRuleCatalog{}); err != nil {
+	if err := db.AutoMigrate(&store.Policy{}, &owaspstore.OWASPRuleCatalog{}); err != nil {
 		t.Fatalf("migrate catalog: %v", err)
 	}
 	defaultSlot := uint(1)
@@ -374,7 +375,7 @@ func TestBatchUpdateOWASPRulesExistingRowUpdateSemanticsUnchanged(t *testing.T) 
 	repo := newSystemSettingsRepoForTest(t)
 	ruleID := firstOWASPRuleID(t)
 	disabled := false
-	if err := repo.DB().Create(&store.PolicyOWASPRuleConfig{
+	if err := repo.DB().Create(&owaspstore.PolicyOWASPRuleConfig{
 		PolicyID: 1,
 		RuleID:   ruleID,
 		Enabled:  &disabled,
@@ -391,7 +392,7 @@ func TestBatchUpdateOWASPRulesExistingRowUpdateSemanticsUnchanged(t *testing.T) 
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
-	var config store.PolicyOWASPRuleConfig
+	var config owaspstore.PolicyOWASPRuleConfig
 	if err := repo.DB().Where("rule_id = ?", ruleID).First(&config).Error; err != nil {
 		t.Fatalf("load override: %v", err)
 	}

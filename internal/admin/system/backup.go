@@ -11,7 +11,10 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"gorm.io/gorm"
 
+	"My-OpenWaf/internal/admin/system/threatintel"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
+	threatintelstore "My-OpenWaf/internal/store/threatintel"
 )
 
 /**
@@ -50,9 +53,9 @@ func ExportBackup(db *gorm.DB) app.HandlerFunc {
 // 为空），该掩码值随导入侧 upsertBatch 的 OnConflict{UpdateAll} 覆盖目标库原凭据
 // （字段无 default 标签，不触发 restoreZeroValuedDefaults 回写），语义是
 // "凭据不随备份走、导入后需重新录入"，故无需在导入侧再做特殊处理。
-func backupMaskThreatIntelFeeds(feeds []store.ThreatIntelFeed) {
+func backupMaskThreatIntelFeeds(feeds []threatintelstore.ThreatIntelFeed) {
 	for i := range feeds {
-		feeds[i].AuthHeaderValue = maskAuthHeaderValue(feeds[i].AuthHeaderValue)
+		feeds[i].AuthHeaderValue = threatintel.MaskAuthHeaderValue(feeds[i].AuthHeaderValue)
 	}
 }
 
@@ -65,16 +68,16 @@ func backupMaskThreatIntelFeeds(feeds []store.ThreatIntelFeed) {
 // 保持一致。掩码值随导入侧 upsertBatch 的 OnConflict{UpdateAll} 写入目标库，
 // 成为无法解密的坏密文，任何后续 OAuth 令牌换取都会失败，管理员在 UI 重新录入
 // 密钥后恢复——凭据不随备份走。解析失败的 Config 保持原样，不改变既有导出行为。
-func backupMaskOAuthClientSecrets(providers []store.AccessProvider) {
+func backupMaskOAuthClientSecrets(providers []access.AccessProvider) {
 	for i := range providers {
 		if providers[i].Config == "" {
 			continue
 		}
-		var cfg store.OAuthProviderConfig
+		var cfg access.OAuthProviderConfig
 		if json.Unmarshal([]byte(providers[i].Config), &cfg) != nil {
 			continue // 配置 JSON 解析失败时保持原样，避免破坏既有备份行为
 		}
-		cfg.ClientSecret = maskAuthHeaderValue(cfg.ClientSecret)
+		cfg.ClientSecret = threatintel.MaskAuthHeaderValue(cfg.ClientSecret)
 		masked, err := json.Marshal(&cfg)
 		if err != nil {
 			continue

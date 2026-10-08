@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/falsepositive"
 	"My-OpenWaf/internal/store/repository"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -29,7 +30,7 @@ func newFalsePositiveReposForTest(t *testing.T) falsePositiveTestRepos {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.FalsePositiveReport{}, &store.SecurityEvent{}); err != nil {
+	if err := db.AutoMigrate(&falsepositive.FalsePositiveReport{}, &store.SecurityEvent{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return falsePositiveTestRepos{
@@ -89,7 +90,7 @@ func TestCreateFalsePositiveUsesAuthoritativeSecurityEvent(t *testing.T) {
 		t.Fatalf("status = %d, want 201: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
-	var rec store.FalsePositiveReport
+	var rec falsepositive.FalsePositiveReport
 	if err := json.Unmarshal(ctx.Response.Body(), &rec); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -162,7 +163,7 @@ func TestUpdateFalsePositiveStatusAcceptsValidValues(t *testing.T) {
 		if created.Response.StatusCode() != 201 {
 			t.Fatalf("seed create status = %d", created.Response.StatusCode())
 		}
-		var rec store.FalsePositiveReport
+		var rec falsepositive.FalsePositiveReport
 		if err := json.Unmarshal(created.Response.Body(), &rec); err != nil {
 			t.Fatalf("decode created record: %v", err)
 		}
@@ -239,7 +240,7 @@ func TestDeleteFalsePositiveExistingRecord(t *testing.T) {
 	if created.Response.StatusCode() != 201 {
 		t.Fatalf("seed create status = %d: %s", created.Response.StatusCode(), bytes.TrimSpace(created.Response.Body()))
 	}
-	var rec store.FalsePositiveReport
+	var rec falsepositive.FalsePositiveReport
 	if err := json.Unmarshal(created.Response.Body(), &rec); err != nil {
 		t.Fatalf("decode created record: %v", err)
 	}

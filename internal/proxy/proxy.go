@@ -128,14 +128,22 @@ func sharedTransportForUpstreamClassified(rt snapshot.SiteRuntime, isHTTPS bool)
 	tr := &http.Transport{
 		// 256/32 比默认 512/128 更节省高并发后的空闲连接内存；
 		// 30s timeout 让峰值后的 idle conn 更快释放（原90s）。
-		MaxIdleConns:          256,
-		MaxIdleConnsPerHost:   32,
-		IdleConnTimeout:       30 * time.Second,
-		ReadBufferSize:        16 << 10,
-		WriteBufferSize:       16 << 10,
+		MaxIdleConns: 256,
+
+		MaxIdleConnsPerHost: 32,
+
+		IdleConnTimeout: 30 * time.Second,
+		// 空闲连接超时，避免长时间占用资源。
+		ReadBufferSize:  16 << 10,
+		WriteBufferSize: 16 << 10,
+		// 预分配读写缓冲区，减少高并发下的内存分配压力。
 		ExpectContinueTimeout: time.Second,
-		ForceAttemptHTTP2:     true,
-		DisableCompression:    true,
+		// 强制尝试使用 HTTP/2，即使上游未明确声明支持。
+		ForceAttemptHTTP2: true,
+		// 禁用 HTTP/2 的压缩，避免 CRIME 攻击。
+		DisableCompression: true,
+		// 每上游并发连接上限，避免一次性洪峰占满所有临时端口，导致 i/o timeout。
+		MaxConnsPerHost: 256,
 	}
 	if isHTTPS {
 		tr.TLSClientConfig = &tls.Config{
@@ -1509,13 +1517,45 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 	}
 
 	ce := req.Header.Get("Content-Encoding")
-	if ce != "" && rdr != nil {
-		if isStream {
-			decoded, didDecode, decErr := decodeUpstreamRequestBodyStream(req.Body, ce)
-			if decErr != nil {
-				return nil, decErr
+	// 数据面在采样阶段已判定这段请求体解不动（压缩炸弹触发上限、或解码器都
+	// 建不起来）时按降级语义处理：不解压、保留原 Content-Encoding，原始压缩
+	// 字节直接转发给上游。用户裁定「超窗降级而不是拒绝」，且重复解压一遍正是
+	// 压缩炸弹想要的 CPU/内存开销，因此这里不再尝试解码。
+	if ce != "" && rdr != nil && !SkippedRequestBodyDecode(c) {
+		if isStream && BufferedCompressedBody(c) {
+			buffered, readErr := io.ReadAll(req.Body)
+			if readErr != nil {
+				ObserveUpstreamRequestBodyDecodeFailure(c, ce, readErr)
+				req.Body = io.NopCloser(bytes.NewReader(buffered))
+				req.ContentLength = int64(len(buffered))
+				req.GetBody = nil
+			} else if decoded, didDecode, decErr := decodeUpstreamRequestBody(buffered, ce); decErr != nil {
+				ObserveUpstreamRequestBodyDecodeFailure(c, ce, decErr)
+				req.Body = io.NopCloser(bytes.NewReader(buffered))
+				req.ContentLength = int64(len(buffered))
+				req.GetBody = nil
+			} else if didDecode {
+				req.Header.Del("Content-Encoding")
+				req.Header.Del("Content-Length")
+				req.Body = io.NopCloser(bytes.NewReader(decoded))
+				req.ContentLength = int64(len(decoded))
+				req.GetBody = nil
+			} else {
+				// 未识别出编码：按原始字节回放，语义与不解压一致。
+				req.Body = io.NopCloser(bytes.NewReader(buffered))
+				req.ContentLength = int64(len(buffered))
+				req.GetBody = nil
 			}
-			if didDecode {
+		} else if isStream {
+			decoded, didDecode, decErr := decodeUpstreamRequestBodyStreamBytesWithTrip(req.Body, []byte(ce), func() {
+				ObserveUpstreamRequestBodyDecodeFailure(c, ce, errDecompressionLimitExceeded)
+			})
+			if decErr != nil {
+				// 畸形压缩体：记录事件后按原始字节放行（不解压、保留原
+				// Content-Encoding），不再返回 502。解压产物由
+				// decompressionGuard 在读到超限时中断，超限同样走这条降级。
+				ObserveUpstreamRequestBodyDecodeFailure(c, ce, decErr)
+			} else if didDecode {
 				req.Header.Del("Content-Encoding")
 				req.Header.Del("Content-Length")
 				req.Body = decoded
@@ -1525,9 +1565,8 @@ func buildUpstreamRequest(ctx context.Context, c *app.RequestContext, base strin
 		} else if len(bodyBytes) > 0 {
 			decoded, didDecode, decErr := decodeUpstreamRequestBody(bodyBytes, ce)
 			if decErr != nil {
-				return nil, decErr
-			}
-			if didDecode {
+				ObserveUpstreamRequestBodyDecodeFailure(c, ce, decErr)
+			} else if didDecode {
 				req.Header.Del("Content-Encoding")
 				req.Header.Del("Content-Length")
 				req.Body = io.NopCloser(bytes.NewReader(decoded))
@@ -2041,7 +2080,7 @@ func ForwardCapturedResponseForSiteWithClientIP(ctx context.Context, c *app.Requ
 		maxStreamTransformBufferBytes+1,
 		compOpts.MinBytes,
 	) {
-		encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled)
+		encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled, compOpts.DeflateEnabled, compOpts.ZstdEnabled)
 	}
 	if encoding != responseEncodingIdentity {
 		c.Response.Header.Del("Content-Encoding")
@@ -2934,7 +2973,7 @@ func forwardHTTP(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRun
 	}
 
 	if canCompress && compOpts.Enabled {
-		encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled)
+		encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled, compOpts.DeflateEnabled, compOpts.ZstdEnabled)
 	}
 
 	if decoded && encoding != responseEncodingIdentity {
@@ -3115,7 +3154,7 @@ func forwardHTTPWithTransform(ctx context.Context, c *app.RequestContext, rt sna
 			maxStreamTransformBufferBytes+1,
 			compOpts.MinBytes,
 		) {
-			encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled)
+			encoding = selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), compOpts.BrotliEnabled, compOpts.GzipEnabled, compOpts.DeflateEnabled, compOpts.ZstdEnabled)
 		}
 		if encoding != responseEncodingIdentity {
 			return streamRecompressedResponse(ctx, c, bodyReader, closeFn, resp, cancelUpstream, encoding)
@@ -3151,10 +3190,12 @@ func forwardHTTPWithTransform(ctx context.Context, c *app.RequestContext, rt sna
 
 func defaultStreamCompressionOptions() ResponseCompressionOptions {
 	return ResponseCompressionOptions{
-		Enabled:       true,
-		BrotliEnabled: true,
-		GzipEnabled:   true,
-		MinBytes:      snapshot.DefaultResponseCompressionMinBytes,
+		Enabled:        true,
+		BrotliEnabled:  true,
+		GzipEnabled:    true,
+		DeflateEnabled: true,
+		ZstdEnabled:    true,
+		MinBytes:       snapshot.DefaultResponseCompressionMinBytes,
 	}
 }
 
@@ -3163,10 +3204,12 @@ func streamCompressionOptions(rt snapshot.SiteRuntime) ResponseCompressionOption
 		return defaultStreamCompressionOptions()
 	}
 	return normalizeResponseCompressionOptions(ResponseCompressionOptions{
-		Enabled:       rt.ResponseCompressionEnabled,
-		BrotliEnabled: rt.BrotliEnabled,
-		GzipEnabled:   rt.ResponseCompressionGzipEnabled,
-		MinBytes:      rt.ResponseCompressionMinBytes,
+		Enabled:        rt.ResponseCompressionEnabled,
+		BrotliEnabled:  rt.BrotliEnabled,
+		GzipEnabled:    rt.ResponseCompressionGzipEnabled,
+		DeflateEnabled: rt.ResponseCompressionDeflateEnabled,
+		ZstdEnabled:    rt.ResponseCompressionZstdEnabled,
+		MinBytes:       rt.ResponseCompressionMinBytes,
 	})
 }
 
@@ -3809,15 +3852,15 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 	if sn == nil || len(sn.Sites) == 0 {
 		return PruneStats{}
 	}
-	// 用当前快照构建活跃 transport 键集合。
+	// 用当前快照构建活跃 transport 键集合。站点可配置多条上游，每条经
+	// transportKeyForUpstream 映射到一个池键，必须【逐条计入】：只取首条会让
+	// 其余在用 transport 被判为不活跃而删除。无上游的站点不建池（调用方在取
+	// 上游前已按「无上游」返回 502），故不必计入。
 	active := make(map[transportKey]struct{})
 	for _, rt := range sn.Sites {
-		base := ""
-		if len(rt.UpstreamURLs) > 0 {
-			base = rt.UpstreamURLs[0]
+		for _, base := range rt.UpstreamURLs {
+			active[transportKeyForUpstream(base, *rt)] = struct{}{}
 		}
-		key := transportKeyForUpstream(base, *rt)
-		active[key] = struct{}{}
 	}
 
 	var stats PruneStats
@@ -3851,25 +3894,25 @@ func PruneInactiveUpstreamTransports(sn *snapshot.Snapshot) PruneStats {
 	// 从池中移除后 client 同步移除，否则统计会虚报「已无 transport 的 client」。
 	activeH3 := make(map[http3TransportKey]struct{})
 	for _, rt := range sn.Sites {
-		base := ""
-		if len(rt.UpstreamURLs) > 0 {
-			base = rt.UpstreamURLs[0]
+		// 与 HTTP/1 活跃集同口径：逐条上游判断。多上游站点里非首条的 h3 上游
+		// 同样要计入，否则其在用 transport 会被判为不活跃而删除。
+		for _, base := range rt.UpstreamURLs {
+			if !strings.HasPrefix(strings.ToLower(base), "h3://") {
+				continue
+			}
+			// 与 UpstreamRoundTripperForBase 一致：剥离 h3:// 前缀后取 host 部分作为 key。
+			hostPart := base[len("h3://"):]
+			if i := strings.IndexByte(hostPart, '/'); i >= 0 {
+				hostPart = hostPart[:i]
+			}
+			key := http3TransportKey{
+				upstreamHost:          hostPart,
+				tlsServerName:         rt.Site.UpstreamTLSServerName,
+				tlsSkipVerify:         rt.Site.UpstreamTLSSkipVerify,
+				clientCertFingerprint: upstreamClientCertFingerprint(*rt),
+			}
+			activeH3[key] = struct{}{}
 		}
-		if !strings.HasPrefix(strings.ToLower(base), "h3://") {
-			continue
-		}
-		// 与 UpstreamRoundTripperForBase 一致：剥离 h3:// 前缀后取 host 部分作为 key。
-		hostPart := base[len("h3://"):]
-		if i := strings.IndexByte(hostPart, '/'); i >= 0 {
-			hostPart = hostPart[:i]
-		}
-		key := http3TransportKey{
-			upstreamHost:          hostPart,
-			tlsServerName:         rt.Site.UpstreamTLSServerName,
-			tlsSkipVerify:         rt.Site.UpstreamTLSSkipVerify,
-			clientCertFingerprint: upstreamClientCertFingerprint(*rt),
-		}
-		activeH3[key] = struct{}{}
 	}
 	http3TransportMu.Lock()
 	for key, tr := range http3TransportPool {
@@ -3914,10 +3957,17 @@ func CloseIdleUpstreamTransports() (int, int, int) {
 	for _, tr := range all {
 		tr.CloseIdleConnections()
 	}
+	// 与上面 HTTP/1 分支同构：锁内复制到切片、锁外遍历。直接在读锁外 range
+	// 会与 Prune 的 delete、建池方的赋值并发，触发 Go 运行时的
+	// "concurrent map iteration and map write" 致命错误（不可 recover）。
 	http3TransportMu.RLock()
-	h3Count = len(http3TransportPool)
-	http3TransportMu.RUnlock()
+	allH3 := make([]*http3.Transport, 0, len(http3TransportPool))
 	for _, tr := range http3TransportPool {
+		allH3 = append(allH3, tr)
+	}
+	h3Count = len(allH3)
+	http3TransportMu.RUnlock()
+	for _, tr := range allH3 {
 		tr.CloseIdleConnections()
 	}
 	return httpCount, h2cCount, h3Count
@@ -3930,21 +3980,37 @@ func CloseIdleUpstreamTransports() (int, int, int) {
  * @param rt 站点运行时。
  * @return 传输池键。
  */
+/**
+ * transportKeyForUpstream 由上游 base URL 与站点运行时构造 transport 池键。
+ *
+ * 键必须与真正建池的 sharedTransportForUpstreamClassified【同构】，否则活跃集
+ * 匹配不到池内条目，在用 transport 会被 PruneInactiveUpstreamTransports 误删：
+ *
+ *   - TLS 维度只在 isHTTPS 为真时写入（明文上游的 transport 不带 TLSClientConfig，
+ *     哪怕站点填了 SNI / skip-verify / 客户端证书）；
+ *   - h2cPrior 恒为零值 —— h2c 走 h2cTransportForUpstream 单例，从不写入本池。
+ *
+ * 多上游站点须对【每一条】上游调用本函数，否则非首条上游的 scheme 不在活跃集里。
+ *
+ * @param base 单条上游 base URL。
+ * @param rt 站点运行时快照。
+ * @return 与建池方一致的 transport 池键。
+ */
 func transportKeyForUpstream(base string, rt snapshot.SiteRuntime) transportKey {
 	key := transportKey{}
 	if base != "" {
-		// RPC 别名先做归一，保证 tls/grpcs 与 https、grpc 与 h2c 在 transport 池中同键。
+		// RPC 别名先做归一，保证 tls/grpcs 与 https 在 transport 池中同键。
 		if target, _, ok := upstream.RPCUpstreamAliasForURL(base); ok {
 			key.isHTTPS = target == "https"
-			key.h2cPrior = target == "h2c"
 		} else if u, err := url.Parse(base); err == nil {
 			key.isHTTPS = u.Scheme == "https" || u.Scheme == "wss"
-			key.h2cPrior = u.Scheme == "h2c"
 		}
 	}
-	key.tlsServerName = rt.Site.UpstreamTLSServerName
-	key.tlsSkipVerify = rt.Site.UpstreamTLSSkipVerify
-	key.clientCertFingerprint = upstreamClientCertFingerprint(rt)
+	if key.isHTTPS {
+		key.tlsServerName = rt.Site.UpstreamTLSServerName
+		key.tlsSkipVerify = rt.Site.UpstreamTLSSkipVerify
+		key.clientCertFingerprint = upstreamClientCertFingerprint(rt)
+	}
 	return key
 }
 

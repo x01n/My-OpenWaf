@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"My-OpenWaf/internal/waf/challenge/gm"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 const envSessionKeySize = 32
@@ -426,7 +428,7 @@ func NewEnvMission() EnvMission {
 	mathrand.Shuffle(len(factors), func(i, j int) {
 		factors[i], factors[j] = factors[j], factors[i]
 	})
-	count := envMissionFactorCountMin + randIntN(envMissionFactorCountMax-envMissionFactorCountMin+1)
+	count := envMissionFactorCountMin + pow.RandIntN(envMissionFactorCountMax-envMissionFactorCountMin+1)
 	if count >= len(factors) {
 		count = len(factors) - 1
 	}
@@ -890,7 +892,7 @@ func envCheckJSEncryptedWithBehavior(keyHex, aad string, withBehavior bool) stri
 	}
 	return fmt.Sprintf(template, strconv.Quote(keyHex), strconv.Quote(aad),
 		// 资产 URL 用内容派生版本串（顺序必须与模板一致：先 wasm、后 glue）。
-		PowWasmURL(), PowGlueURL())
+		pow.PowWasmURL(), pow.PowGlueURL())
 }
 
 const envCheckJSTemplate = `(function(){

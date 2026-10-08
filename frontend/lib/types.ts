@@ -1433,6 +1433,8 @@ export interface AdminAPIKey {
   updated_at: string
   name: string
   last_used_at?: string
+  user_id: number
+  username: string
 }
 
 export interface AdminUser {

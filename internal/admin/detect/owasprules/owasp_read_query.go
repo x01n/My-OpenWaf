@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/detect/detectlimit"
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/owasp"
 )
 
 func loadOWASPViews(db *gorm.DB, policyID uint, c *app.RequestContext) ([]owaspRuleView, error) {
@@ -68,7 +68,7 @@ func usesSQLiteOWASPInMemoryLike(db *gorm.DB) bool {
  * 仅返回命中规则 ID，避免在应用层猜测 MySQL 或 PostgreSQL 的 collation。
  */
 func loadNativeOWASPMatchingRuleIDs(db *gorm.DB, category, likePattern string) ([]string, error) {
-	query := db.Model(&store.OWASPRuleCatalog{}).
+	query := db.Model(&owasp.OWASPRuleCatalog{}).
 		Where("active = ?", true).
 		Where("rule_id LIKE ? OR name LIKE ? OR description LIKE ?", likePattern, likePattern, likePattern)
 	if category != "" {

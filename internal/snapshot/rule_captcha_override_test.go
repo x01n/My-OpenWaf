@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"My-OpenWaf/internal/store"
+	cvestore "My-OpenWaf/internal/store/cve"
+	owaspstore "My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/owasp"
 
@@ -17,9 +19,9 @@ func TestRuleCaptchaOverridesReachRuntimeConfig(t *testing.T) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(
-		&store.PolicyOWASPRuleConfig{},
-		&store.CVERuleRecord{},
-		&store.CVERuleScopeOverride{},
+		&owaspstore.PolicyOWASPRuleConfig{},
+		&cvestore.CVERuleRecord{},
+		&cvestore.CVERuleScopeOverride{},
 		&store.Site{},
 	); err != nil {
 		t.Fatalf("migrate rule overrides: %v", err)
@@ -27,7 +29,7 @@ func TestRuleCaptchaOverridesReachRuntimeConfig(t *testing.T) {
 
 	owaspAction := "captcha_challenge"
 	owaspCaptcha := "slide"
-	if err := db.Create(&store.PolicyOWASPRuleConfig{
+	if err := db.Create(&owaspstore.PolicyOWASPRuleConfig{
 		PolicyID:    1,
 		RuleID:      "owasp:sqli:001",
 		Action:      &owaspAction,
@@ -44,7 +46,7 @@ func TestRuleCaptchaOverridesReachRuntimeConfig(t *testing.T) {
 		t.Fatalf("OWASP runtime override=%#v", owaspOverride)
 	}
 
-	rule := store.CVERuleRecord{
+	rule := cvestore.CVERuleRecord{
 		CVEID: "CVE-2026-90001", Category: "general", Pattern: "test-pattern",
 		Action: "intercept", Enabled: true, Approved: true,
 	}
@@ -53,8 +55,8 @@ func TestRuleCaptchaOverridesReachRuntimeConfig(t *testing.T) {
 	}
 	cveAction := "captcha_challenge"
 	cveCaptcha := "rotate"
-	if err := db.Create(&store.CVERuleScopeOverride{
-		RuleID: rule.ID, ScopeType: store.CVEScopeGlobal, ScopeID: 0,
+	if err := db.Create(&cvestore.CVERuleScopeOverride{
+		RuleID: rule.ID, ScopeType: cvestore.CVEScopeGlobal, ScopeID: 0,
 		Action: &cveAction, CaptchaType: &cveCaptcha,
 	}).Error; err != nil {
 		t.Fatalf("seed CVE override: %v", err)
@@ -78,11 +80,11 @@ func TestLoadSiteCVEConfigsKeepsDuplicateCVEIDsRuleScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.CVERuleRecord{}, &store.CVERuleScopeOverride{}, &store.Site{}); err != nil {
+	if err := db.AutoMigrate(&cvestore.CVERuleRecord{}, &cvestore.CVERuleScopeOverride{}, &store.Site{}); err != nil {
 		t.Fatalf("migrate cve tables: %v", err)
 	}
 
-	rules := []store.CVERuleRecord{
+	rules := []cvestore.CVERuleRecord{
 		{CVEID: "CVE-2026-DUPLICATE", Category: "general", Pattern: "duplicate-pattern-a", Target: "all", Severity: "high", Action: "intercept", Enabled: true, Approved: true},
 		{CVEID: "CVE-2026-DUPLICATE", Category: "general", Pattern: "duplicate-pattern-b", Target: "all", Severity: "high", Action: "intercept", Enabled: true, Approved: true},
 	}
@@ -91,8 +93,8 @@ func TestLoadSiteCVEConfigsKeepsDuplicateCVEIDsRuleScoped(t *testing.T) {
 	}
 	action := "captcha_challenge"
 	captchaType := "slide"
-	if err := db.Create(&store.CVERuleScopeOverride{
-		RuleID: rules[0].ID, ScopeType: store.CVEScopeGlobal, ScopeID: 0,
+	if err := db.Create(&cvestore.CVERuleScopeOverride{
+		RuleID: rules[0].ID, ScopeType: cvestore.CVEScopeGlobal, ScopeID: 0,
 		Action: &action, CaptchaType: &captchaType,
 	}).Error; err != nil {
 		t.Fatalf("seed scoped override: %v", err)

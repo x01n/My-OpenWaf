@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 )
 
 // Record 各字段长度上限，与 store 库表尺寸对齐。
@@ -30,7 +30,7 @@ const (
  * @param m 请求/响应提取出的 material；为 nil 时返回 nil。
  * @return 待持久化的资源记录。
  */
-func BuildRecordedResource(siteID uint, matched []uint, m *Material) *store.RecordedResource {
+func BuildRecordedResource(siteID uint, matched []uint, m *Material) *approute.RecordedResource {
 	if m == nil {
 		return nil
 	}
@@ -42,7 +42,7 @@ func BuildRecordedResource(siteID uint, matched []uint, m *Material) *store.Reco
 	if len(matched) > 0 {
 		primaryRuleID = matched[0]
 	}
-	return &store.RecordedResource{
+	return &approute.RecordedResource{
 		SiteID:              siteID,
 		Method:              m.Method,
 		Host:                m.Host,

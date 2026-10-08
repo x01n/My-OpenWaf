@@ -10,6 +10,7 @@ import (
 	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/iplist"
 )
 
 /**
@@ -182,7 +183,7 @@ func TestImportBackupReloadPublishesConfigDiagnostics(t *testing.T) {
 			"version": store.BackupVersion,
 			"ip_list_entries": []map[string]any{{
 				"id":      901,
-				"kind":    store.IPListBlack,
+				"kind":    iplist.IPListBlack,
 				"value":   invalidIP,
 				"note":    secretNote,
 				"enabled": true,

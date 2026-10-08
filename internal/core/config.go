@@ -126,6 +126,29 @@ func queueParseWarning(name, raw string, kept any) string {
 }
 
 /**
+ * parseDecompressionLimitEnv 解析一个解压产出上限环境变量。
+ *
+ * 未设置或解析失败时返回 0，由 proxy 包按方向回退各自的默认值（请求 64 MiB /
+ * 响应 8 MiB）；解析失败额外产出一条告警，避免拼错的取值伪装成"已生效"。
+ *
+ * @param name 环境变量名。
+ * @param warns 告警累加目标。
+ * @return 解析出的上限（字节）；0 表示未设置或不可用。
+ */
+func parseDecompressionLimitEnv(name string, warns *[]string) int64 {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		*warns = append(*warns, queueParseWarning(name, v, "direction default"))
+		return 0
+	}
+	return n
+}
+
+/**
  * clampQueueInt 校验单个整型队列参数，越界时回退默认值或截断到上界。
  *
  * 下界必须拦截 0 与负数，而不是让值原样流到 make(chan)：容量 0 会让所有非阻塞
@@ -251,6 +274,13 @@ type Config struct {
 	// ResponseCacheTTLSec 是默认缓存 TTL（秒，0 = 使用默认值 60）。
 	ResponseCacheTTLSec int
 
+	// RequestDecompressionMaxBytes 是请求侧单层解压的产出硬上限（字节），用于压缩
+	// 炸弹防护。0 = 使用默认值 64 MiB（对应用户数据的 32 MiB 入站请求体上限）。
+	RequestDecompressionMaxBytes int64
+	// ResponseDecompressionMaxBytes 是响应侧单层解压的产出硬上限（字节）。
+	// 0 = 使用默认值 8 MiB，与 maxStreamTransformBufferBytes 齐平。
+	ResponseDecompressionMaxBytes int64
+
 	// Queue 调优各类可观测/异步写入队列的容量与批大小。
 	// 默认值与历史硬编码常量一致；环境变量主要用于高并发场景扩容。
 	Queue QueueConfig
@@ -259,6 +289,13 @@ type Config struct {
 	// 单独成字段而不是走 Validate()：Validate 在启动流程里被调用两次
 	// （preflight + 应用存储 Redis 配置后），复用它会让每条告警重复出现。
 	QueueWarnings []string
+	HTTPTrace     HTTPTraceConfig
+}
+
+type HTTPTraceConfig struct {
+	Enabled  bool
+	Level    string
+	Warnings []string
 }
 
 // CVEConfig 控制 CVE 专项检测与情报源同步。
@@ -303,6 +340,12 @@ func LoadConfigFromEnv() Config {
 		adminBind = ":9443"
 	}
 
+	// 解压产出上限：未设置时保持 0，由 proxy 包内的默认值兜底；解析失败沿用队列
+	// 参数的处置口径——保留默认值并产出告警，不静默。
+	var decompressionWarns []string
+	requestDecompressionMaxBytes := parseDecompressionLimitEnv("MY_OPENWAF_REQUEST_DECOMPRESS_LIMIT_BYTES", &decompressionWarns)
+	responseDecompressionMaxBytes := parseDecompressionLimitEnv("MY_OPENWAF_RESPONSE_DECOMPRESS_LIMIT_BYTES", &decompressionWarns)
+
 	botCfg := DefaultBotConfig()
 	if geoPath := strings.TrimSpace(os.Getenv("MY_OPENWAF_GEOIP_DB")); geoPath != "" {
 		botCfg.GeoIPDBPath = geoPath
@@ -323,6 +366,18 @@ func LoadConfigFromEnv() Config {
 	if cveCfg.FeedInterval == "" {
 		cveCfg.FeedInterval = "6h"
 	}
+	httpTraceCfg := DefaultHTTPTraceConfig()
+	httpTraceCfg.Enabled = strings.ToLower(strings.TrimSpace(os.Getenv("MY_OPENWAF_TRACE_ENABLED"))) == "true"
+	var httpTraceWarns []string
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("MY_OPENWAF_TRACE_LEVEL"))); v != "" {
+		switch v {
+		case "base", "detailed":
+			httpTraceCfg.Level = v
+		default:
+			httpTraceWarns = append(httpTraceWarns, queueParseWarning("MY_OPENWAF_TRACE_LEVEL", v, httpTraceCfg.Level))
+		}
+	}
+	httpTraceCfg.Warnings = httpTraceWarns
 
 	dropCfg := DefaultDropConfig()
 	if strings.ToLower(strings.TrimSpace(os.Getenv("MY_OPENWAF_DROP_ENABLED"))) == "false" {
@@ -406,21 +461,36 @@ func LoadConfigFromEnv() Config {
 	queueWarns = append(queueWarns, clampWarns...)
 
 	return Config{
-		DBDriver:            driver,
-		DBDSN:               dsn,
-		LogDBDSN:            logDSN,
-		DataDir:             dir,
-		RedisAddr:           strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_ADDR")),
-		RedisPassword:       strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_PASSWORD")),
-		RedisDB:             rd,
-		AdminBind:           adminBind,
-		AdminStaticDir:      strings.TrimSpace(os.Getenv("MY_OPENWAF_ADMIN_STATIC_DIR")),
-		Bot:                 botCfg,
-		CVE:                 cveCfg,
-		Drop:                dropCfg,
-		ResponseCacheMB:     cacheMB,
-		ResponseCacheTTLSec: cacheTTL,
-		Queue:               queueCfg,
-		QueueWarnings:       queueWarns,
+		DBDriver:                      driver,
+		DBDSN:                         dsn,
+		LogDBDSN:                      logDSN,
+		DataDir:                       dir,
+		RedisAddr:                     strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_ADDR")),
+		RedisPassword:                 strings.TrimSpace(os.Getenv("MY_OPENWAF_REDIS_PASSWORD")),
+		RedisDB:                       rd,
+		AdminBind:                     adminBind,
+		AdminStaticDir:                strings.TrimSpace(os.Getenv("MY_OPENWAF_ADMIN_STATIC_DIR")),
+		Bot:                           botCfg,
+		CVE:                           cveCfg,
+		Drop:                          dropCfg,
+		ResponseCacheMB:               cacheMB,
+		ResponseCacheTTLSec:           cacheTTL,
+		RequestDecompressionMaxBytes:  requestDecompressionMaxBytes,
+		ResponseDecompressionMaxBytes: responseDecompressionMaxBytes,
+		Queue:                         queueCfg,
+		QueueWarnings:                 append(queueWarns, decompressionWarns...),
+		HTTPTrace:                     httpTraceCfg,
 	}
+}
+
+/**
+ * DefaultHTTPTraceConfig 返回遥测的默认配置：关闭、详细级别。
+ *
+ * 级别默认取 detailed 而不是 base：开关本身已经承担了"是否付采集成本"的决策，
+ * 打开开关的人要的是分阶段数字，而不是再被一个默认值悄悄降级成只有总耗时。
+ *
+ * @return 默认配置，Warnings 为空。
+ */
+func DefaultHTTPTraceConfig() HTTPTraceConfig {
+	return HTTPTraceConfig{Enabled: false, Level: "detailed"}
 }

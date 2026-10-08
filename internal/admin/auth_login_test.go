@@ -14,7 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/auth"
-	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -26,10 +26,10 @@ func newAuthDepsForTest(t *testing.T, username, password, role string) *AuthDeps
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(
-		&store.AdminAccount{},
-		&store.RefreshToken{},
-		&store.LoginAttempt{},
-		&store.ActiveSession{},
+		&authstore.AdminAccount{},
+		&authstore.RefreshToken{},
+		&authstore.LoginAttempt{},
+		&authstore.ActiveSession{},
 	); err != nil {
 		t.Fatalf("migrate auth tables: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestLoginRecordsAttempts(t *testing.T) {
 	invokeAuthHandler(LoginHandler(d), "/api/v1/auth/login",
 		[]byte(`{"username":"alice","password":"password123"}`), "")
 
-	var attempts []store.LoginAttempt
+	var attempts []authstore.LoginAttempt
 	if err := d.DB.Order("id ASC").Find(&attempts).Error; err != nil {
 		t.Fatalf("query login attempts: %v", err)
 	}

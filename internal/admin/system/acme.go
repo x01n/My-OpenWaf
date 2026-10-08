@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	acmepkg "My-OpenWaf/internal/acme"
+	"My-OpenWaf/internal/admin/system/certificate"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 )
@@ -256,8 +257,8 @@ func matchACMESites(sites []store.Site, domain string) []acmeMatchedSite {
 		if !site.Enabled {
 			continue
 		}
-		for _, host := range splitSiteHosts(site.Host) {
-			matched := certificateNameMatchesHost(domain, host) || certificateNameMatchesHost(host, domain)
+		for _, host := range certificate.SplitSiteHosts(site.Host) {
+			matched := certificate.CertificateNameMatchesHost(domain, host) || certificate.CertificateNameMatchesHost(host, domain)
 			if !matched {
 				continue
 			}
@@ -623,7 +624,7 @@ func ACMEApply(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 		}
 
 		// 必须先脱敏再 reload：下面的 500 分支会回显 cert，顺序颠倒会漏出私钥。
-		redactCertificatePrivateKey(&cert)
+		certificate.RedactCertificatePrivateKey(&cert)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + sanitizeACMEErrorText(err.Error()), "item": cert, "applied_sites": matches})
 			return
@@ -691,7 +692,7 @@ func ACMERenew(repos *repository.Repos, reload func() error, acmeStore *ACMEMana
 		}
 
 		// 必须先脱敏再 reload：下面的 500 分支会回显 cert，顺序颠倒会漏出私钥。
-		redactCertificatePrivateKey(cert)
+		certificate.RedactCertificatePrivateKey(cert)
 		if err := reload(); err != nil {
 			c.JSON(500, map[string]any{"error": "config applied but reload failed: " + sanitizeACMEErrorText(err.Error()), "item": cert})
 			return

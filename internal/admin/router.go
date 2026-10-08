@@ -27,14 +27,26 @@ import (
 	"My-OpenWaf/internal/admin/site/listener"
 	"My-OpenWaf/internal/admin/site/observability"
 	"My-OpenWaf/internal/admin/system"
+	adminapikey "My-OpenWaf/internal/admin/system/apikey"
+	"My-OpenWaf/internal/admin/system/certificate"
+	dashboard "My-OpenWaf/internal/admin/system/dashboard"
+	"My-OpenWaf/internal/admin/system/iplist"
+	adminjsplugin "My-OpenWaf/internal/admin/system/jsplugin"
+	adminluaplugin "My-OpenWaf/internal/admin/system/luaplugin"
+	"My-OpenWaf/internal/admin/system/policy"
+	"My-OpenWaf/internal/admin/system/presetbots"
+	adminrealtime "My-OpenWaf/internal/admin/system/realtime"
+	"My-OpenWaf/internal/admin/system/threatintel"
+	adminupstream "My-OpenWaf/internal/admin/system/upstream"
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/adminweb"
-	"My-OpenWaf/internal/dataplane"
+	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/waf/challenge"
+	challengepow "My-OpenWaf/internal/waf/challenge/pow"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/escalation"
 	"My-OpenWaf/internal/waf/jsplugin"
@@ -51,7 +63,7 @@ type Dependencies struct {
 	Snapshot      *snapshot.Holder
 	StaticFS      string
 	JWTSecret     []byte
-	Metrics       *dataplane.Metrics
+	Metrics       *dpmetrics.Metrics
 	DB            *gorm.DB
 	LogDB         *gorm.DB
 	TokenMgr      *auth.TokenManager
@@ -62,10 +74,10 @@ type Dependencies struct {
 	CaptchaMgr    *challenge.CaptchaManager
 	ChainMgr      *challenge.ChainChallengeManager
 	ACMEStore     *system.ACMEManagerStore
-	Realtime      *system.RealtimeHub
+	Realtime      *adminrealtime.RealtimeHub
 	Cache         *cache.RedisKV
 	Upstreams     *upstream.Pool
-	ThreatIntel   system.ThreatIntelSyncer
+	ThreatIntel   threatintel.ThreatIntelSyncer
 	// JSEngine 在每次 dry-run 请求时读取当前 QuickJS runtime，避免 handler 捕获 reload 前的旧指针。
 	JSEngine func() *jsplugin.Engine
 	// LuaEngine 只用于读取运行时统计；可为 nil，此时统计端点返回空列表。
@@ -93,7 +105,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	h.POST("/api/v1/auth/logout", LogoutHandler(authDeps))
 
 	api := h.Group("/api/v1")
-	api.Use(AuthMiddleware(deps.Repos.AdminAPIKey, deps.TokenMgr, deps.SessionMgr))
+	api.Use(AuthMiddleware(deps.Repos.AdminAPIKey, deps.Repos.AdminAccount, deps.TokenMgr, deps.SessionMgr))
 
 	api.GET("/auth/me", MeHandler(authDeps))
 	api.POST("/auth/change-password", ChangeOwnPasswordHandler(authDeps))
@@ -115,17 +127,17 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/status", site.GetSiteStatus(r.Site))
 		readGroup.GET("/sites/:id/listeners", listener.ListSiteListeners(r.Site, r.SiteListener))
 
-		readGroup.GET("/certificates", system.ListCertificates(r.Certificate))
-		readGroup.GET("/certificates/:id", system.GetCertificate(r.Certificate))
+		readGroup.GET("/certificates", certificate.ListCertificates(r.Certificate))
+		readGroup.GET("/certificates/:id", certificate.GetCertificate(r.Certificate))
 		readGroup.GET("/certificates/acme/config", system.GetACMEConfig(r.SystemSettings))
 
 		// 证书 PEM 解析仅解析用户提交的文本并读取站点列表做匹配展示，
 		// 无副作用、不接触库存私钥，属只读操作，故置于 readGroup。
-		readGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))
+		readGroup.POST("/certificates/parse", certificate.ParseCertificate(r.Site))
 
-		readGroup.GET("/policies", system.ListPolicies(r.Policy))
-		readGroup.GET("/policies/default", system.GetDefaultPolicy(r.Policy))
-		readGroup.GET("/policies/:id", system.GetPolicy(r.Policy))
+		readGroup.GET("/policies", policy.ListPolicies(r.Policy))
+		readGroup.GET("/policies/default", policy.GetDefaultPolicy(r.Policy))
+		readGroup.GET("/policies/:id", policy.GetPolicy(r.Policy))
 
 		readGroup.GET("/rules", rule.ListRules(r.Rule))
 		readGroup.GET("/rules/:id", rule.GetRule(r.Rule))
@@ -137,20 +149,20 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		readGroup.GET("/protection-settings", protect.GetProtectionSettings(r.SystemSettings))
 
-		readGroup.GET("/ip-lists", system.ListIPEntries(r.IPList))
-		readGroup.GET("/ip-lists/:id", system.GetIPEntry(r.IPList))
+		readGroup.GET("/ip-lists", iplist.ListIPEntries(r.IPList))
+		readGroup.GET("/ip-lists/:id", iplist.GetIPEntry(r.IPList))
 
-		readGroup.GET("/threat-intel-feeds", system.ListThreatIntelFeeds(r.ThreatIntel))
-		readGroup.GET("/threat-intel-sync-logs", system.ListThreatIntelSyncLogs(r.ThreatIntelSyncLog))
-		readGroup.GET("/lua-plugins", system.ListLuaPlugins(deps.Repos.LuaPlugin, deps.Snapshot))
+		readGroup.GET("/threat-intel-feeds", threatintel.ListThreatIntelFeeds(r.ThreatIntel))
+		readGroup.GET("/threat-intel-sync-logs", threatintel.ListThreatIntelSyncLogs(r.ThreatIntelSyncLog))
+		readGroup.GET("/lua-plugins", adminluaplugin.ListLuaPlugins(deps.Repos.LuaPlugin, deps.Snapshot))
 		// stats 是静态段，须与下面的 :id 共存；Hertz 路由树静态优先，
 		// 排列同 /security-events/stats（见 TestLuaPluginStatsRouteBeatsIDParam）。
-		readGroup.GET("/lua-plugins/stats", system.GetLuaPluginStats(deps.LuaEngine))
-		readGroup.GET("/lua-plugins/:id", system.GetLuaPlugin(deps.Repos.LuaPlugin, deps.Snapshot))
-		readGroup.GET("/js-plugins", system.ListJSPlugins(deps.Repos.JSPlugin, deps.Snapshot))
-		readGroup.GET("/js-plugins/stats", system.GetJSPluginStats(deps.Snapshot))
-		readGroup.GET("/js-plugins/runtime", system.GetJSPluginRuntime(deps.Repos.JSPlugin, deps.Snapshot, deps.JSEngine))
-		readGroup.GET("/js-plugins/:id", system.GetJSPlugin(deps.Repos.JSPlugin, deps.Snapshot))
+		readGroup.GET("/lua-plugins/stats", adminluaplugin.GetLuaPluginStats(deps.LuaEngine))
+		readGroup.GET("/lua-plugins/:id", adminluaplugin.GetLuaPlugin(deps.Repos.LuaPlugin, deps.Snapshot))
+		readGroup.GET("/js-plugins", adminjsplugin.ListJSPlugins(deps.Repos.JSPlugin, deps.Snapshot))
+		readGroup.GET("/js-plugins/stats", adminjsplugin.GetJSPluginStats(deps.Snapshot))
+		readGroup.GET("/js-plugins/runtime", adminjsplugin.GetJSPluginRuntime(deps.Repos.JSPlugin, deps.Snapshot, deps.JSEngine))
+		readGroup.GET("/js-plugins/:id", adminjsplugin.GetJSPlugin(deps.Repos.JSPlugin, deps.Snapshot))
 
 		readGroup.GET("/security-events", event.ListSecurityEvents(r.SecurityEvent))
 		readGroup.GET("/security-events/stats", event.SecurityEventStats(r.SecurityEvent))
@@ -171,7 +183,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/false-positives", event.ListFalsePositives(r.FalsePositive))
 
 		// 预置爬虫白名单预览（读端点）。
-		readGroup.GET("/preset-bot-whitelist", system.ListPresetBotWhitelist())
+		readGroup.GET("/preset-bot-whitelist", presetbots.ListPresetBotWhitelist())
 		readGroup.GET("/sites/:id/access-logs", observability.ListSiteAccessLogs(r.Site, r.AccessLog))
 		readGroup.GET("/sites/:id/access-logs/stats", observability.SiteAccessLogStats(r.Site, r.AccessLog))
 		readGroup.GET("/sites/:id/drop-events", observability.ListSiteDropEvents(r.Site, r.DropEvent))
@@ -185,10 +197,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/sites/:id/access/users", access.ListUsers(r.AccessControl))
 		readGroup.GET("/sites/:id/access/rules", access.ListPathRules(r.AccessControl))
 
-		dashDeps := &system.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache, AccessRepo: r.AccessLog}
-		readGroup.GET("/dashboard/summary", system.DashboardSummary(dashDeps))
+		dashDeps := &dashboard.DashboardDeps{Metrics: deps.Metrics, ConfigDB: deps.DB, LogDB: deps.LogDB, Cache: deps.Cache, AccessRepo: r.AccessLog}
+		readGroup.GET("/dashboard/summary", dashboard.DashboardSummary(dashDeps))
 
-		readGroup.GET("/api-keys", system.ListAPIKeys(r.AdminAPIKey))
+		readGroup.GET("/api-keys", adminapikey.ListAPIKeys(r.AdminAPIKey, r.AdminAccount))
 
 		readGroup.GET("/admin-users", ListAdminUsers(r.AdminAccount))
 		readGroup.GET("/network-config", system.GetNetworkConfig(r.SystemSettings))
@@ -227,7 +239,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/drop-policy", drop.GetDropPolicy(r.SystemSettings))
 		readGroup.GET("/drop-stats", drop.GetDropStats(r.DropEvent))
 		readGroup.GET("/drop-events", drop.GetDropEvents(r.DropEvent))
-		readGroup.GET("/upstreams/status", system.UpstreamStatus(deps.Upstreams))
+		readGroup.GET("/upstreams/status", adminupstream.UpstreamStatus(deps.Upstreams))
 		readGroup.GET("/runtime-config", system.GetRuntimeConfig(deps.RuntimeState, deps.Snapshot, deps.Repos.SystemSettings))
 		readGroup.GET("/realtime/ticket", deps.Realtime.TicketHandler())
 
@@ -248,18 +260,18 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/sites/:id/listeners/:lid/update", listener.UpdateSiteListener(r.Site, r.SiteListener, r.Certificate, reload))
 		opsGroup.POST("/sites/:id/listeners/:lid/delete", listener.DeleteSiteListener(r.Site, r.SiteListener, reload))
 
-		opsGroup.POST("/certificates", system.CreateCertificate(r.Certificate, reload))
-		opsGroup.POST("/certificates/:id/update", system.UpdateCertificate(r.Certificate, reload))
-		opsGroup.POST("/certificates/:id/apply-to-sites", system.ApplyCertificateToSites(r.Certificate, r.Site, r.SiteListener, reload))
-		opsGroup.POST("/certificates/:id/delete", system.DeleteCertificate(r.Certificate, r.Site, r.SiteListener, reload))
+		opsGroup.POST("/certificates", certificate.CreateCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/:id/update", certificate.UpdateCertificate(r.Certificate, reload))
+		opsGroup.POST("/certificates/:id/apply-to-sites", certificate.ApplyCertificateToSites(r.Certificate, r.Site, r.SiteListener, reload))
+		opsGroup.POST("/certificates/:id/delete", certificate.DeleteCertificate(r.Certificate, r.Site, r.SiteListener, reload))
 		opsGroup.POST("/certificates/acme/apply", system.ACMEApply(deps.Repos, reload, deps.ACMEStore))
 		opsGroup.POST("/certificates/acme/:id/renew", system.ACMERenew(deps.Repos, reload, deps.ACMEStore))
 
-		opsGroup.POST("/policies", system.CreatePolicy(r.Policy, reload))
-		opsGroup.POST("/policies/:id/set-default", system.SetDefaultPolicy(r.Policy, reload))
-		opsGroup.POST("/policies/:id/default", system.SetDefaultPolicy(r.Policy, reload))
-		opsGroup.POST("/policies/:id/update", system.UpdatePolicy(r.Policy, reload))
-		opsGroup.POST("/policies/:id/delete", system.DeletePolicy(r.Policy, r.Site, reload))
+		opsGroup.POST("/policies", policy.CreatePolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/set-default", policy.SetDefaultPolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/default", policy.SetDefaultPolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/update", policy.UpdatePolicy(r.Policy, reload))
+		opsGroup.POST("/policies/:id/delete", policy.DeletePolicy(r.Policy, r.Site, reload))
 
 		opsGroup.POST("/rules", rule.CreateRule(r.Rule, reload))
 		opsGroup.POST("/rules/:id/update", rule.UpdateRule(r.Rule, reload))
@@ -270,29 +282,29 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 
 		opsGroup.POST("/protection-settings", protect.PutProtectionSettings(r.SystemSettings, reload))
 
-		opsGroup.POST("/ip-lists", system.CreateIPEntry(r.IPList, reload))
-		opsGroup.POST("/ip-lists/:id/update", system.UpdateIPEntry(r.IPList, reload))
-		opsGroup.POST("/ip-lists/:id/delete", system.DeleteIPEntry(r.IPList, reload))
+		opsGroup.POST("/ip-lists", iplist.CreateIPEntry(r.IPList, reload))
+		opsGroup.POST("/ip-lists/:id/update", iplist.UpdateIPEntry(r.IPList, reload))
+		opsGroup.POST("/ip-lists/:id/delete", iplist.DeleteIPEntry(r.IPList, reload))
 
-		opsGroup.POST("/threat-intel-feeds", system.CreateThreatIntelFeed(r.ThreatIntel, reload))
-		opsGroup.POST("/threat-intel-feeds/:id/update", system.UpdateThreatIntelFeed(r.ThreatIntel, reload))
-		opsGroup.POST("/threat-intel-feeds/:id/delete", system.DeleteThreatIntelFeed(r.ThreatIntel, reload))
-		opsGroup.POST("/threat-intel-feeds/:id/sync", system.SyncThreatIntelFeed(r.ThreatIntel, deps.ThreatIntel))
+		opsGroup.POST("/threat-intel-feeds", threatintel.CreateThreatIntelFeed(r.ThreatIntel, reload))
+		opsGroup.POST("/threat-intel-feeds/:id/update", threatintel.UpdateThreatIntelFeed(r.ThreatIntel, reload))
+		opsGroup.POST("/threat-intel-feeds/:id/delete", threatintel.DeleteThreatIntelFeed(r.ThreatIntel, reload))
+		opsGroup.POST("/threat-intel-feeds/:id/sync", threatintel.SyncThreatIntelFeed(r.ThreatIntel, deps.ThreatIntel))
 
 		// 自定义 Lua 策略脚本。校验与试运行虽不改配置，但会编译/执行用户代码，
 		// 故一并置于 opsGroup（需要写权限）而非只读组。
-		opsGroup.POST("/lua-plugins", system.CreateLuaPlugin(deps.Repos.LuaPlugin, reload))
-		opsGroup.POST("/lua-plugins/:id/update", system.UpdateLuaPlugin(deps.Repos.LuaPlugin, reload))
-		opsGroup.POST("/lua-plugins/:id/delete", system.DeleteLuaPlugin(deps.Repos.LuaPlugin, reload))
-		opsGroup.POST("/lua-plugins/:id/toggle", system.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
-		opsGroup.POST("/lua-plugins/validate", system.ValidateLuaPlugin())
-		opsGroup.POST("/lua-plugins/dry-run", system.DryRunLuaPlugin())
-		opsGroup.POST("/js-plugins", system.CreateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
-		opsGroup.POST("/js-plugins/:id/update", system.UpdateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
-		opsGroup.POST("/js-plugins/:id/delete", system.DeleteJSPlugin(deps.Repos.JSPlugin, reload))
-		opsGroup.POST("/js-plugins/:id/toggle", system.ToggleJSPlugin(deps.Repos.JSPlugin, reload, deps.JSEngine))
-		opsGroup.POST("/js-plugins/validate", system.ValidateJSPlugin(deps.JSEngine))
-		opsGroup.POST("/js-plugins/dry-run", system.DryRunJSPlugin(deps.JSEngine))
+		opsGroup.POST("/lua-plugins", adminluaplugin.CreateLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/update", adminluaplugin.UpdateLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/delete", adminluaplugin.DeleteLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/:id/toggle", adminluaplugin.ToggleLuaPlugin(deps.Repos.LuaPlugin, reload))
+		opsGroup.POST("/lua-plugins/validate", adminluaplugin.ValidateLuaPlugin())
+		opsGroup.POST("/lua-plugins/dry-run", adminluaplugin.DryRunLuaPlugin())
+		opsGroup.POST("/js-plugins", adminjsplugin.CreateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/:id/update", adminjsplugin.UpdateJSPlugin(deps.Repos.JSPlugin, deps.Snapshot, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/:id/delete", adminjsplugin.DeleteJSPlugin(deps.Repos.JSPlugin, reload))
+		opsGroup.POST("/js-plugins/:id/toggle", adminjsplugin.ToggleJSPlugin(deps.Repos.JSPlugin, reload, deps.JSEngine))
+		opsGroup.POST("/js-plugins/validate", adminjsplugin.ValidateJSPlugin(deps.JSEngine))
+		opsGroup.POST("/js-plugins/dry-run", adminjsplugin.DryRunJSPlugin(deps.JSEngine))
 
 		opsGroup.POST("/reload", system.ReloadSnapshot(reload))
 
@@ -350,7 +362,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		opsGroup.POST("/false-positives/:id/status", event.UpdateFalsePositiveStatus(r.FalsePositive))
 
 		// 预置爬虫白名单（Google/Bing/Baidu/360/Yandex 等）。
-		opsGroup.POST("/preset-bot-whitelist/seed", system.SeedBotWhitelist(r.IPList, reload))
+		opsGroup.POST("/preset-bot-whitelist/seed", presetbots.SeedBotWhitelist(r.IPList, reload))
 	}
 
 	adminGroup := api.Group("")
@@ -376,8 +388,8 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/certificates/acme/config", system.UpdateACMEConfig(r.SystemSettings))
 		adminGroup.GET("/certificates/acme/status", system.ACMEStatus(deps.Repos))
 
-		adminGroup.POST("/api-keys", system.CreateAPIKey(r.AdminAPIKey))
-		adminGroup.POST("/api-keys/:id/delete", system.DeleteAPIKey(r.AdminAPIKey))
+		adminGroup.POST("/api-keys", adminapikey.CreateAPIKey(r.AdminAPIKey, r.AdminAccount))
+		adminGroup.POST("/api-keys/:id/delete", adminapikey.DeleteAPIKey(r.AdminAPIKey))
 
 		adminGroup.POST("/admin-users", CreateAdminUser(r.AdminAccount))
 		adminGroup.POST("/admin-users/:id/update-password", UpdateAdminPassword(r.AdminAccount, revokeCredentials))
@@ -395,10 +407,10 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 	}
 
 	h.GET("/__owaf/pow.wasm", func(ctx context.Context, c *app.RequestContext) {
-		challenge.ServePoWWASM(c)
+		challengepow.ServePoWWASM(c)
 	})
 	h.GET("/__owaf/pow_glue.js", func(ctx context.Context, c *app.RequestContext) {
-		challenge.ServePowGlueJS(c)
+		challengepow.ServePowGlueJS(c)
 	})
 	h.GET("/api/v1/realtime/ws", deps.Realtime.WebSocketHandler())
 	h.GET("/.well-known/acme-challenge/:token", func(ctx context.Context, c *app.RequestContext) {

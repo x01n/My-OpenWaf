@@ -23,6 +23,8 @@ func TestBuildTLSCapabilityStatusesReportsRuntimeProtocolBounds(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	byKey := make(map[string]TLSCapabilityStatus, len(statuses))
@@ -68,6 +70,8 @@ func TestBuildTLSCapabilityStatusesUseFrontendStatusContract(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	allowed := map[string]struct{}{
@@ -97,6 +101,8 @@ func TestBuildTLSCapabilityStatusesReportsCipherSuitesAndCurvePreferences(t *tes
 		defaults,
 		TLSCapabilityStatus{Key: "caa"},
 		TLSCapabilityStatus{Key: "ocsp_stapling"},
+		false,
+		false,
 		false,
 		false,
 		false,
@@ -161,6 +167,8 @@ func TestBuildTLSCapabilityStatusesReportsTLSConfigFallbacks(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	cipherSuites := capabilityByKey(t, statuses, "cipher_suites")
@@ -199,6 +207,8 @@ func TestBuildTLSCapabilityStatusesOrdersSSLVersionsNumerically(t *testing.T) {
 		snapshot.DefaultTLSDefaults(),
 		TLSCapabilityStatus{Key: "caa"},
 		TLSCapabilityStatus{Key: "ocsp_stapling"},
+		false,
+		false,
 		false,
 		false,
 		false,
@@ -268,6 +278,8 @@ func TestBuildTLSCapabilityStatusesRespectsTLSDefaultRange(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	byKey := make(map[string]TLSCapabilityStatus, len(statuses))
@@ -324,6 +336,8 @@ func TestBuildTLSCapabilityStatusesReportsEffectiveInheritedALPN(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	alpn := capabilityByKey(t, statuses, "alpn")
@@ -353,6 +367,8 @@ func TestBuildTLSCapabilityStatusesReportsHTTPProtocolALPNPreconditions(t *testi
 		tlsDefaults,
 		TLSCapabilityStatus{Key: "caa"},
 		TLSCapabilityStatus{Key: "ocsp_stapling"},
+		false,
+		false,
 		false,
 		false,
 		false,
@@ -424,6 +440,8 @@ func TestBuildTLSCapabilityStatusesReportsHTTP2TLS12Precondition(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	http2 := capabilityByKey(t, statuses, "http2")
@@ -462,6 +480,8 @@ func TestBuildTLSCapabilityStatusesReportsHTTP3QUICUsesTLS13(t *testing.T) {
 		tlsDefaults,
 		TLSCapabilityStatus{Key: "caa"},
 		TLSCapabilityStatus{Key: "ocsp_stapling"},
+		false,
+		false,
 		false,
 		false,
 		false,
@@ -639,6 +659,8 @@ func TestBuildTLSCapabilityStatusesReportsDisabledHTTPProtocolALPNPreconditions(
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	http2 := capabilityByKey(t, statuses, "http2")
@@ -664,6 +686,8 @@ func TestBuildTLSCapabilityStatusesReportsFilteredInheritedALPN(t *testing.T) {
 		snapshot.DefaultTLSDefaults(),
 		TLSCapabilityStatus{Key: "caa"},
 		TLSCapabilityStatus{Key: "ocsp_stapling"},
+		false,
+		false,
 		false,
 		false,
 		false,
@@ -725,6 +749,8 @@ func TestBuildTLSCapabilityStatusesIgnoresNonRuntimeTLSMaxVersion(t *testing.T) 
 		false,
 		false,
 		false,
+		false,
+		false,
 	)
 
 	byKey := make(map[string]TLSCapabilityStatus, len(statuses))
@@ -754,6 +780,8 @@ func TestBuildTLSCapabilityStatusesFallsBackForDescendingTLSDefaultRange(t *test
 		defaults,
 		TLSCapabilityStatus{Key: "caa"},
 		TLSCapabilityStatus{Key: "ocsp_stapling"},
+		false,
+		false,
 		false,
 		false,
 		false,

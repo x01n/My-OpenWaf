@@ -10,7 +10,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 )
 
 func newRefreshTokenRepoForTest(t *testing.T) (*RefreshTokenRepo, *gorm.DB) {
@@ -20,7 +20,7 @@ func newRefreshTokenRepoForTest(t *testing.T) (*RefreshTokenRepo, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.RefreshToken{}); err != nil {
+	if err := db.AutoMigrate(&auth.RefreshToken{}); err != nil {
 		t.Fatalf("migrate refresh tokens: %v", err)
 	}
 	return NewRefreshTokenRepo(db), db
@@ -29,7 +29,7 @@ func newRefreshTokenRepoForTest(t *testing.T) (*RefreshTokenRepo, *gorm.DB) {
 // TestRefreshTokenRotateAllowsExactlyOneConcurrentSuccess 验证同一旧令牌并发轮换时只有一个事务成功。
 func TestRefreshTokenRotateAllowsExactlyOneConcurrentSuccess(t *testing.T) {
 	repo, db := newRefreshTokenRepoForTest(t)
-	if _, err := repo.Create("old-jti", "old-hash", "alice", store.RoleAdmin, time.Now().Add(time.Hour)); err != nil {
+	if _, err := repo.Create("old-jti", "old-hash", "alice", auth.RoleAdmin, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("create old token: %v", err)
 	}
 
@@ -42,7 +42,7 @@ func TestRefreshTokenRotateAllowsExactlyOneConcurrentSuccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := repo.Rotate("old-jti", newJTI, "new-hash", "alice", store.RoleReadonly, time.Now().Add(time.Hour))
+			_, err := repo.Rotate("old-jti", newJTI, "new-hash", "alice", auth.RoleReadonly, time.Now().Add(time.Hour))
 			errs <- err
 		}()
 	}
@@ -66,14 +66,14 @@ func TestRefreshTokenRotateAllowsExactlyOneConcurrentSuccess(t *testing.T) {
 		t.Fatalf("rotate results = success:%d unavailable:%d, want 1 and 1", successes, unavailable)
 	}
 
-	var old store.RefreshToken
+	var old auth.RefreshToken
 	if err := db.Where("jti = ?", "old-jti").First(&old).Error; err != nil {
 		t.Fatalf("load old token: %v", err)
 	}
 	if !old.Revoked || old.ReplacedBy == "" {
 		t.Fatalf("old token state = revoked:%t replaced_by:%q", old.Revoked, old.ReplacedBy)
 	}
-	var replacements []store.RefreshToken
+	var replacements []auth.RefreshToken
 	if err := db.Where("jti IN ?", []string{"new-jti-a", "new-jti-b"}).Find(&replacements).Error; err != nil {
 		t.Fatalf("load replacements: %v", err)
 	}
@@ -86,13 +86,13 @@ func TestRefreshTokenRotateAllowsExactlyOneConcurrentSuccess(t *testing.T) {
 func TestRefreshTokenRevokeFamilyRevokesReplacementChain(t *testing.T) {
 	repo, _ := newRefreshTokenRepoForTest(t)
 	expiresAt := time.Now().Add(time.Hour)
-	if _, err := repo.Create("family-old", "old-hash", "alice", store.RoleAdmin, expiresAt); err != nil {
+	if _, err := repo.Create("family-old", "old-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
 		t.Fatalf("create old token: %v", err)
 	}
-	if _, err := repo.Create("unrelated", "other-hash", "alice", store.RoleAdmin, expiresAt); err != nil {
+	if _, err := repo.Create("unrelated", "other-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
 		t.Fatalf("create unrelated token: %v", err)
 	}
-	if _, err := repo.Rotate("family-old", "family-new", "new-hash", "alice", store.RoleAdmin, expiresAt); err != nil {
+	if _, err := repo.Rotate("family-old", "family-new", "new-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
 		t.Fatalf("rotate token: %v", err)
 	}
 
@@ -113,17 +113,17 @@ func TestRefreshTokenRevokeFamilyRevokesReplacementChain(t *testing.T) {
 func TestRefreshTokenRotateRollsBackRevocationWhenInsertFails(t *testing.T) {
 	repo, db := newRefreshTokenRepoForTest(t)
 	expiresAt := time.Now().Add(time.Hour)
-	if _, err := repo.Create("old-jti", "old-hash", "alice", store.RoleAdmin, expiresAt); err != nil {
+	if _, err := repo.Create("old-jti", "old-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
 		t.Fatalf("create old token: %v", err)
 	}
-	if _, err := repo.Create("duplicate-jti", "existing-hash", "alice", store.RoleAdmin, expiresAt); err != nil {
+	if _, err := repo.Create("duplicate-jti", "existing-hash", "alice", auth.RoleAdmin, expiresAt); err != nil {
 		t.Fatalf("create duplicate token: %v", err)
 	}
 
-	if _, err := repo.Rotate("old-jti", "duplicate-jti", "new-hash", "alice", store.RoleAdmin, expiresAt); err == nil {
+	if _, err := repo.Rotate("old-jti", "duplicate-jti", "new-hash", "alice", auth.RoleAdmin, expiresAt); err == nil {
 		t.Fatal("duplicate replacement jti must fail")
 	}
-	var old store.RefreshToken
+	var old auth.RefreshToken
 	if err := db.Where("jti = ?", "old-jti").First(&old).Error; err != nil {
 		t.Fatalf("load old token: %v", err)
 	}
@@ -137,11 +137,11 @@ func TestRefreshTokenCleanExpiredIsBounded(t *testing.T) {
 	repo, db := newRefreshTokenRepoForTest(t)
 	for i := 0; i < 5; i++ {
 		jti := []string{"expired-1", "expired-2", "expired-3", "expired-4", "expired-5"}[i]
-		if _, err := repo.Create(jti, "hash", "alice", store.RoleAdmin, time.Now().Add(-time.Hour)); err != nil {
+		if _, err := repo.Create(jti, "hash", "alice", auth.RoleAdmin, time.Now().Add(-time.Hour)); err != nil {
 			t.Fatalf("create expired token %d: %v", i, err)
 		}
 	}
-	if _, err := repo.Create("active", "hash", "alice", store.RoleAdmin, time.Now().Add(time.Hour)); err != nil {
+	if _, err := repo.Create("active", "hash", "alice", auth.RoleAdmin, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("create active token: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestRefreshTokenCleanExpiredIsBounded(t *testing.T) {
 		t.Fatalf("clean expired: %v", err)
 	}
 	var expiredCount int64
-	if err := db.Model(&store.RefreshToken{}).Where("expires_at <= ?", time.Now()).Count(&expiredCount).Error; err != nil {
+	if err := db.Model(&auth.RefreshToken{}).Where("expires_at <= ?", time.Now()).Count(&expiredCount).Error; err != nil {
 		t.Fatalf("count expired tokens: %v", err)
 	}
 	if expiredCount != 3 {
@@ -172,7 +172,7 @@ func TestRefreshTokenRevokeAdminIncludesLegacyRows(t *testing.T) {
 		{jti: "current-admin", username: "admin"},
 		{jti: "other-user", username: "alice"},
 	} {
-		if _, err := repo.Create(row.jti, "hash", row.username, store.RoleAdmin, expiresAt); err != nil {
+		if _, err := repo.Create(row.jti, "hash", row.username, auth.RoleAdmin, expiresAt); err != nil {
 			t.Fatalf("create %s: %v", row.jti, err)
 		}
 	}

@@ -14,7 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/auth"
-	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -25,7 +25,7 @@ func newAdminAccountRepoForTest(t *testing.T) *repository.AdminAccountRepo {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.AdminAccount{}); err != nil {
+	if err := db.AutoMigrate(&authstore.AdminAccount{}); err != nil {
 		t.Fatalf("migrate admin accounts: %v", err)
 	}
 	return repository.NewAdminAccountRepo(db)
@@ -87,7 +87,7 @@ func TestListAdminUsersHidesPasswordHash(t *testing.T) {
 		t.Fatalf("password hash leaked into response: %s", ctx.Response.Body())
 	}
 	var resp struct {
-		Items []store.AdminAccount `json:"items"`
+		Items []authstore.AdminAccount `json:"items"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)

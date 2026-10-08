@@ -7,8 +7,11 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/route/param"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/admin/system/iplist"
+	"My-OpenWaf/internal/admin/system/threatintel"
+	ipliststore "My-OpenWaf/internal/store/iplist"
 	"My-OpenWaf/internal/store/repository"
+	threatintelstore "My-OpenWaf/internal/store/threatintel"
 )
 
 /*
@@ -38,7 +41,7 @@ func TestDefectCreateThreatIntelFeedDoesNotReload(t *testing.T) {
 	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
 	reloadCount := 0
 
-	ctx := invokeThreatIntelHandler(t, CreateThreatIntelFeed(repo, func() error {
+	ctx := invokeThreatIntelHandler(t, threatintel.CreateThreatIntelFeed(repo, func() error {
 		reloadCount++
 		return nil
 	}), "POST", "/api/v1/threat-intel-feeds", nil,
@@ -53,14 +56,14 @@ func TestDefectCreateThreatIntelFeedDoesNotReload(t *testing.T) {
 
 func TestDefectUpdateThreatIntelFeedDoesNotReload(t *testing.T) {
 	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
-	seed := &store.ThreatIntelFeed{Name: "toggle", URL: "https://intel.example.test/t.txt", Kind: "blacklist", Action: "intercept", Enabled: true, SyncInterval: 3600}
+	seed := &threatintelstore.ThreatIntelFeed{Name: "toggle", URL: "https://intel.example.test/t.txt", Kind: "blacklist", Action: "intercept", Enabled: true, SyncInterval: 3600}
 	if err := repo.Create(seed); err != nil {
 		t.Fatalf("seed feed: %v", err)
 	}
 	idStr := strconv.FormatUint(uint64(seed.ID), 10)
 	reloadCount := 0
 
-	ctx := invokeThreatIntelHandler(t, UpdateThreatIntelFeed(repo, func() error {
+	ctx := invokeThreatIntelHandler(t, threatintel.UpdateThreatIntelFeed(repo, func() error {
 		reloadCount++
 		return nil
 	}), "POST", "/api/v1/threat-intel-feeds/"+idStr+"/update", param.Params{{Key: "id", Value: idStr}}, []byte(`{"enabled":false}`))
@@ -75,13 +78,13 @@ func TestDefectUpdateThreatIntelFeedDoesNotReload(t *testing.T) {
 func TestDefectUpdateIPEntryCannotClearSiteScope(t *testing.T) {
 	repo := newIPListRepoForTest(t)
 	siteID := uint(12)
-	item := &store.IPListEntry{Kind: store.IPListBlack, Value: "192.0.2.77", Enabled: true, Action: "intercept", SiteID: &siteID}
+	item := &ipliststore.IPListEntry{Kind: ipliststore.IPListBlack, Value: "192.0.2.77", Enabled: true, Action: "intercept", SiteID: &siteID}
 	if err := repo.Create(item); err != nil {
 		t.Fatalf("seed scoped entry: %v", err)
 	}
 	idStr := strconv.FormatUint(uint64(item.ID), 10)
 
-	ctx := invokeThreatIntelHandler(t, UpdateIPEntry(repo, func() error { return nil }),
+	ctx := invokeThreatIntelHandler(t, iplist.UpdateIPEntry(repo, func() error { return nil }),
 		"POST", "/api/v1/ip-lists/"+idStr+"/update", param.Params{{Key: "id", Value: idStr}}, []byte(`{"site_id":null}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("update status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
@@ -100,13 +103,13 @@ func TestDefectUpdateIPEntryCannotClearSiteScope(t *testing.T) {
 func TestDefectUpdateThreatIntelFeedCannotClearSiteScope(t *testing.T) {
 	repo := repository.NewThreatIntelRepo(newThreatIntelDBForTest(t))
 	siteID := uint(5)
-	seed := &store.ThreatIntelFeed{Name: "scoped", URL: "https://intel.example.test/s.txt", Kind: "blacklist", Action: "intercept", Enabled: true, SyncInterval: 3600, SiteID: &siteID}
+	seed := &threatintelstore.ThreatIntelFeed{Name: "scoped", URL: "https://intel.example.test/s.txt", Kind: "blacklist", Action: "intercept", Enabled: true, SyncInterval: 3600, SiteID: &siteID}
 	if err := repo.Create(seed); err != nil {
 		t.Fatalf("seed scoped feed: %v", err)
 	}
 	idStr := strconv.FormatUint(uint64(seed.ID), 10)
 
-	ctx := invokeThreatIntelHandler(t, UpdateThreatIntelFeed(repo, func() error { return nil }),
+	ctx := invokeThreatIntelHandler(t, threatintel.UpdateThreatIntelFeed(repo, func() error { return nil }),
 		"POST", "/api/v1/threat-intel-feeds/"+idStr+"/update", param.Params{{Key: "id", Value: idStr}}, []byte(`{"site_id":null}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("update status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))

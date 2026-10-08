@@ -8,7 +8,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
@@ -87,7 +87,7 @@ func CreateUser(repo *repository.AccessControlRepo, reload func() error) app.Han
 		if req.Enabled != nil {
 			enabled = *req.Enabled
 		}
-		user := &store.AccessUser{
+		user := &access.AccessUser{
 			SiteID:       siteID,
 			Username:     req.Username,
 			PasswordHash: string(hash),
@@ -200,7 +200,7 @@ func DeleteUser(repo *repository.AccessControlRepo, reload func() error) app.Han
  * @param userID 用户 ID。
  * @return 命中的用户；未找到或不属于该站点时返回错误。
  */
-func findSiteUser(repo *repository.AccessControlRepo, siteID, userID uint) (*store.AccessUser, error) {
+func findSiteUser(repo *repository.AccessControlRepo, siteID, userID uint) (*access.AccessUser, error) {
 	users, err := repo.ListAccessUsers(siteID)
 	if err != nil {
 		return nil, err

@@ -57,6 +57,7 @@ import (
 	"My-OpenWaf/internal/acme"
 	adminsystem "My-OpenWaf/internal/admin/system"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 
 	"github.com/andybalholm/brotli"
@@ -14276,12 +14277,20 @@ func seedAppProcessConfigDB(t *testing.T, dbPath string, adminBind string, setup
 	if err := store.AutoMigrate(db); err != nil {
 		t.Fatalf("migrate process config db: %v", err)
 	}
-	token, _, err := store.SeedDefaults(db, adminBind, slog.Default())
-	if err != nil {
+	if _, err := auth.SeedDefaults(db, adminBind, slog.Default()); err != nil {
 		t.Fatalf("seed process config db: %v", err)
 	}
+	// 令牌不再由 seed 预置：按真实流程给 admin 账号建一枚，供测试以 API Key 调管理面。
+	adminAcct, err := repository.NewAdminAccountRepo(db).GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("load seeded admin account: %v", err)
+	}
+	token, _, err := repository.NewAdminAPIKeyRepo(db).Create(adminAcct.ID, "process-test")
+	if err != nil {
+		t.Fatalf("create process test api key: %v", err)
+	}
 	if token == "" {
-		t.Fatal("seed process config db returned empty api token")
+		t.Fatal("process test api key is empty")
 	}
 	if setup != nil {
 		if err := setup(db); err != nil {

@@ -1,11 +1,15 @@
 package store
 
+import (
+	"My-OpenWaf/internal/store/approute"
+)
+
 import "testing"
 
 // TestComputeDedupKeyStable 验证摘要长度与稳定性。
 func TestComputeDedupKeyStable(t *testing.T) {
-	a := ComputeDedupKey(1, "GET", "example.com", "/a", "x=1")
-	b := ComputeDedupKey(1, "GET", "example.com", "/a", "x=1")
+	a := approute.ComputeDedupKey(1, "GET", "example.com", "/a", "x=1")
+	b := approute.ComputeDedupKey(1, "GET", "example.com", "/a", "x=1")
 	if a != b {
 		t.Fatal("相同输入必须得到相同摘要")
 	}
@@ -18,15 +22,15 @@ func TestComputeDedupKeyStable(t *testing.T) {
 // 分隔符缺失会让字段边界产生歧义，把本应不同的资源判为同一条。
 func TestComputeDedupKeyDistinguishesFieldBoundary(t *testing.T) {
 	// host+path 拼接后同为 "ab/c"，必须得到不同摘要。
-	x := ComputeDedupKey(1, "GET", "ab", "/c", "")
-	y := ComputeDedupKey(1, "GET", "a", "b/c", "")
+	x := approute.ComputeDedupKey(1, "GET", "ab", "/c", "")
+	y := approute.ComputeDedupKey(1, "GET", "a", "b/c", "")
 	if x == y {
 		t.Fatal("字段边界不同的输入不得产生相同摘要")
 	}
 
 	// query 与 path 之间同理。
-	p := ComputeDedupKey(1, "GET", "h", "/a", "b")
-	q := ComputeDedupKey(1, "GET", "h", "/ab", "")
+	p := approute.ComputeDedupKey(1, "GET", "h", "/a", "b")
+	q := approute.ComputeDedupKey(1, "GET", "h", "/ab", "")
 	if p == q {
 		t.Fatal("path/query 边界不同的输入不得产生相同摘要")
 	}
@@ -34,13 +38,13 @@ func TestComputeDedupKeyDistinguishesFieldBoundary(t *testing.T) {
 
 // TestComputeDedupKeyVariesWithEveryField 验证五个字段各自都参与摘要。
 func TestComputeDedupKeyVariesWithEveryField(t *testing.T) {
-	base := ComputeDedupKey(1, "GET", "example.com", "/a", "x=1")
+	base := approute.ComputeDedupKey(1, "GET", "example.com", "/a", "x=1")
 	variants := map[string]string{
-		"siteID": ComputeDedupKey(2, "GET", "example.com", "/a", "x=1"),
-		"method": ComputeDedupKey(1, "POST", "example.com", "/a", "x=1"),
-		"host":   ComputeDedupKey(1, "GET", "other.com", "/a", "x=1"),
-		"path":   ComputeDedupKey(1, "GET", "example.com", "/b", "x=1"),
-		"query":  ComputeDedupKey(1, "GET", "example.com", "/a", "x=2"),
+		"siteID": approute.ComputeDedupKey(2, "GET", "example.com", "/a", "x=1"),
+		"method": approute.ComputeDedupKey(1, "POST", "example.com", "/a", "x=1"),
+		"host":   approute.ComputeDedupKey(1, "GET", "other.com", "/a", "x=1"),
+		"path":   approute.ComputeDedupKey(1, "GET", "example.com", "/b", "x=1"),
+		"query":  approute.ComputeDedupKey(1, "GET", "example.com", "/a", "x=2"),
 	}
 	for field, got := range variants {
 		if got == base {
@@ -51,11 +55,11 @@ func TestComputeDedupKeyVariesWithEveryField(t *testing.T) {
 
 // TestEnsureDedupKeyFillsAndPreserves 验证仅在为空时填充，已有值不被覆盖。
 func TestEnsureDedupKeyFillsAndPreserves(t *testing.T) {
-	r := &RecordedResource{SiteID: 3, Method: "GET", Host: "h", Path: "/p", QueryString: "q=1"}
+	r := &approute.RecordedResource{SiteID: 3, Method: "GET", Host: "h", Path: "/p", QueryString: "q=1"}
 	if !r.EnsureDedupKey() {
 		t.Fatal("空 DedupKey 应被填充")
 	}
-	want := ComputeDedupKey(3, "GET", "h", "/p", "q=1")
+	want := approute.ComputeDedupKey(3, "GET", "h", "/p", "q=1")
 	if r.DedupKey != want {
 		t.Fatalf("DedupKey = %q, want %q", r.DedupKey, want)
 	}
@@ -70,7 +74,7 @@ func TestEnsureDedupKeyFillsAndPreserves(t *testing.T) {
 }
 
 func TestEnsureDedupKeyNilReceiverSafe(t *testing.T) {
-	var r *RecordedResource
+	var r *approute.RecordedResource
 	if r.EnsureDedupKey() {
 		t.Error("nil 接收者应返回 false")
 	}

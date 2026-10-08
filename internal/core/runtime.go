@@ -48,6 +48,10 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	for _, w := range cfg.QueueWarnings {
 		log.Warn(w)
 	}
+	// 遥测参数的解析失败同理。
+	for _, w := range cfg.HTTPTrace.Warnings {
+		log.Warn(w)
+	}
 	warnings, err := preflightCfg.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("config: %w", err)

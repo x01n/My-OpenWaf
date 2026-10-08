@@ -1,18 +1,221 @@
 package dataplane
 
 import (
+	"context"
+	"crypto/tls"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/network"
 	"github.com/glebarez/sqlite"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
+	"My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/accessgate"
 )
+
+// oauthProtoTestConn 只提供 proto 判定所需的连接元数据；其余 network.Conn 方法
+// 在 loadOAuthFlow 路径上不会被调用。RemoteAddr 显式返回非回环地址，避免
+// HTTP/3 回环元数据判定介入本测试。
+type oauthProtoTestConn struct {
+	network.Conn
+	state tls.ConnectionState
+}
+
+func (c *oauthProtoTestConn) ConnectionState() tls.ConnectionState { return c.state }
+
+func (c *oauthProtoTestConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(203, 0, 113, 9), Port: 44321}
+}
+
+// TestLoadOAuthFlowRedirectURIIgnoresClientForwardedProto 覆盖 H-3：
+// OAuth 回调 scheme 必须取自连接协商结果，客户端可控的 X-Forwarded-Proto 不得参与。
+// 修复前 TLS 连接发 X-Forwarded-Proto: http 会把 redirect_uri 降为 http，
+// authorization code 因此经明文回传。
+func TestLoadOAuthFlowRedirectURIIgnoresClientForwardedProto(t *testing.T) {
+	const host = "app.example.com"
+	const callbackPath = "/__owaf/access/oauth/callback"
+
+	cases := []struct {
+		name     string
+		tlsConn  bool
+		header   string
+		wantBase string
+	}{
+		{"明文连接不得被抬升为 https", false, "https", "http://"},
+		{"TLS 连接不得被降级为 http", true, "http", "https://"},
+		{"TLS 连接的自声明 https 保持 https", true, "https", "https://"},
+		{"明文连接的自声明 http 保持 http", false, "http", "http://"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &snapshot.SiteRuntime{
+				Site: store.Site{ID: 3},
+				AccessControl: &snapshot.AccessControlConfig{
+					Enabled:    true,
+					SessionTTL: 3600,
+					Providers: []snapshot.AccessControlProvider{{
+						ID:   7,
+						Type: access.AccessProviderOAuth2,
+						Name: "idp",
+						Config: `{"client_id":"cid","client_secret":"s3cr3t",` +
+							`"auth_url":"https://idp.example/authorize","token_url":"https://idp.example/token",` +
+							`"userinfo_url":"https://idp.example/userinfo"}`,
+					}},
+				},
+			}
+
+			c := app.NewContext(0)
+			c.Request.Header.Set("X-Forwarded-Proto", tc.header)
+			if tc.tlsConn {
+				c.SetConn(&oauthProtoTestConn{state: tls.ConnectionState{Version: tls.VersionTLS13}})
+			}
+
+			flow, _, ok := loadOAuthFlow(c, rt, host, 7, nil)
+			if !ok {
+				t.Fatal("loadOAuthFlow 应解析出 provider")
+			}
+			want := tc.wantBase + host + callbackPath
+			if flow.RedirectURI != want {
+				t.Fatalf("redirect_uri = %q, want %q——回调 scheme 不得由客户端头决定", flow.RedirectURI, want)
+			}
+		})
+	}
+}
+
+// TestLoadOAuthFlowRedirectURIThroughHTTP3LoopbackMetadata 覆盖 HTTP/3 分支：
+// h3 请求经本机回环转发到数据面，scheme 只能来自 applyInternalHTTP3RequestMetadata
+// 认证过的回环标记；非回环来源携带同样的内部头不得影响结果。
+func TestLoadOAuthFlowRedirectURIThroughHTTP3LoopbackMetadata(t *testing.T) {
+	rt := &snapshot.SiteRuntime{
+		Site: store.Site{ID: 4, TLSEnabled: true},
+		AccessControl: &snapshot.AccessControlConfig{
+			Enabled:    true,
+			SessionTTL: 3600,
+			Providers: []snapshot.AccessControlProvider{{
+				ID:   8,
+				Type: access.AccessProviderOIDC,
+				Name: "idp-h3",
+				Config: `{"client_id":"cid-h3","issuer":"https://idp.example",` +
+					`"auth_url":"https://idp.example/authorize"}`,
+			}},
+		},
+	}
+	const host = "h3.example.com"
+
+	// 回环 + 已认证 h3 元数据：scheme 为 h3。
+	loopback := app.NewContext(0)
+	loopback.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
+	loopback.Request.Header.Set("X-Forwarded-Proto", "h3")
+	loopback.Request.Header.Set(InternalHTTP3TLSVersionHeader, "TLS13")
+	loopback.SetConn(&loopbackHertzConn{
+		Conn:       &testHertzConn{Conn: nil},
+		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443},
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12001},
+	})
+	applyInternalHTTP3RequestMetadata(loopback)
+
+	flow, _, ok := loadOAuthFlow(loopback, rt, host, 8, nil)
+	if !ok {
+		t.Fatal("loadOAuthFlow 应解析出 OIDC provider")
+	}
+	if want := "h3://" + host + accessOAuthCallbackPath; flow.RedirectURI != want {
+		t.Fatalf("h3 回环请求 redirect_uri = %q, want %q", flow.RedirectURI, want)
+	}
+
+	// 非回环来源伪造同一组内部头：applyInternalHTTP3RequestMetadata 会清除这些头，
+	// scheme 必须回落到连接判定（明文 http），不得采信 X-Forwarded-Proto: h3。
+	forged := app.NewContext(0)
+	forged.Request.Header.Set(InternalHTTP3ProtoHeader, "h3")
+	forged.Request.Header.Set("X-Forwarded-Proto", "h3")
+	forged.SetConn(&oauthProtoTestConn{state: tls.ConnectionState{}})
+	applyInternalHTTP3RequestMetadata(forged)
+
+	flow, _, ok = loadOAuthFlow(forged, rt, host, 8, nil)
+	if !ok {
+		t.Fatal("loadOAuthFlow 应解析出 OIDC provider")
+	}
+	if want := "http://" + host + accessOAuthCallbackPath; flow.RedirectURI != want {
+		t.Fatalf("非回环伪造 h3 头时 redirect_uri = %q, want %q", flow.RedirectURI, want)
+	}
+}
+
+// TestRequestProtoFromContextUsesNegotiatedTLSConnection 用真实 TLS 握手驱动
+// 数据面连接包装栈（fixURITLSTransport → fixURIHertzConn → FixURIConn → tls.Conn），
+// 证明 requestProtoFromContext 读到的 scheme 来自连接协商而非合成替身。
+func TestRequestProtoFromContextUsesNegotiatedTLSConnection(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	cert, err := acme.GenerateSelfSigned("localhost")
+	if err != nil {
+		t.Fatalf("generate self-signed cert: %v", err)
+	}
+
+	connCh := make(chan network.Conn, 1)
+	errCh := make(chan error, 1)
+	transport := &fixURITLSTransport{
+		ln: &singleConnListener{conn: serverConn},
+		tls: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS13,
+			MaxVersion:   tls.VersionTLS13,
+			NextProtos:   []string{"h2"},
+		},
+		OnConnect: func(ctx context.Context, conn network.Conn) context.Context {
+			connCh <- conn
+			return ctx
+		},
+	}
+	go func() {
+		errCh <- transport.ListenAndServe(func(ctx context.Context, conn interface{}) error {
+			if closer, ok := conn.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+			return nil
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         "localhost",
+		MinVersion:         tls.VersionTLS13,
+		MaxVersion:         tls.VersionTLS13,
+		NextProtos:         []string{"h2"},
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("client TLS handshake: %v", err)
+	}
+
+	select {
+	case conn := <-connCh:
+		ctx := app.NewContext(0)
+		ctx.Request.Header.Set("X-Forwarded-Proto", "http")
+		ctx.SetConn(conn)
+		if got := requestProtoFromContext(ctx); got != "https" {
+			t.Fatalf("requestProtoFromContext = %q, want https——真实 TLS 连接不得被请求头降级", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for accepted connection")
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("transport returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for transport shutdown")
+	}
+}
 
 func TestBuildGateConfig(t *testing.T) {
 	ac := &snapshot.AccessControlConfig{
@@ -99,7 +302,7 @@ func TestHandleAccessVerifyRejectsUserPasswordWithoutEnabledProvider(t *testing.
 	if err != nil {
 		t.Fatalf("打开测试数据库失败: %v", err)
 	}
-	if err := db.AutoMigrate(&store.AccessUser{}); err != nil {
+	if err := db.AutoMigrate(&access.AccessUser{}); err != nil {
 		t.Fatalf("迁移访问控制用户表失败: %v", err)
 	}
 
@@ -108,7 +311,7 @@ func TestHandleAccessVerifyRejectsUserPasswordWithoutEnabledProvider(t *testing.
 		t.Fatalf("生成用户密码哈希失败: %v", err)
 	}
 	repo := repository.NewAccessControlRepo(db)
-	if err := repo.CreateAccessUser(&store.AccessUser{
+	if err := repo.CreateAccessUser(&access.AccessUser{
 		SiteID:       1,
 		Username:     "alice",
 		PasswordHash: string(userHash),
@@ -123,7 +326,7 @@ func TestHandleAccessVerifyRejectsUserPasswordWithoutEnabledProvider(t *testing.
 		SiteHost:   "site.test",
 		SessionTTL: 3600,
 		Providers: []accessgate.ProviderConfig{
-			{ID: 2, Type: store.AccessProviderOAuth2, Name: "GitHub"},
+			{ID: 2, Type: access.AccessProviderOAuth2, Name: "GitHub"},
 		},
 	}
 	gate := accessgate.NewGate(cfg, accessgate.NewMemorySessionStore())

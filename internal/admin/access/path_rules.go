@@ -7,16 +7,16 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
 
 // validPathRuleActions 路径规则允许的动作集合。
 var validPathRuleActions = map[string]bool{
-	store.AccessActionRequireAuth: true,
-	store.AccessActionAllow:       true,
-	store.AccessActionDeny:        true,
+	access.AccessActionRequireAuth: true,
+	access.AccessActionAllow:       true,
+	access.AccessActionDeny:        true,
 }
 
 // CreatePathRuleReq 创建路径访问控制规则的请求体。
@@ -82,7 +82,7 @@ func CreatePathRule(repo *repository.AccessControlRepo, reload func() error) app
 			return
 		}
 		if req.Action == "" {
-			req.Action = store.AccessActionRequireAuth
+			req.Action = access.AccessActionRequireAuth
 		}
 		if !validPathRuleActions[req.Action] {
 			c.JSON(400, map[string]string{"error": "invalid action, must be one of require_auth, allow, deny"})
@@ -92,7 +92,7 @@ func CreatePathRule(repo *repository.AccessControlRepo, reload func() error) app
 		if req.Enabled != nil {
 			enabled = *req.Enabled
 		}
-		rule := &store.AccessPathRule{
+		rule := &access.AccessPathRule{
 			SiteID:   siteID,
 			Path:     req.Path,
 			Action:   req.Action,
@@ -216,7 +216,7 @@ func DeletePathRule(repo *repository.AccessControlRepo, reload func() error) app
  * @param ruleID 规则 ID。
  * @return 命中的规则；未找到或不属于该站点时返回错误。
  */
-func findSitePathRule(repo *repository.AccessControlRepo, siteID, ruleID uint) (*store.AccessPathRule, error) {
+func findSitePathRule(repo *repository.AccessControlRepo, siteID, ruleID uint) (*access.AccessPathRule, error) {
 	rules, err := repo.ListAccessPathRules(siteID)
 	if err != nil {
 		return nil, err

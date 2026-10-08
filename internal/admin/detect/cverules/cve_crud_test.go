@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/route/param"
 
 	"My-OpenWaf/internal/store"
+	cvestore "My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/waf/cve"
 )
 
@@ -245,10 +246,10 @@ func TestResetCVERuleOverrideUsesBodyScope(t *testing.T) {
 	rule := seedOneCVERule(t, repo)
 	globalEnabled := false
 	policyEnabled := false
-	if err := repo.DB().Create(&store.CVERuleScopeOverride{RuleID: rule.ID, ScopeType: store.CVEScopeGlobal, ScopeID: 0, Enabled: &globalEnabled}).Error; err != nil {
+	if err := repo.DB().Create(&cvestore.CVERuleScopeOverride{RuleID: rule.ID, ScopeType: cvestore.CVEScopeGlobal, ScopeID: 0, Enabled: &globalEnabled}).Error; err != nil {
 		t.Fatalf("create global override: %v", err)
 	}
-	if err := repo.DB().Create(&store.CVERuleScopeOverride{RuleID: rule.ID, ScopeType: store.CVEScopePolicy, ScopeID: policy.ID, Enabled: &policyEnabled}).Error; err != nil {
+	if err := repo.DB().Create(&cvestore.CVERuleScopeOverride{RuleID: rule.ID, ScopeType: cvestore.CVEScopePolicy, ScopeID: policy.ID, Enabled: &policyEnabled}).Error; err != nil {
 		t.Fatalf("create policy override: %v", err)
 	}
 	idStr := strconv.FormatUint(uint64(rule.ID), 10)
@@ -257,11 +258,11 @@ func TestResetCVERuleOverrideUsesBodyScope(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("reset status=%d body=%s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
-	var remaining []store.CVERuleScopeOverride
+	var remaining []cvestore.CVERuleScopeOverride
 	if err := repo.DB().Where("rule_id = ?", rule.ID).Find(&remaining).Error; err != nil {
 		t.Fatalf("load remaining overrides: %v", err)
 	}
-	if len(remaining) != 1 || remaining[0].ScopeType != store.CVEScopeGlobal {
+	if len(remaining) != 1 || remaining[0].ScopeType != cvestore.CVEScopeGlobal {
 		t.Fatalf("body scope reset removed wrong overrides: %#v", remaining)
 	}
 }

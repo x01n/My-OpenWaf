@@ -1579,10 +1579,11 @@
   },
   "apiKeys": {
     "title": "API 密钥管理",
-    "description": "管理用于访问管理 API 的密钥",
+    "description": "管理归属于各个管理员账号的 API 密钥",
     "create": "创建密钥",
     "name": "名称",
     "namePlaceholder": "输入密钥名称",
+    "owner": "所属用户",
     "key": "密钥",
     "hidden": "仅创建时显示",
     "createdAt": "创建时间",
@@ -1594,7 +1595,7 @@
     "deleteConfirm": "确定要删除此 API 密钥吗？删除后使用该密钥的程序将无法访问。",
     "copyWarning": "请立即复制此密钥，关闭对话框后将无法再次查看。",
     "copied": "已复制到剪贴板",
-    "adminOnlyHint": "API 密钥只能由管理员创建或删除。",
+    "adminOnlyHint": "每个密钥归属于创建它的账号；账号删除后其密钥立即失效。",
     "refreshFailed": "操作已完成，但密钥列表刷新失败，请稍后手动刷新。"
   },
   "adminUsers": {

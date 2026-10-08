@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"My-OpenWaf/internal/waf/challenge/gm"
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // TestShardEnvelopeSignatureRoundTrip 锁定「服务端签发的 0x06 信封带有效签名」：
@@ -22,7 +23,7 @@ func TestShardEnvelopeSignatureRoundTrip(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	envelope, _, err := GeneratePoWShardedEnvelope(ChallengeProofDifficulty, "sig-nonce", key)
+	envelope, _, err := GeneratePoWShardedEnvelope(pow.ChallengeProofDifficulty, "sig-nonce", key)
 	if err != nil || envelope == "" {
 		t.Fatalf("GeneratePoWShardedEnvelope: %v", err)
 	}

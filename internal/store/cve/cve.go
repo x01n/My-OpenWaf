@@ -1,0 +1,46 @@
+package cve
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// CVERuleRecord 存储自定义规则与 feed 同步下来的 CVE 规则。
+type CVERuleRecord struct {
+	ID          uint           `gorm:"primarykey" json:"id"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	CVEID       string         `gorm:"size:32;index" json:"cve_id"`
+	Category    string         `gorm:"size:32" json:"category"`
+	Pattern     string         `gorm:"type:text" json:"pattern"`
+	Target      string         `gorm:"size:32" json:"target"`
+	Severity    string         `gorm:"size:16" json:"severity"`
+	Action      string         `gorm:"size:32;default:drop" json:"action"`
+	CaptchaType string         `gorm:"size:16" json:"captcha_type,omitempty"`
+	Enabled     bool           `gorm:"default:false" json:"enabled"`
+	Description string         `gorm:"type:text" json:"description"`
+	Source      string         `gorm:"size:32" json:"source"`
+	Approved    bool           `gorm:"default:false" json:"approved"`
+	CVSSScore   float64        `gorm:"default:0" json:"cvss_score"`
+	CWEType     string         `gorm:"size:32" json:"cwe_type"`
+	// References 是 NVD 采集的参考链接，换行分隔；手工与自动生成的规则为空。
+	// 本模型与 cve.CVERuleModel 映射同一张 cve_rules 表，字段集必须保持一致——
+	// 本结构体负责建表/加列（AutoMigrate），cve.CVERuleModel 负责运行时读写，
+	// 只在其中一侧新增字段会导致列不存在于表中。见 model_parity_test.go。
+	References string `gorm:"type:text" json:"references"`
+}
+
+func (CVERuleRecord) TableName() string { return "cve_rules" }
+
+// CVESyncLog 记录一次 CVE feed 同步的结果。
+type CVESyncLog struct {
+	ID         uint      `gorm:"primarykey" json:"id"`
+	Source     string    `gorm:"size:32" json:"source"` // nvd, github
+	Status     string    `gorm:"size:16" json:"status"` // success, failed, running
+	RulesAdded int       `json:"rules_added"`
+	Error      string    `gorm:"size:512" json:"error"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+}

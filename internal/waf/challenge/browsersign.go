@@ -12,6 +12,8 @@ import (
 	"github.com/emmansun/gmsm/sm3"
 
 	"My-OpenWaf/internal/waf/challenge/gm"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // 浏览器签名请求头（由站点挂载 JS 写入，WAF 侧校验）。
@@ -174,8 +176,8 @@ func BrowserSignInjectScript(ticket BrowserSignTicket) string {
 		// 那一版资产，此后资产换过多次、串从未更新 —— 在 `immutable` 缓存下
 		// 会造成「老访客拿旧 wasm」的静默失配。槽位顺序必须与模板一致：
 		// 先 wasm、后 glue（错位不会编译报错，只会静默用错串）。
-		PowWasmURL(),
-		PowGlueURL(),
+		pow.PowWasmURL(),
+		pow.PowGlueURL(),
 	)
 	combined := envJS + "\n" + raw
 	attr := ""
@@ -402,7 +404,7 @@ func abs64(v int64) int64 {
 }
 
 func obfuscateBrowserSignJS(js string) string {
-	v := randomVarNames(12)
+	v := pow.RandomVarNames(12)
 	r := strings.NewReplacer(
 		"__owaf_bs_nonce", v[0],
 		"__owaf_bs_exp", v[1],

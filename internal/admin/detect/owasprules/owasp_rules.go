@@ -15,6 +15,7 @@ import (
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -124,8 +125,8 @@ func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.Handler
 	}
 }
 
-func findOWASPCatalog(db *gorm.DB, rawID string) (*store.OWASPRuleCatalog, error) {
-	var item store.OWASPRuleCatalog
+func findOWASPCatalog(db *gorm.DB, rawID string) (*owasp.OWASPRuleCatalog, error) {
+	var item owasp.OWASPRuleCatalog
 	if numericID, err := strconv.ParseUint(rawID, 10, 64); err == nil && numericID > 0 {
 		return &item, db.Where("id = ? AND active = ?", uint(numericID), true).First(&item).Error
 	}
@@ -214,7 +215,7 @@ func validateOWASPPatch(patch *owaspRulePatch) error {
  * validateOWASPStoredConfig 校验合并后的规则覆盖，防止部分更新留下
  * 可执行动作与其附属字段不一致的配置。
  */
-func validateOWASPStoredConfig(config *store.PolicyOWASPRuleConfig, fallbackAction string) error {
+func validateOWASPStoredConfig(config *owasp.PolicyOWASPRuleConfig, fallbackAction string) error {
 	effectiveAction := strings.TrimSpace(fallbackAction)
 	if config.Action != nil && strings.TrimSpace(*config.Action) != "" {
 		effectiveAction = strings.TrimSpace(*config.Action)
@@ -236,7 +237,7 @@ func validateOWASPStoredConfig(config *store.PolicyOWASPRuleConfig, fallbackActi
 	return nil
 }
 
-func applyOWASPPatch(config *store.PolicyOWASPRuleConfig, patch owaspRulePatch) {
+func applyOWASPPatch(config *owasp.PolicyOWASPRuleConfig, patch owaspRulePatch) {
 	if patch.Enabled != nil {
 		config.Enabled = patch.Enabled
 	}
@@ -327,7 +328,7 @@ func UpdateSingleOWASPRule(repo *repository.SystemSettingsRepo, reload func() er
 			c.JSON(404, map[string]string{"error": "OWASP rule not found"})
 			return
 		}
-		var config store.PolicyOWASPRuleConfig
+		var config owasp.PolicyOWASPRuleConfig
 		err = repo.DB().Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(500, map[string]string{"error": err.Error()})
@@ -376,7 +377,7 @@ func ResetOWASPRuleOverride(repo *repository.SystemSettingsRepo, reload func() e
 			c.JSON(404, map[string]string{"error": "OWASP rule not found"})
 			return
 		}
-		if err := repo.DB().Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).Delete(&store.PolicyOWASPRuleConfig{}).Error; err != nil {
+		if err := repo.DB().Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).Delete(&owasp.PolicyOWASPRuleConfig{}).Error; err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -431,7 +432,7 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 		err = repo.DB().Transaction(func(tx *gorm.DB) error {
 			if req.ResetAll {
 				result := tx.Where("policy_id = ?", policyID).
-					Delete(&store.PolicyOWASPRuleConfig{})
+					Delete(&owasp.PolicyOWASPRuleConfig{})
 				if result.Error != nil {
 					return result.Error
 				}
@@ -443,7 +444,7 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 				if err != nil {
 					return errors.New("unknown OWASP rule id")
 				}
-				config := store.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
+				config := owasp.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
 				if err := tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 					return err
 				}
@@ -464,7 +465,7 @@ func BatchUpdateOWASPRules(repo *repository.SystemSettingsRepo, reload func() er
 				if err != nil {
 					return errors.New("unknown OWASP rule id")
 				}
-				config := store.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
+				config := owasp.PolicyOWASPRuleConfig{PolicyID: policyID, RuleID: catalog.RuleID}
 				if err := tx.Where("policy_id = ? AND rule_id = ?", policyID, catalog.RuleID).First(&config).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 					return err
 				}

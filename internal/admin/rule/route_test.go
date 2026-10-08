@@ -15,6 +15,7 @@ import (
 
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -24,7 +25,7 @@ func newApplicationRouteReposForTest(t *testing.T) (*repository.SiteRepo, *repos
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.Site{}, &store.ApplicationRouteRule{}); err != nil {
+	if err := db.AutoMigrate(&store.Site{}, &approute.ApplicationRouteRule{}); err != nil {
 		t.Fatalf("migrate application route tables: %v", err)
 	}
 	if err := db.Create(&store.Site{Host: "example.test", Bind: ":80", Network: "tcp", Enabled: true}).Error; err != nil {
@@ -76,8 +77,8 @@ func TestCreateApplicationRouteRuleDefaultsEnabledWhenOmitted(t *testing.T) {
 	ctx := invokeApplicationRouteHandler(t, handler, "POST", "/api/v1/sites/1/application-route-rules", param.Params{{Key: "id", Value: "1"}}, map[string]any{
 		"name":       "method get",
 		"priority":   10,
-		"target":     store.AppRouteTargetRequestMethod,
-		"op":         store.AppRouteOpEq,
+		"target":     approute.AppRouteTargetRequestMethod,
+		"op":         approute.AppRouteOpEq,
 		"pattern":    "GET",
 		"header_key": "",
 	})
@@ -87,7 +88,7 @@ func TestCreateApplicationRouteRuleDefaultsEnabledWhenOmitted(t *testing.T) {
 	if reloaded != 1 {
 		t.Fatalf("expected one reload, got %d", reloaded)
 	}
-	var resp store.ApplicationRouteRule
+	var resp approute.ApplicationRouteRule
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -111,15 +112,15 @@ func TestCreateApplicationRouteRuleHonorsExplicitDisabled(t *testing.T) {
 		"name":       "disabled method",
 		"enabled":    false,
 		"priority":   10,
-		"target":     store.AppRouteTargetRequestMethod,
-		"op":         store.AppRouteOpEq,
+		"target":     approute.AppRouteTargetRequestMethod,
+		"op":         approute.AppRouteOpEq,
 		"pattern":    "DELETE",
 		"header_key": "",
 	})
 	if ctx.Response.StatusCode() != 201 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	var resp store.ApplicationRouteRule
+	var resp approute.ApplicationRouteRule
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -156,8 +157,8 @@ func TestCreateApplicationRouteRuleRejectsInvalidRegex(t *testing.T) {
 			ctx := invokeApplicationRouteHandler(t, handler, "POST", "/api/v1/sites/1/application-route-rules", param.Params{{Key: "id", Value: "1"}}, map[string]any{
 				"name":     "invalid regex " + tt.name,
 				"priority": 1,
-				"target":   store.AppRouteTargetRequestMethod,
-				"op":       store.AppRouteOpRegex,
+				"target":   approute.AppRouteTargetRequestMethod,
+				"op":       approute.AppRouteOpRegex,
 				"pattern":  tt.pattern,
 			})
 			if ctx.Response.StatusCode() != 400 {
@@ -179,13 +180,13 @@ func TestCreateApplicationRouteRuleRejectsInvalidRegex(t *testing.T) {
 
 func TestUpdateApplicationRouteRuleKeepsEnabledWhenOmitted(t *testing.T) {
 	siteRepo, ruleRepo := newApplicationRouteReposForTest(t)
-	seed := &store.ApplicationRouteRule{
+	seed := &approute.ApplicationRouteRule{
 		SiteID:   1,
 		Name:     "disabled rule",
 		Enabled:  false,
 		Priority: 1,
-		Target:   store.AppRouteTargetRequestMethod,
-		Op:       store.AppRouteOpEq,
+		Target:   approute.AppRouteTargetRequestMethod,
+		Op:       approute.AppRouteOpEq,
 		Pattern:  "POST",
 	}
 	if err := ruleRepo.Create(seed); err != nil {
@@ -203,15 +204,15 @@ func TestUpdateApplicationRouteRuleKeepsEnabledWhenOmitted(t *testing.T) {
 	}, map[string]any{
 		"name":       "still disabled",
 		"priority":   2,
-		"target":     store.AppRouteTargetRequestMethod,
-		"op":         store.AppRouteOpEq,
+		"target":     approute.AppRouteTargetRequestMethod,
+		"op":         approute.AppRouteOpEq,
 		"pattern":    "PUT",
 		"header_key": "",
 	})
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	var resp store.ApplicationRouteRule
+	var resp approute.ApplicationRouteRule
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -229,13 +230,13 @@ func TestUpdateApplicationRouteRuleKeepsEnabledWhenOmitted(t *testing.T) {
 
 func TestUpdateApplicationRouteRuleHonorsExplicitDisabled(t *testing.T) {
 	siteRepo, ruleRepo := newApplicationRouteReposForTest(t)
-	seed := &store.ApplicationRouteRule{
+	seed := &approute.ApplicationRouteRule{
 		SiteID:   1,
 		Name:     "enabled rule",
 		Enabled:  true,
 		Priority: 1,
-		Target:   store.AppRouteTargetRequestMethod,
-		Op:       store.AppRouteOpEq,
+		Target:   approute.AppRouteTargetRequestMethod,
+		Op:       approute.AppRouteOpEq,
 		Pattern:  "GET",
 	}
 	if err := ruleRepo.Create(seed); err != nil {
@@ -250,15 +251,15 @@ func TestUpdateApplicationRouteRuleHonorsExplicitDisabled(t *testing.T) {
 		"name":       "disabled by request",
 		"enabled":    false,
 		"priority":   3,
-		"target":     store.AppRouteTargetRequestMethod,
-		"op":         store.AppRouteOpEq,
+		"target":     approute.AppRouteTargetRequestMethod,
+		"op":         approute.AppRouteOpEq,
 		"pattern":    "PATCH",
 		"header_key": "",
 	})
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	var resp store.ApplicationRouteRule
+	var resp approute.ApplicationRouteRule
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -286,13 +287,13 @@ func TestUpdateApplicationRouteRuleRejectsInvalidRegex(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			siteRepo, ruleRepo := newApplicationRouteReposForTest(t)
-			seed := &store.ApplicationRouteRule{
+			seed := &approute.ApplicationRouteRule{
 				SiteID:   1,
 				Name:     "existing route",
 				Enabled:  true,
 				Priority: 1,
-				Target:   store.AppRouteTargetRequestMethod,
-				Op:       store.AppRouteOpEq,
+				Target:   approute.AppRouteTargetRequestMethod,
+				Op:       approute.AppRouteOpEq,
 				Pattern:  "GET",
 			}
 			if err := ruleRepo.Create(seed); err != nil {
@@ -310,8 +311,8 @@ func TestUpdateApplicationRouteRuleRejectsInvalidRegex(t *testing.T) {
 			}, map[string]any{
 				"name":     "invalid regex " + tt.name,
 				"priority": 2,
-				"target":   store.AppRouteTargetRequestMethod,
-				"op":       store.AppRouteOpRegex,
+				"target":   approute.AppRouteTargetRequestMethod,
+				"op":       approute.AppRouteOpRegex,
 				"pattern":  tt.pattern,
 			})
 			if ctx.Response.StatusCode() != 400 {
@@ -336,14 +337,14 @@ func TestListRecordedResourcesFiltersByQueryString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.Site{}, &store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&store.Site{}, &approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource tables: %v", err)
 	}
 	if err := db.Create(&store.Site{Host: "example.test", Bind: ":80", Network: "tcp", Enabled: true}).Error; err != nil {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	rows := []store.RecordedResource{
+	rows := []approute.RecordedResource{
 		{
 			SiteID:      1,
 			Method:      "GET",
@@ -384,9 +385,9 @@ func TestListRecordedResourcesFiltersByQueryString(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []store.RecordedResource `json:"items"`
-		Total int64                    `json:"total"`
-		Page  int                      `json:"page"`
+		Items []approute.RecordedResource `json:"items"`
+		Total int64                       `json:"total"`
+		Page  int                         `json:"page"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -401,14 +402,14 @@ func TestListRecordedResourcesFiltersByJA4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.Site{}, &store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&store.Site{}, &approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource tables: %v", err)
 	}
 	if err := db.Create(&store.Site{Host: "example.test", Bind: ":80", Network: "tcp", Enabled: true}).Error; err != nil {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	rows := []store.RecordedResource{
+	rows := []approute.RecordedResource{
 		{
 			SiteID:      1,
 			Method:      "GET",
@@ -451,9 +452,9 @@ func TestListRecordedResourcesFiltersByJA4(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []store.RecordedResource `json:"items"`
-		Total int64                    `json:"total"`
-		Page  int                      `json:"page"`
+		Items []approute.RecordedResource `json:"items"`
+		Total int64                       `json:"total"`
+		Page  int                         `json:"page"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -468,14 +469,14 @@ func TestListRecordedResourcesFiltersByTLSMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.Site{}, &store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&store.Site{}, &approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource tables: %v", err)
 	}
 	if err := db.Create(&store.Site{Host: "example.test", Bind: ":80", Network: "tcp", Enabled: true}).Error; err != nil {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	rows := []store.RecordedResource{
+	rows := []approute.RecordedResource{
 		{
 			SiteID:      1,
 			Method:      "GET",
@@ -522,9 +523,9 @@ func TestListRecordedResourcesFiltersByTLSMetadata(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []store.RecordedResource `json:"items"`
-		Total int64                    `json:"total"`
-		Page  int                      `json:"page"`
+		Items []approute.RecordedResource `json:"items"`
+		Total int64                       `json:"total"`
+		Page  int                         `json:"page"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -539,14 +540,14 @@ func TestListRecordedResourcesFiltersByUnifiedQueryAcrossPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.Site{}, &store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&store.Site{}, &approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource tables: %v", err)
 	}
 	if err := db.Create(&store.Site{Host: "example.test", Bind: ":80", Network: "tcp", Enabled: true}).Error; err != nil {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	rows := []store.RecordedResource{
+	rows := []approute.RecordedResource{
 		{
 			SiteID:      1,
 			Method:      "GET",
@@ -588,9 +589,9 @@ func TestListRecordedResourcesFiltersByUnifiedQueryAcrossPages(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []store.RecordedResource `json:"items"`
-		Total int64                    `json:"total"`
-		Page  int                      `json:"page"`
+		Items []approute.RecordedResource `json:"items"`
+		Total int64                       `json:"total"`
+		Page  int                         `json:"page"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)

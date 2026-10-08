@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 )
 
 // SessionInfo 描述一个活跃的用户会话。
@@ -80,7 +80,7 @@ func (sm *SessionManager) CreateSessionWithRefresh(username, jti, refreshJTI, ip
 
 	// 落库。
 	if sm.db != nil {
-		row := store.ActiveSession{
+		row := auth.ActiveSession{
 			Username:     username,
 			JTI:          jti,
 			RefreshJTI:   refreshJTI,
@@ -140,7 +140,7 @@ func (sm *SessionManager) ReplaceSessionForRefresh(oldRefreshJTI, newJTI, newRef
 	sm.mu.Unlock()
 
 	if sm.db != nil {
-		_ = sm.db.Model(&store.ActiveSession{}).
+		_ = sm.db.Model(&auth.ActiveSession{}).
 			Where("refresh_jti = ?", oldRefreshJTI).
 			Updates(map[string]any{
 				"jti":            newJTI,
@@ -163,7 +163,7 @@ func (sm *SessionManager) RemoveSession(jti string) {
 	sm.mu.Unlock()
 
 	if sm.db != nil {
-		sm.db.Where("jti = ?", jti).Delete(&store.ActiveSession{})
+		sm.db.Where("jti = ?", jti).Delete(&auth.ActiveSession{})
 	}
 }
 
@@ -186,7 +186,7 @@ func (sm *SessionManager) UpdateLastActive(jti string) {
 	sm.mu.Unlock()
 	if persist && sm.db != nil {
 		// 按固定间隔持久化活跃时间，避免每个管理 API 请求产生一条 UPDATE。
-		_ = sm.db.Model(&store.ActiveSession{}).Where("jti = ?", jti).Update("last_active_at", now).Error
+		_ = sm.db.Model(&auth.ActiveSession{}).Where("jti = ?", jti).Update("last_active_at", now).Error
 	}
 }
 
@@ -263,7 +263,7 @@ func (sm *SessionManager) ForceLogout(jti string) bool {
 	sm.mu.Unlock()
 
 	if sm.db != nil {
-		sm.db.Where("jti = ?", jti).Delete(&store.ActiveSession{})
+		sm.db.Where("jti = ?", jti).Delete(&auth.ActiveSession{})
 	}
 	return existed
 }
@@ -282,7 +282,7 @@ func (sm *SessionManager) RemoveUserSessions(username string) []string {
 	sm.mu.Unlock()
 
 	if sm.db != nil {
-		sm.db.Where("username = ?", username).Delete(&store.ActiveSession{})
+		sm.db.Where("username = ?", username).Delete(&auth.ActiveSession{})
 	}
 	return jtis
 }
@@ -291,7 +291,7 @@ func (sm *SessionManager) loadFromDB() {
 	if sm.db == nil {
 		return
 	}
-	var sessions []store.ActiveSession
+	var sessions []auth.ActiveSession
 	sm.db.Where("expires_at > ?", time.Now()).Find(&sessions)
 	for _, s := range sessions {
 		sm.sessions[s.JTI] = &SessionInfo{
@@ -347,7 +347,7 @@ func (sm *SessionManager) cleanupLoop() {
 
 			// 清理数据库中已过期的会话。
 			if sm.db != nil {
-				sm.db.Where("expires_at < ?", now).Delete(&store.ActiveSession{})
+				sm.db.Where("expires_at < ?", now).Delete(&auth.ActiveSession{})
 			}
 		}
 	}

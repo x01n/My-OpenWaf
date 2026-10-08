@@ -8,6 +8,8 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/iplist"
+	"My-OpenWaf/internal/store/threatintel"
 )
 
 // newZeroDefaultsTestDB 建一个含全部受测模型的内存库。
@@ -21,7 +23,7 @@ func newZeroDefaultsTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&store.Site{}, &store.SiteListener{}, &store.Policy{}, &store.Rule{},
-		&store.IPListEntry{}, &store.ThreatIntelFeed{},
+		&iplist.IPListEntry{}, &threatintel.ThreatIntelFeed{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -101,15 +103,15 @@ func TestCreateHonorsExplicitDisabled(t *testing.T) {
 		{
 			name: "IPListEntry",
 			create: func(t *testing.T, db *gorm.DB) (uint, func(*gorm.DB, uint) bool) {
-				item := &store.IPListEntry{
-					Kind: store.IPListBlack, Value: "203.0.113.7",
+				item := &iplist.IPListEntry{
+					Kind: iplist.IPListBlack, Value: "203.0.113.7",
 					Action: "intercept", Enabled: false,
 				}
 				if err := NewIPListRepo(db).Create(item); err != nil {
 					t.Fatalf("create: %v", err)
 				}
 				return item.ID, func(db *gorm.DB, id uint) bool {
-					var got store.IPListEntry
+					var got iplist.IPListEntry
 					_ = db.First(&got, id).Error
 					return got.Enabled
 				}
@@ -118,7 +120,7 @@ func TestCreateHonorsExplicitDisabled(t *testing.T) {
 		{
 			name: "ThreatIntelFeed",
 			create: func(t *testing.T, db *gorm.DB) (uint, func(*gorm.DB, uint) bool) {
-				item := &store.ThreatIntelFeed{
+				item := &threatintel.ThreatIntelFeed{
 					Name: "disabled-feed", URL: "https://feeds.example.com/list.txt",
 					Kind: "blacklist", Enabled: false,
 				}
@@ -126,7 +128,7 @@ func TestCreateHonorsExplicitDisabled(t *testing.T) {
 					t.Fatalf("create: %v", err)
 				}
 				return item.ID, func(db *gorm.DB, id uint) bool {
-					var got store.ThreatIntelFeed
+					var got threatintel.ThreatIntelFeed
 					_ = db.First(&got, id).Error
 					return got.Enabled
 				}

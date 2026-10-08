@@ -13,6 +13,7 @@ import (
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/store"
+	cvestore "My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 	"My-OpenWaf/internal/waf/cve"
@@ -29,10 +30,10 @@ type cveEffectiveConfig struct {
 
 type cveScopedRuleView struct {
 	cve.CVERuleModel
-	Effective     cveEffectiveConfig          `json:"effective"`
-	Override      *store.CVERuleScopeOverride `json:"override"`
-	Overridden    bool                        `json:"overridden"`
-	InheritedFrom string                      `json:"inherited_from"`
+	Effective     cveEffectiveConfig             `json:"effective"`
+	Override      *cvestore.CVERuleScopeOverride `json:"override"`
+	Overridden    bool                           `json:"overridden"`
+	InheritedFrom string                         `json:"inherited_from"`
 }
 
 type cveScopeContext struct {
@@ -48,7 +49,7 @@ func resolveCVEScope(db *gorm.DB, c *app.RequestContext, bodyScope string, bodyP
 		scope = queryScope
 	}
 	if scope == "" {
-		scope = store.CVEScopeGlobal
+		scope = cvestore.CVEScopeGlobal
 	}
 	parseQueryID := func(key string, current uint) (uint, error) {
 		raw := strings.TrimSpace(string(c.Query(key)))
@@ -71,9 +72,9 @@ func resolveCVEScope(db *gorm.DB, c *app.RequestContext, bodyScope string, bodyP
 	}
 	result := cveScopeContext{ScopeType: scope, PolicyID: policyID, SiteID: siteID}
 	switch scope {
-	case store.CVEScopeGlobal:
+	case cvestore.CVEScopeGlobal:
 		result.ScopeID = 0
-	case store.CVEScopePolicy:
+	case cvestore.CVEScopePolicy:
 		if policyID == 0 {
 			return result, errors.New("policy_id required")
 		}
@@ -82,7 +83,7 @@ func resolveCVEScope(db *gorm.DB, c *app.RequestContext, bodyScope string, bodyP
 			return result, errors.New("policy not found")
 		}
 		result.ScopeID = policyID
-	case store.CVEScopeSite:
+	case cvestore.CVEScopeSite:
 		if siteID == 0 {
 			return result, errors.New("site_id required")
 		}
@@ -106,7 +107,7 @@ func resolveCVEScope(db *gorm.DB, c *app.RequestContext, bodyScope string, bodyP
 	return result, nil
 }
 
-func effectiveCVERule(rule cve.CVERuleModel, scope cveScopeContext, overrides []store.CVERuleScopeOverride) cveScopedRuleView {
+func effectiveCVERule(rule cve.CVERuleModel, scope cveScopeContext, overrides []cvestore.CVERuleScopeOverride) cveScopedRuleView {
 	effective := cveEffectiveConfig{Enabled: rule.Enabled, Action: rule.Action, CaptchaType: rule.CaptchaType}
 	view := cveScopedRuleView{CVERuleModel: rule, Effective: effective, InheritedFrom: "catalog"}
 	apply := func(scopeType string, scopeID uint) {
@@ -141,12 +142,12 @@ func effectiveCVERule(rule cve.CVERuleModel, scope cveScopeContext, overrides []
 			}
 		}
 	}
-	apply(store.CVEScopeGlobal, 0)
-	if scope.ScopeType == store.CVEScopePolicy || scope.ScopeType == store.CVEScopeSite {
-		apply(store.CVEScopePolicy, scope.PolicyID)
+	apply(cvestore.CVEScopeGlobal, 0)
+	if scope.ScopeType == cvestore.CVEScopePolicy || scope.ScopeType == cvestore.CVEScopeSite {
+		apply(cvestore.CVEScopePolicy, scope.PolicyID)
 	}
-	if scope.ScopeType == store.CVEScopeSite {
-		apply(store.CVEScopeSite, scope.SiteID)
+	if scope.ScopeType == cvestore.CVEScopeSite {
+		apply(cvestore.CVEScopeSite, scope.SiteID)
 	}
 	// 非 CAPTCHA 动作下的验证码类型没有语义；从有效视图清除历史脏值，
 	// 避免前端展示运行时不会渲染的挑战类型。
@@ -202,7 +203,7 @@ func cveRuleMatchesFilter(view cveScopedRuleView, filter repository.CVERuleFilte
 		strings.Contains(strings.ToLower(view.Description), query)
 }
 
-func validateCVEScopePatch(patch *store.CVERuleScopeOverride) error {
+func validateCVEScopePatch(patch *cvestore.CVERuleScopeOverride) error {
 	if patch.Action != nil && *patch.Action != "" {
 		normalized, ok := shared.ValidateActionWithRedirectTarget(*patch.Action, patch.RedirectTo)
 		if !ok {
@@ -244,7 +245,7 @@ func validateCVEScopePatch(patch *store.CVERuleScopeOverride) error {
  * 作用域 API 支持部分更新；仅校验本次请求字段会让已有的 redirect 或
  * captcha_type 在后续更新中留下不可执行组合，因此必须对合并结果再校验。
  */
-func validateStoredCVEScopeOverride(patch *store.CVERuleScopeOverride) error {
+func validateStoredCVEScopeOverride(patch *cvestore.CVERuleScopeOverride) error {
 	if patch == nil {
 		return errors.New("override is required")
 	}
@@ -282,8 +283,8 @@ func validateStoredCVEScopeOverride(patch *store.CVERuleScopeOverride) error {
 	return nil
 }
 
-func saveCVEScopeOverride(db *gorm.DB, ruleID uint, scope cveScopeContext, patch store.CVERuleScopeOverride) error {
-	var existing store.CVERuleScopeOverride
+func saveCVEScopeOverride(db *gorm.DB, ruleID uint, scope cveScopeContext, patch cvestore.CVERuleScopeOverride) error {
+	var existing cvestore.CVERuleScopeOverride
 	result := db.Where("rule_id = ? AND scope_type = ? AND scope_id = ?", ruleID, scope.ScopeType, scope.ScopeID).Limit(1).Find(&existing)
 	if result.Error != nil {
 		return result.Error
@@ -350,7 +351,7 @@ func ResetCVERuleOverride(repo *repository.CVERuleRepo, reload func() error) app
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := repo.DB().Where("rule_id = ? AND scope_type = ? AND scope_id = ?", id, scope.ScopeType, scope.ScopeID).Delete(&store.CVERuleScopeOverride{}).Error; err != nil {
+		if err := repo.DB().Where("rule_id = ? AND scope_type = ? AND scope_id = ?", id, scope.ScopeType, scope.ScopeID).Delete(&cvestore.CVERuleScopeOverride{}).Error; err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
 		}

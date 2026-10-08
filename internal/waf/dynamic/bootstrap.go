@@ -3,7 +3,7 @@ package dynamic
 import (
 	"strings"
 
-	"My-OpenWaf/internal/waf/challenge"
+	challengepow "My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // envelope 承载交付给浏览器的一次性加密信封数据（均为 base64 编码）。
@@ -162,8 +162,8 @@ func asmPlaceholderSyntheticLegacy() string {
  */
 func applyAssetURLs(script string) string {
 	r := strings.NewReplacer(
-		"__OWAF_WASM_URL__", challenge.PowWasmURL(),
-		"__OWAF_GLUE_URL__", challenge.PowGlueURL(),
+		"__OWAF_WASM_URL__", challengepow.PowWasmURL(),
+		"__OWAF_GLUE_URL__", challengepow.PowGlueURL(),
 	)
 	return r.Replace(script)
 }

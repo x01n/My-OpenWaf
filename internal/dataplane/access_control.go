@@ -13,7 +13,7 @@ import (
 	rueidis "github.com/redis/rueidis"
 
 	"My-OpenWaf/internal/snapshot"
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/waf/accessgate"
 	"My-OpenWaf/internal/waf/pageconfig"
 )
@@ -193,7 +193,7 @@ func handleAccessVerify(c *app.RequestContext, opts Options, gate *accessgate.Ga
 
 	case "user_password":
 		username := string(c.FormValue("username"))
-		if !gate.HasProviderType(store.AccessProviderPassword) || username == "" || password == "" || opts.AccessControlRepo == nil {
+		if !gate.HasProviderType(access.AccessProviderPassword) || username == "" || password == "" || opts.AccessControlRepo == nil {
 			renderAccessLoginError(c, host, cfg, "用户名或密码错误", rt, sn)
 			return
 		}
@@ -307,11 +307,11 @@ func loadOAuthFlow(c *app.RequestContext, rt *snapshot.SiteRuntime, host string,
 	if provider == nil {
 		return nil, "", false
 	}
-	if provider.Type != store.AccessProviderOAuth2 && provider.Type != store.AccessProviderOIDC {
+	if provider.Type != access.AccessProviderOAuth2 && provider.Type != access.AccessProviderOIDC {
 		return nil, "", false
 	}
 
-	var oc store.OAuthProviderConfig
+	var oc access.OAuthProviderConfig
 	if err := json.Unmarshal([]byte(provider.Config), &oc); err != nil {
 		return nil, "", false
 	}
@@ -329,7 +329,7 @@ func loadOAuthFlow(c *app.RequestContext, rt *snapshot.SiteRuntime, host string,
 		Issuer:       oc.Issuer,
 		Scopes:       oc.Scopes,
 		RedirectURI:  redirectURI,
-		UsePKCE:      oc.UsePKCE || provider.Type == store.AccessProviderOIDC,
+		UsePKCE:      oc.UsePKCE || provider.Type == access.AccessProviderOIDC,
 	}
 	return flow, provider.Name, true
 }

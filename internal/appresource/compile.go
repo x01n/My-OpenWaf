@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 )
 
 // MaxRegexPattern 限制应用路由正则的编译期大小。
@@ -28,9 +28,9 @@ type CompiledRule struct {
 // TargetNeedsResponse 为真表示该匹配对象要等上游响应之后才可知。
 func TargetNeedsResponse(target string) bool {
 	switch strings.ToLower(strings.TrimSpace(target)) {
-	case store.AppRouteTargetResponseBody,
-		store.AppRouteTargetResponseHeadersFull,
-		store.AppRouteTargetFullHTTPResponse:
+	case approute.AppRouteTargetResponseBody,
+		approute.AppRouteTargetResponseHeadersFull,
+		approute.AppRouteTargetFullHTTPResponse:
 		return true
 	default:
 		return false
@@ -45,7 +45,7 @@ func TargetNeedsResponse(target string) bool {
  * @param rules DB 中的启用状态应用路由规则。
  * @return 编译并排序后的规则列表。
  */
-func CompileRules(rules []store.ApplicationRouteRule) []CompiledRule {
+func CompileRules(rules []approute.ApplicationRouteRule) []CompiledRule {
 	out := make([]CompiledRule, 0, len(rules))
 	for i := range rules {
 		r := rules[i]
@@ -68,7 +68,7 @@ func CompileRules(rules []store.ApplicationRouteRule) []CompiledRule {
 			Priority:       r.Priority,
 			NeedsResponse:  TargetNeedsResponse(t),
 		}
-		if op == store.AppRouteOpRegex {
+		if op == approute.AppRouteOpRegex {
 			if len(r.Pattern) > MaxRegexPattern {
 				continue
 			}

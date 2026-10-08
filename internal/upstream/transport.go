@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"My-OpenWaf/internal/snapshot"
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/upstream"
 )
 
 var legacyHTTPSClientCipherSuiteIDs = buildLegacyHTTPSClientCipherSuites()
@@ -155,7 +155,7 @@ func TLSDialWithDialer(dialer *net.Dialer, host string, serverName string, skipV
  */
 func UpstreamClientCertificate(rt snapshot.SiteRuntime) (cert tls.Certificate, hasCert bool, err error) {
 	if !rt.Site.UpstreamTLSClientCertSet {
-		pair, _, _, _, _, _, err := store.NormalizeSiteUpstreamMTLS(sitePtrString(rt.Site.UpstreamTLSClientCertPEM), sitePtrString(rt.Site.UpstreamTLSClientKeyPEM))
+		pair, _, _, _, _, _, err := upstream.NormalizeSiteUpstreamMTLS(sitePtrString(rt.Site.UpstreamTLSClientCertPEM), sitePtrString(rt.Site.UpstreamTLSClientKeyPEM))
 		if err != nil {
 			return tls.Certificate{}, false, fmt.Errorf("invalid upstream tls client cert/key pair: %w", err)
 		}

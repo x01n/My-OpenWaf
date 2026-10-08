@@ -3,11 +3,12 @@ package challenge
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 /**
@@ -147,7 +148,7 @@ func TestShieldSessionTimeoutIsFrozen(t *testing.T) {
 
 	legacySession := &ShieldSession{
 		ID:              "legacy-env-config",
-		Nonce:           GeneratePoWNonce(),
+		Nonce:           pow.GeneratePoWNonce(),
 		Difficulty:      1,
 		OriginalURL:     "/legacy",
 		RequestProtocol: "http/1.1",
@@ -723,39 +724,6 @@ func mathExpressionPixelWidth(expr string) int {
 		x += len(pattern[0])*2 + 4
 	}
 	return x
-}
-
-/**
- * TestVerifyPoWRejectsMalformedInput 验证 PoW 校验对畸形输入与非法难度的处理。
- */
-func TestVerifyPoWRejectsMalformedInput(t *testing.T) {
-	nonce := "abc123"
-	counter, hash := findShieldPoWSolution(t, nonce, 2)
-
-	if !VerifyPoW(nonce, counter, hash, 2) {
-		t.Fatal("valid PoW solution must verify")
-	}
-	if VerifyPoW(nonce, counter, strings.ToUpper(hash), 2) {
-		t.Fatal("uppercase hash must not be accepted as a different encoding bypass")
-	}
-	if VerifyPoW(nonce, counter, hash, 0) {
-		t.Fatal("difficulty 0 must be rejected instead of accepting zero-work solutions")
-	}
-	if VerifyPoW(nonce, counter, hash, -1) {
-		t.Fatal("negative difficulty must be rejected")
-	}
-	if VerifyPoW(nonce, counter+1, hash, 2) {
-		t.Fatal("hash/counter mismatch must be rejected")
-	}
-	if VerifyPoW(nonce, counter, "00", 2) {
-		t.Fatal("truncated hash must be rejected")
-	}
-	if VerifyPoW(nonce, counter, "00"+strings.Repeat("z", 62), 2) {
-		t.Fatal("non-hex hash must be rejected")
-	}
-	if VerifyPoW(nonce, counter, hash, maxPoWDifficulty+1) {
-		t.Fatal("difficulty above the supported maximum must be rejected")
-	}
 }
 
 /**

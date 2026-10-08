@@ -8,7 +8,7 @@ import (
 
 	"My-OpenWaf/internal/admin/auth"
 	"My-OpenWaf/internal/admin/shared"
-	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -115,8 +115,8 @@ func UpdateAdminRole(repo *repository.AdminAccountRepo, revoker ...func(string, 
 			return
 		}
 
-		if acct.Role == store.RoleAdmin && body.Role != store.RoleAdmin {
-			count, err := repo.CountByRole(store.RoleAdmin)
+		if acct.Role == authstore.RoleAdmin && body.Role != authstore.RoleAdmin {
+			count, err := repo.CountByRole(authstore.RoleAdmin)
 			if err != nil {
 				c.JSON(500, map[string]string{"error": err.Error()})
 				return
@@ -219,8 +219,8 @@ func DeleteAdminUser(repo *repository.AdminAccountRepo, revoker ...func(string, 
 			return
 		}
 
-		if acct.Role == store.RoleAdmin {
-			count, err := repo.CountByRole(store.RoleAdmin)
+		if acct.Role == authstore.RoleAdmin {
+			count, err := repo.CountByRole(authstore.RoleAdmin)
 			if err != nil {
 				c.JSON(500, map[string]string{"error": err.Error()})
 				return

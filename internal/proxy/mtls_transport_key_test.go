@@ -79,6 +79,12 @@ func TestTransportKeyForUpstreamCertDimension(t *testing.T) {
 	if certKey.tlsServerName != plainKey.tlsServerName || certKey.isHTTPS != plainKey.isHTTPS || certKey.h2cPrior != plainKey.h2cPrior {
 		t.Fatalf("cert key unexpectedly diverges in non-cert dimensions: %#v vs %#v", certKey, plainKey)
 	}
+	// 明文上游的池键不含 TLS 维度（见 sharedTransportForUpstreamClassified）：
+	// 同一 base 下带证书站点与不带证书站点的键必须完全一致。
+	plainBase := "http://127.0.0.1:8080"
+	if withCert := transportKeyForUpstream(plainBase, rt); withCert != transportKeyForUpstream(plainBase, snapshot.SiteRuntime{}) {
+		t.Fatalf("plain HTTP key leaked TLS dimensions: %#v", withCert)
+	}
 
 	trA := SharedTransportForUpstream(snapshot.SiteRuntime{}, base)
 	trB := SharedTransportForUpstream(rt, base)

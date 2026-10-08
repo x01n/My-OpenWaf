@@ -11,22 +11,22 @@ import (
 
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/appresource"
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
 
 func validAppRouteTarget(t string) bool {
 	switch strings.ToLower(strings.TrimSpace(t)) {
-	case store.AppRouteTargetRequestHeader,
-		store.AppRouteTargetRequestBody,
-		store.AppRouteTargetResponseBody,
-		store.AppRouteTargetRequestHeadersFull,
-		store.AppRouteTargetResponseHeadersFull,
-		store.AppRouteTargetFullHTTPRequest,
-		store.AppRouteTargetFullHTTPResponse,
-		store.AppRouteTargetRequestMethod,
-		store.AppRouteTargetFingerprint:
+	case approute.AppRouteTargetRequestHeader,
+		approute.AppRouteTargetRequestBody,
+		approute.AppRouteTargetResponseBody,
+		approute.AppRouteTargetRequestHeadersFull,
+		approute.AppRouteTargetResponseHeadersFull,
+		approute.AppRouteTargetFullHTTPRequest,
+		approute.AppRouteTargetFullHTTPResponse,
+		approute.AppRouteTargetRequestMethod,
+		approute.AppRouteTargetFingerprint:
 		return true
 	default:
 		return false
@@ -35,21 +35,21 @@ func validAppRouteTarget(t string) bool {
 
 func validAppRouteOp(op string) bool {
 	switch strings.ToLower(strings.TrimSpace(op)) {
-	case store.AppRouteOpEq,
-		store.AppRouteOpNe,
-		store.AppRouteOpContains,
-		store.AppRouteOpNotContains,
-		store.AppRouteOpPrefix,
-		store.AppRouteOpSuffix,
-		store.AppRouteOpRegex,
-		store.AppRouteOpFuzzy:
+	case approute.AppRouteOpEq,
+		approute.AppRouteOpNe,
+		approute.AppRouteOpContains,
+		approute.AppRouteOpNotContains,
+		approute.AppRouteOpPrefix,
+		approute.AppRouteOpSuffix,
+		approute.AppRouteOpRegex,
+		approute.AppRouteOpFuzzy:
 		return true
 	default:
 		return false
 	}
 }
 
-func validateApplicationRouteRule(r *store.ApplicationRouteRule) error {
+func validateApplicationRouteRule(r *approute.ApplicationRouteRule) error {
 	if r == nil {
 		return errors.New("nil rule")
 	}
@@ -62,7 +62,7 @@ func validateApplicationRouteRule(r *store.ApplicationRouteRule) error {
 	if strings.TrimSpace(r.Pattern) == "" {
 		return errors.New("pattern required")
 	}
-	if strings.EqualFold(strings.TrimSpace(r.Op), store.AppRouteOpRegex) {
+	if strings.EqualFold(strings.TrimSpace(r.Op), approute.AppRouteOpRegex) {
 		if len(r.Pattern) > appresource.MaxRegexPattern {
 			return errors.New("regex pattern too long")
 		}
@@ -70,7 +70,7 @@ func validateApplicationRouteRule(r *store.ApplicationRouteRule) error {
 			return errors.New("invalid regex pattern")
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(r.Target), store.AppRouteTargetRequestHeader) {
+	if strings.EqualFold(strings.TrimSpace(r.Target), approute.AppRouteTargetRequestHeader) {
 		if strings.TrimSpace(r.HeaderKey) == "" {
 			return errors.New("header_key required for request_header target")
 		}
@@ -88,12 +88,12 @@ type applicationRouteRuleRequest struct {
 	HeaderKey string `json:"header_key"`
 }
 
-func (req applicationRouteRuleRequest) toStore(siteID uint, defaultEnabled bool) store.ApplicationRouteRule {
+func (req applicationRouteRuleRequest) toStore(siteID uint, defaultEnabled bool) approute.ApplicationRouteRule {
 	enabled := defaultEnabled
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	return store.ApplicationRouteRule{
+	return approute.ApplicationRouteRule{
 		SiteID:    siteID,
 		Name:      req.Name,
 		Enabled:   enabled,

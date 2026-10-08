@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/store"
+	owaspstore "My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/waf/owasp"
 )
 
@@ -28,8 +29,8 @@ type owaspReadSQLCounter struct {
 func registerOWASPReadSQLCounter(t *testing.T, db *gorm.DB) *owaspReadSQLCounter {
 	t.Helper()
 	counter := &owaspReadSQLCounter{}
-	catalogType := reflect.TypeOf(store.OWASPRuleCatalog{})
-	configType := reflect.TypeOf(store.PolicyOWASPRuleConfig{})
+	catalogType := reflect.TypeOf(owaspstore.OWASPRuleCatalog{})
+	configType := reflect.TypeOf(owaspstore.PolicyOWASPRuleConfig{})
 	policyType := reflect.TypeOf(store.Policy{})
 	callbackName := "test:owasp-read-cache-query:" + t.Name()
 	if err := db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
@@ -121,7 +122,7 @@ func TestOWASPReadSnapshotRetriesAfterDatabaseError(t *testing.T) {
 
 	failFirst := atomic.Bool{}
 	failFirst.Store(true)
-	catalogType := reflect.TypeOf(store.OWASPRuleCatalog{})
+	catalogType := reflect.TypeOf(owaspstore.OWASPRuleCatalog{})
 	callbackName := "test:owasp-read-cache-transient:" + t.Name()
 	if err := repo.DB().Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
 		if tx.Statement != nil && tx.Statement.Schema != nil &&
@@ -258,7 +259,7 @@ func TestOWASPReadSnapshotReturnsDeepCopies(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
 	ruleID := firstOWASPRuleID(t)
 	whitelist := `["/healthz","/metrics"]`
-	if err := repo.DB().Create(&store.PolicyOWASPRuleConfig{
+	if err := repo.DB().Create(&owaspstore.PolicyOWASPRuleConfig{
 		PolicyID:  1,
 		RuleID:    ruleID,
 		Whitelist: &whitelist,

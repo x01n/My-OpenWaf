@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"io"
 	"math"
 	"mime"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/andybalholm/brotli"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -23,16 +25,198 @@ import (
 )
 
 const (
-	brotliCompressionLevel = 4
+	brotliCompressionLevel              = 4
+	DefaultRequestDecompressionMaxBytes = 64 << 20
+
+	// DefaultResponseDecompressionMaxBytes 是响应侧单层解压的产出上限（8 MiB）。
+	//
+	// 取值依据：maxStreamTransformBufferBytes（8 MiB）已经是响应侧「整体缓冲即
+	// 拒」的门槛，响应侧解压上限必须 ≤ 它，否则解压会产出超出门槛的缓冲，白做功。
+	DefaultResponseDecompressionMaxBytes = 8 << 20
+
+	// maxContentEncodingLayers 是 Content-Encoding 允许的最大层数。
+	//
+	// 合法场景不会超过 2-3 层（例如 gzip 再套 gzip 的双重压缩），声明 100 层
+	// 只会让每一层都成为一次放大机会。超过即判为畸形，按降级放行处理。
+	maxContentEncodingLayers = 4
 )
+
+// errDecompressionLimitExceeded 表示解压产出超过硬上限，解压已终止。
+//
+// 调用方必须把它与「压缩体本身畸形」区分开：超限不是协议错误，而是
+// 炸弹防护触发；转发路径遇到它时按原始压缩字节继续，不做 502。
+var errDecompressionLimitExceeded = errors.New("decompression output exceeds limit")
+
+/**
+ * isDecompressionLimitError 判定一个解码错误是否属于「限额触发」。
+ *
+ * 三类来源都要算：本包的外层计数器（errDecompressionLimitExceeded）、
+ * zstd 解码器自身的窗口/内存限额（zstd.ErrWindowSizeExceeded /
+ * zstd.ErrDecoderSizeExceeded）。三者对调用方的含义相同——解压因为超量而
+ * 终止，不是压缩体本身畸形——因此按同一种降级处置，审计事件也归到同一类。
+ *
+ * @param err 解码过程中返回的错误。
+ * @returns 是否属于限额触发。
+ */
+func isDecompressionLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, errDecompressionLimitExceeded) ||
+		errors.Is(err, zstd.ErrWindowSizeExceeded) ||
+		errors.Is(err, zstd.ErrDecoderSizeExceeded)
+}
+
+// decompressionLimits 保存两侧的解压产出上限，由启动期注入。
+//
+// 用 atomic 而不是普通变量：它在启动期写入一次，之后被所有请求 goroutine
+// 读取。进程级而非按调用方传参，是因为它必须独立于调用方给的 maxBodyBytes
+// 生效——调用方传 math.MaxInt（或不传）时炸弹防护不能跟着失效。
+var (
+	requestDecompressionMaxBytes  atomic.Int64
+	responseDecompressionMaxBytes atomic.Int64
+)
+
+// SetRequestDecompressionMaxBytes 设置请求侧单层解压的产出上限。
+//
+// 非正值回退到 DefaultRequestDecompressionMaxBytes：把上限配成 0 或负数等于
+// 关闭炸弹防护，不能由一次环境变量笔误达成。
+func SetRequestDecompressionMaxBytes(limit int64) {
+	requestDecompressionMaxBytes.Store(clampDecompressionLimit(limit, DefaultRequestDecompressionMaxBytes))
+}
+
+// SetResponseDecompressionMaxBytes 设置响应侧单层解压的产出上限。
+func SetResponseDecompressionMaxBytes(limit int64) {
+	responseDecompressionMaxBytes.Store(clampDecompressionLimit(limit, DefaultResponseDecompressionMaxBytes))
+}
+
+// RequestDecompressionMaxBytes 返回当前生效的请求侧解压产出上限。
+func RequestDecompressionMaxBytes() int64 {
+	if limit := requestDecompressionMaxBytes.Load(); limit > 0 {
+		return limit
+	}
+	return DefaultRequestDecompressionMaxBytes
+}
+
+// ResponseDecompressionMaxBytes 返回当前生效的响应侧解压产出上限。
+func ResponseDecompressionMaxBytes() int64 {
+	if limit := responseDecompressionMaxBytes.Load(); limit > 0 {
+		return limit
+	}
+	return DefaultResponseDecompressionMaxBytes
+}
+
+// clampDecompressionLimit 把上限钳制到可用范围，非正值回退默认。
+func clampDecompressionLimit(limit, fallback int64) int64 {
+	if limit <= 0 {
+		return fallback
+	}
+	if limit > math.MaxInt64/2 {
+		return math.MaxInt64 / 2
+	}
+	return limit
+}
+
+/**
+ * layerDecompressionLimit 返回某一层的解压产出上限。
+ *
+ * 请求侧与响应侧共用同一份解码实现，方向由调用方传入：请求体转发必须解出完整
+ * 明文，配额取 64 MiB；响应侧产出会进整段缓冲，配额取 8 MiB（与
+ * maxStreamTransformBufferBytes 齐平）。
+ *
+ * @param encoding 该层的规范编码名。
+ * @param requestSide 是否属于请求体解压路径。
+ * @returns 该层的产出上限（字节）。
+ */
+func layerDecompressionLimit(encoding string, requestSide bool) int64 {
+	_ = encoding
+	if requestSide {
+		return RequestDecompressionMaxBytes()
+	}
+	return ResponseDecompressionMaxBytes()
+}
+
+/**
+ * zstdDecoderBudget 返回 zstd 解码器构造期用的窗口/内存预算。
+ *
+ * zstd 在请求体转发路径上出现得最多，且它的解码器默认值（512 MB 窗口 /
+ * 64 GiB 内存）比本项目任何合法载荷都大几个数量级。取请求侧与响应侧上限的
+ * 较大者，保证「两侧各自的外层上限」才是真正的约束，解码器自身不会先于它
+ * 误伤合法帧。
+ *
+ * @returns 解码器的窗口与内存上限（字节）。
+ */
+func zstdDecoderBudget() int64 {
+	request, response := RequestDecompressionMaxBytes(), ResponseDecompressionMaxBytes()
+	if request > response {
+		return request
+	}
+	return response
+}
+
+/**
+ * decompressionGuard 是流式解压的产出计数器：累计产出超过预算即中断。
+ *
+ * 流式路径（请求体转发、响应流重压缩）不能预先 LimitReader——解压后的字节是
+ * 边读边产的，把上限套在「读」上等于限定响应流总长度，会把正常的流式转发在
+ * 上限处掐断。这里改成在产出侧计数，只在真的解出超量内容（压缩炸弹）时失败。
+ *
+ * 预算由构造时的 layerDecompressionLimit 快照决定（逐层各一份），运行期改配置
+ * 不影响已构造的流，避免同一请求中途换标尺。
+ *
+ * onTrip 在首次越过预算时同步调用一次。流式路径的读取发生在 http 传输层，
+ * 调用方拿不到那个时刻，因此把「记事件」挂在触发点上，而不是等错误回到上层
+ * ——等回到上层时请求已经中止，事件与失败原因就断了关联。
+ */
+type decompressionGuard struct {
+	reader    io.Reader
+	remaining int64
+	onTrip    func()
+	tripped   bool
+}
+
+func (g *decompressionGuard) Read(p []byte) (int, error) {
+	if g.remaining <= 0 {
+		g.trip()
+		return 0, errDecompressionLimitExceeded
+	}
+	if int64(len(p)) > g.remaining {
+		p = p[:g.remaining]
+	}
+	n, err := g.reader.Read(p)
+	g.remaining -= int64(n)
+	if errors.Is(err, errDecompressionLimitExceeded) {
+		g.trip()
+	}
+	return n, err
+}
+
+// trip 触发一次上限回调，重复越界只上报一次。
+func (g *decompressionGuard) trip() {
+	if g.tripped {
+		return
+	}
+	g.tripped = true
+	if g.onTrip != nil {
+		g.onTrip()
+	}
+}
 
 type responseEncoding string
 
+// ResponseCompressionOptions 是响应压缩协商的一组开关。
+//
+// DeflateEnabled/ZstdEnabled 与 GzipEnabled/BrotliEnabled 同构，由快照的
+// response_compression_deflate_enabled / response_compression_zstd_enabled
+// 设置行驱动。四者一起决定候选集与优先级（见 selectClientResponseEncodingBytes），
+// 总开关 Enabled 为假时由 normalizeResponseCompressionOptions 统一收敛为全关。
 type ResponseCompressionOptions struct {
-	Enabled       bool
-	BrotliEnabled bool
-	GzipEnabled   bool
-	MinBytes      int
+	Enabled        bool
+	BrotliEnabled  bool
+	GzipEnabled    bool
+	DeflateEnabled bool
+	ZstdEnabled    bool
+	MinBytes       int
 }
 
 const (
@@ -45,16 +229,26 @@ const (
 
 func DefaultResponseCompressionOptions(brotliEnabled bool) ResponseCompressionOptions {
 	return normalizeResponseCompressionOptions(ResponseCompressionOptions{
-		Enabled:       snapshot.DefaultResponseCompressionEnabled,
-		BrotliEnabled: brotliEnabled,
-		GzipEnabled:   snapshot.DefaultResponseCompressionGzipEnabled,
-		MinBytes:      snapshot.DefaultResponseCompressionMinBytes,
+		Enabled:        snapshot.DefaultResponseCompressionEnabled,
+		BrotliEnabled:  brotliEnabled,
+		GzipEnabled:    snapshot.DefaultResponseCompressionGzipEnabled,
+		DeflateEnabled: snapshot.DefaultResponseCompressionDeflate,
+		ZstdEnabled:    snapshot.DefaultResponseCompressionZstd,
+		MinBytes:       snapshot.DefaultResponseCompressionMinBytes,
 	})
 }
 
 func normalizeResponseCompressionOptions(opts ResponseCompressionOptions) ResponseCompressionOptions {
 	if opts.MinBytes <= 0 {
 		opts.MinBytes = snapshot.DefaultResponseCompressionMinBytes
+	}
+	// 总开关关闭时，四个编码开关一律视为关闭：调用方多读到一处 Enabled
+	// 判定就会泄漏出未协商的编码，这里收敛成单一真值来源。
+	if !opts.Enabled {
+		opts.BrotliEnabled = false
+		opts.GzipEnabled = false
+		opts.DeflateEnabled = false
+		opts.ZstdEnabled = false
 	}
 	return opts
 }
@@ -66,6 +260,27 @@ func responseCompressionMinBytes(minBytes int) int {
 	return minBytes
 }
 
+/**
+ * readAllUpTo 读取至多 limit+1 字节，并报告产出是否超出 limit。
+ *
+ * 与 readUpstreamResponseBodyLimitedInternal 同构地多读一个字节：那一个字节
+ * 只用于判定越界，不会外泄给调用方。limit 为负时按 0 处理。
+ *
+ * @param reader 读取来源（通常是解压后的 reader）。
+ * @param limit 产出上限。
+ * @returns body 实际读到的字节；exceeded 是否超过 limit；err 读取错误。
+ */
+func readAllUpTo(reader io.Reader, limit int64) ([]byte, bool, error) {
+	if limit < 0 {
+		limit = 0
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	return body, int64(len(body)) > limit, nil
+}
+
 func readUpstreamResponseBody(resp *http.Response) ([]byte, http.Header, error) {
 	reader, closeFn, decoded, err := upstreamResponseReader(resp)
 	if err != nil {
@@ -75,9 +290,16 @@ func readUpstreamResponseBody(resp *http.Response) ([]byte, http.Header, error) 
 		defer closeFn()
 	}
 
-	body, err := io.ReadAll(reader)
+	// 解压产出超过响应侧上限即按压缩炸弹处理：解压已终止，不返回半截明文。
+	body, exceeded, err := readAllUpTo(reader, ResponseDecompressionMaxBytes())
 	if err != nil {
+		if isDecompressionLimitError(err) {
+			return nil, nil, errDecompressionLimitExceeded
+		}
 		return nil, nil, err
+	}
+	if exceeded {
+		return nil, nil, errDecompressionLimitExceeded
 	}
 
 	headers := http.Header(nil)
@@ -124,13 +346,31 @@ func readUpstreamResponseBodyLimitedInternal(resp *http.Response, maxBodyBytes i
 	if skipKnownOversize && resp != nil && !decoded && resp.ContentLength > maxBodyBytes {
 		return nil, headers, reader, closeFn, decoded, true, nil
 	}
-	limited := io.LimitReader(reader, maxBodyBytes+1)
-	body, err := io.ReadAll(limited)
+	// 调用方上限决定「缓冲多少」，响应侧解压上限决定「最多能解出多少」。
+	// 两者取小生效；仅当解压上限才是那个约束且真的被突破时，才按压缩炸弹
+	// 报错——否则维持既有语义：超出调用方上限的部分退回流式转发，不丢字节。
+	// callerLimit <= 0 是 maxBodyBytes == math.MaxInt 时的加法溢出，同样按
+	// 「解压上限生效」处理。
+	callerLimit := maxBodyBytes + 1
+	bombLimit := ResponseDecompressionMaxBytes()
+	limit := callerLimit
+	bombLimited := false
+	if limit <= 0 || limit > bombLimit+1 {
+		limit = bombLimit + 1
+		bombLimited = true
+	}
+	body, exceeded, err := readAllUpTo(reader, limit)
 	if err != nil {
 		if closeFn != nil {
 			_ = closeFn()
 		}
 		return nil, nil, nil, nil, false, false, err
+	}
+	if exceeded && bombLimited {
+		if closeFn != nil {
+			_ = closeFn()
+		}
+		return nil, nil, nil, nil, false, false, errDecompressionLimitExceeded
 	}
 	if int64(len(body)) <= maxBodyBytes {
 		if closeFn != nil {
@@ -218,6 +458,9 @@ func decodeUpstreamRequestBodyBytes(body []byte, contentEncoding []byte) ([]byte
 	}
 
 	decoded := false
+	// 逐层施加请求侧上限：多层嵌套会让每层都成为一次放大机会（外层 1 KiB
+	// 解出 1 MiB，内层再把 1 MiB 解成 1 GiB），因此每一层都独立受限，任一层
+	// 超限立即中断，不再进下一层。
 	for i := len(encodings) - 1; i >= 0; i-- {
 		reader, closer, used, err := newContentDecoderReader(bytes.NewReader(body), encodings[i])
 		if err != nil {
@@ -226,10 +469,21 @@ func decodeUpstreamRequestBodyBytes(body []byte, contentEncoding []byte) ([]byte
 		if !used {
 			continue
 		}
-		decodedBody, readErr := io.ReadAll(reader)
+		// 非流式路径的炸弹上限：调用方没有给上限（转发前解压必须得到完整
+		// 明文）。超限即失败，不返回半截明文——转发路径拿到部分明文会以
+		// 「去掉 Content-Encoding 的完整体」形态送上游，比不解压更糟。
+		decodedBody, exceeded, readErr := readAllUpTo(reader, layerDecompressionLimit(encodings[i], true))
 		closeErr := closeContentDecoder(closer)
 		if readErr != nil {
+			// zstd 解码器自身的窗口/内存限额也是「配额触发」，归一到同一个
+			// 错误上，让调用方的降级判定只有一处。
+			if isDecompressionLimitError(readErr) {
+				return nil, false, errDecompressionLimitExceeded
+			}
 			return nil, false, readErr
+		}
+		if exceeded {
+			return nil, false, errDecompressionLimitExceeded
 		}
 		if closeErr != nil {
 			return nil, false, closeErr
@@ -272,6 +526,22 @@ func decodeUpstreamRequestBodyStream(body io.Reader, contentEncoding string) (io
 }
 
 func decodeUpstreamRequestBodyStreamBytes(body io.Reader, contentEncoding []byte) (io.ReadCloser, bool, error) {
+	return decodeUpstreamRequestBodyStreamBytesWithTrip(body, contentEncoding, nil)
+}
+
+/**
+ * decodeUpstreamRequestBodyStreamBytesWithTrip 是流式解码的带回调形态。
+ *
+ * onTrip 在解压产出首次越过硬上限时同步触发一次，供调用方在触发点直接记事件：
+ * 流式读取发生在 http 传输层，错误回到调用方时请求已经中止，事件与成因就断了
+ * 关联。onTrip 为 nil 时行为与 decodeUpstreamRequestBodyStreamBytes 完全一致。
+ *
+ * @param body 压缩字节流。
+ * @param contentEncoding Content-Encoding 原始取值。
+ * @param onTrip 上限触发回调；可为 nil。
+ * @returns 解压后的 reader、是否应用了编码、构造错误。
+ */
+func decodeUpstreamRequestBodyStreamBytesWithTrip(body io.Reader, contentEncoding []byte, onTrip func()) (io.ReadCloser, bool, error) {
 	if body == nil {
 		return nil, false, nil
 	}
@@ -279,6 +549,20 @@ func decodeUpstreamRequestBodyStreamBytes(body io.Reader, contentEncoding []byte
 	encodings, supported := parseContentEncodingsBytes(contentEncoding)
 	if len(encodings) == 0 || !supported {
 		return readerAsReadCloser(body), false, nil
+	}
+
+	// 逐层施加请求侧上限：每层各有一个独立预算，任一层超限立即中断，不把
+	// 超量产出交给下一层继续放大。budget 在所有层之间共享同一个 trip 回调，
+	// 确保「哪一层先超限」只会被上报一次。
+	var tripped bool
+	trip := func() {
+		if tripped {
+			return
+		}
+		tripped = true
+		if onTrip != nil {
+			onTrip()
+		}
 	}
 
 	current := body
@@ -295,7 +579,11 @@ func decodeUpstreamRequestBodyStreamBytes(body io.Reader, contentEncoding []byte
 		if !used {
 			continue
 		}
-		current = reader
+		current = &decompressionGuard{
+			reader:    reader,
+			remaining: layerDecompressionLimit(encodings[i], true),
+			onTrip:    trip,
+		}
 		decoded = true
 		if closer != nil {
 			closers = append(closers, closer)
@@ -355,6 +643,12 @@ func parseContentEncodingsBytes(raw []byte) ([]string, bool) {
 			return nil, false
 		}
 		encodings = append(encodings, encoding)
+		// 层数上限：合法场景不会超过 2-3 层（gzip 再套 gzip 的双重压缩已是上限），
+		// 声明更多层只会让每一层都成为一次放大机会。超限按「不支持的编码」处理
+		// ——调用方据此走降级放行，而不是把它当成协议错误拒绝请求。
+		if len(encodings) > maxContentEncodingLayers {
+			return nil, false
+		}
 	}
 	return encodings, true
 }
@@ -426,7 +720,14 @@ func newContentDecoderReader(reader io.Reader, encoding string) (io.Reader, io.C
 		flateReader := flate.NewReader(reader)
 		return flateReader, flateReader, true, nil
 	case "zstd":
-		zstdReader, err := zstd.NewReader(reader)
+		// klauspost/compress 的解码器默认允许 512 MB 窗口与 64 GiB 解码内存，
+		// 两者都远高于本项目的任何合法载荷。按两侧配置的较大值收紧，让库自己
+		// 在解压开始前就拒绝超规格的帧，而不是等外层计到上限才中断。
+		zstdLimit := uint64(zstdDecoderBudget())
+		zstdReader, err := zstd.NewReader(reader,
+			zstd.WithDecoderMaxMemory(zstdLimit),
+			zstd.WithDecoderMaxWindow(zstdLimit),
+		)
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -501,7 +802,7 @@ func applyClientResponseCompressionWithOptions(c *app.RequestContext, statusCode
 		return body
 	}
 
-	encoding := selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), opts.BrotliEnabled, opts.GzipEnabled)
+	encoding := selectClientResponseEncodingBytes(c.GetHeader("Accept-Encoding"), opts.BrotliEnabled, opts.GzipEnabled, opts.DeflateEnabled, opts.ZstdEnabled)
 	if encoding == responseEncodingIdentity {
 		return body
 	}
@@ -521,23 +822,41 @@ func responseStatusDisallowsBody(statusCode int) bool {
 	return (statusCode >= 100 && statusCode < 200) || statusCode == http.StatusNoContent || statusCode == http.StatusNotModified
 }
 
-func selectClientResponseEncoding(raw string, brotliEnabled bool, gzipEnabled bool) responseEncoding {
+/**
+ * selectClientResponseEncoding 按 Accept-Encoding 协商响应编码。
+ *
+ * 候选顺序即优先级：q 值相同时取靠前者，因此顺序变化会直接改变输出。
+ * 当前顺序为 zstd → br → gzip → deflate（用户裁定把 zstd 提到最前）。
+ *
+ * @param raw Accept-Encoding 头取值。
+ * @param brotliEnabled 是否允许 br。
+ * @param gzipEnabled 是否允许 gzip。
+ * @param deflateEnabled 是否允许 deflate。
+ * @param zstdEnabled 是否允许 zstd。
+ * @returns 选中的编码；都不允许时为 identity。
+ */
+func selectClientResponseEncoding(raw string, brotliEnabled bool, gzipEnabled bool, deflateEnabled bool, zstdEnabled bool) responseEncoding {
 	offers := parseAcceptEncodingOffers(raw)
 	best := responseEncodingIdentity
 	bestQ := 0.0
-	for _, encoding := range []responseEncoding{responseEncodingBrotli, responseEncodingGzip, responseEncodingDeflate, responseEncodingZstd} {
-		if encoding == responseEncodingBrotli && !brotliEnabled {
+	for _, candidate := range []struct {
+		encoding responseEncoding
+		enabled  bool
+	}{
+		{responseEncodingZstd, zstdEnabled},
+		{responseEncodingBrotli, brotliEnabled},
+		{responseEncodingGzip, gzipEnabled},
+		{responseEncodingDeflate, deflateEnabled},
+	} {
+		if !candidate.enabled {
 			continue
 		}
-		if encoding == responseEncodingGzip && !gzipEnabled {
-			continue
-		}
-		q := acceptEncodingQ(offers, string(encoding))
+		q := acceptEncodingQ(offers, string(candidate.encoding))
 		if q <= 0 {
 			continue
 		}
 		if q > bestQ {
-			best = encoding
+			best = candidate.encoding
 			bestQ = q
 		}
 	}
@@ -558,10 +877,34 @@ type acceptEncodingScores struct {
 	hasWildcard bool
 }
 
-func selectClientResponseEncodingBytes(raw []byte, brotliEnabled bool, gzipEnabled bool) responseEncoding {
+/**
+ * selectClientResponseEncodingBytes 是 selectClientResponseEncoding 的字节版。
+ *
+ * 与字符串版必须逐案同解，包括候选顺序（zstd → br → gzip → deflate）。
+ * 顺序参与判定：q 值相等时先到的候选胜出，因此这里与字符串版的循环顺序
+ * 必须同时改动，任何一侧漏改都会让同一请求在两个调用点协商出不同编码。
+ *
+ * 注意:每次胜出都必须同步推进 bestQ。zstd 曾经漏掉 bestQ 赋值，只要它排在
+ * 首位就会被后续任何 q 值大于 0 的候选覆盖，协商结果退化成「顺序里最后一个
+ * 命中的编码」。
+ *
+ * @param raw Accept-Encoding 头原始字节。
+ * @param brotliEnabled 是否允许 br。
+ * @param gzipEnabled 是否允许 gzip。
+ * @param deflateEnabled 是否允许 deflate。
+ * @param zstdEnabled 是否允许 zstd。
+ * @returns 选中的编码；都不允许时为 identity。
+ */
+func selectClientResponseEncodingBytes(raw []byte, brotliEnabled bool, gzipEnabled bool, deflateEnabled bool, zstdEnabled bool) responseEncoding {
 	scores := parseAcceptEncodingScoresBytes(raw)
 	best := responseEncodingIdentity
 	bestQ := 0.0
+	if zstdEnabled {
+		if q := scores.q(responseEncodingZstd); q > bestQ {
+			best = responseEncodingZstd
+			bestQ = q
+		}
+	}
 	if brotliEnabled {
 		if q := scores.q(responseEncodingBrotli); q > bestQ {
 			best = responseEncodingBrotli
@@ -574,12 +917,11 @@ func selectClientResponseEncodingBytes(raw []byte, brotliEnabled bool, gzipEnabl
 			bestQ = q
 		}
 	}
-	if q := scores.q(responseEncodingDeflate); q > bestQ {
-		best = responseEncodingDeflate
-		bestQ = q
-	}
-	if q := scores.q(responseEncodingZstd); q > bestQ {
-		best = responseEncodingZstd
+	if deflateEnabled {
+		if q := scores.q(responseEncodingDeflate); q > bestQ {
+			best = responseEncodingDeflate
+			bestQ = q
+		}
 	}
 	return best
 }

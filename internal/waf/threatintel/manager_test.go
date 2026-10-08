@@ -11,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/iplist"
+	"My-OpenWaf/internal/store/threatintel"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -19,7 +20,7 @@ import (
 
 func TestParseEntriesValidatesAndDedups(t *testing.T) {
 	sid := uint(7)
-	feed := &store.ThreatIntelFeed{ID: 3, Name: "恶意源", Kind: "blacklist", Action: "drop", SiteID: &sid}
+	feed := &threatintel.ThreatIntelFeed{ID: 3, Name: "恶意源", Kind: "blacklist", Action: "drop", SiteID: &sid}
 	body := []byte(`
 # 注释行
 1.1.1.1
@@ -44,7 +45,7 @@ not-an-ip
 	}
 
 	for _, e := range entries {
-		if e.Kind != store.IPListBlack {
+		if e.Kind != iplist.IPListBlack {
 			t.Errorf("条目 %s Kind 应继承 blacklist, 实得 %s", e.Value, e.Kind)
 		}
 		if e.Action != "drop" {
@@ -66,7 +67,7 @@ not-an-ip
 }
 
 func TestParseEntriesEmpty(t *testing.T) {
-	feed := &store.ThreatIntelFeed{ID: 1, Name: "空", Kind: "whitelist", Action: "intercept"}
+	feed := &threatintel.ThreatIntelFeed{ID: 1, Name: "空", Kind: "whitelist", Action: "intercept"}
 	if got := parseEntries([]byte("# 全是注释\n\n   \n"), feed); len(got) != 0 {
 		t.Fatalf("期望 0 条, 实得 %d", len(got))
 	}
@@ -75,7 +76,7 @@ func TestParseEntriesEmpty(t *testing.T) {
 // TestParseEntriesTabSeparatedColumns 验证行级切列：tab 分隔行取第一列，
 // 与行内注释可以共存。
 func TestParseEntriesTabSeparatedColumns(t *testing.T) {
-	feed := &store.ThreatIntelFeed{ID: 9, Name: "列式源", Kind: "blacklist", Action: "intercept"}
+	feed := &threatintel.ThreatIntelFeed{ID: 9, Name: "列式源", Kind: "blacklist", Action: "intercept"}
 	body := []byte("9.9.9.9\tremark here\tthird column\n10.10.10.0/24\t# 备注以注释开头\n11.11.11.11 # tail comment\nnot-an-ip\t9.9.9.9\n\t12.12.12.12\tleading tab column\n")
 	entries := parseEntries(body, feed)
 
@@ -97,7 +98,7 @@ func TestParseEntriesTabSeparatedColumns(t *testing.T) {
 // TestFetchAndParseAuthHeader 验证可选认证头仅在两字段都非空时装配，
 // 并声明 Accept-Encoding: gzip。
 func TestFetchAndParseAuthHeader(t *testing.T) {
-	feed := &store.ThreatIntelFeed{
+	feed := &threatintel.ThreatIntelFeed{
 		ID: 1, Name: "认证源", URL: "", Kind: "blacklist", Action: "intercept",
 		AuthHeaderName: "X-Auth-Token", AuthHeaderValue: "secret-token-123",
 	}
@@ -156,7 +157,7 @@ func TestFetchAndParseGzip(t *testing.T) {
 	defer srv.Close()
 
 	m := &Manager{client: &http.Client{Timeout: 5 * time.Second}}
-	entries, err := m.fetchAndParse(&store.ThreatIntelFeed{ID: 1, Name: "gzip源", URL: srv.URL, Kind: "blacklist"})
+	entries, err := m.fetchAndParse(&threatintel.ThreatIntelFeed{ID: 1, Name: "gzip源", URL: srv.URL, Kind: "blacklist"})
 	if err != nil {
 		t.Fatalf("fetchAndParse: %v", err)
 	}
@@ -183,7 +184,7 @@ func TestFetchAndParseZlib(t *testing.T) {
 	defer srv.Close()
 
 	m := &Manager{client: &http.Client{Timeout: 5 * time.Second}}
-	entries, err := m.fetchAndParse(&store.ThreatIntelFeed{ID: 1, Name: "zlib源", URL: srv.URL, Kind: "blacklist"})
+	entries, err := m.fetchAndParse(&threatintel.ThreatIntelFeed{ID: 1, Name: "zlib源", URL: srv.URL, Kind: "blacklist"})
 	if err != nil {
 		t.Fatalf("fetchAndParse: %v", err)
 	}
@@ -213,7 +214,7 @@ func TestFetchAndParseBareDeflate(t *testing.T) {
 	defer srv.Close()
 
 	m := &Manager{client: &http.Client{Timeout: 5 * time.Second}}
-	entries, err := m.fetchAndParse(&store.ThreatIntelFeed{ID: 1, Name: "裸deflate源", URL: srv.URL, Kind: "blacklist"})
+	entries, err := m.fetchAndParse(&threatintel.ThreatIntelFeed{ID: 1, Name: "裸deflate源", URL: srv.URL, Kind: "blacklist"})
 	if err != nil {
 		t.Fatalf("fetchAndParse: %v", err)
 	}
@@ -282,7 +283,7 @@ func TestSyncFeedAuthHeaderGzipColumnar(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	feed := &store.ThreatIntelFeed{
+	feed := &threatintel.ThreatIntelFeed{
 		Name: "组合源", URL: srv.URL, Kind: "blacklist", Action: "intercept",
 		Enabled:         true,
 		SyncInterval:    3600,
@@ -300,7 +301,7 @@ func TestSyncFeedAuthHeaderGzipColumnar(t *testing.T) {
 	}
 
 	var count int64
-	db.Model(&store.IPListEntry{}).Where("feed_id = ?", feed.ID).Count(&count)
+	db.Model(&iplist.IPListEntry{}).Where("feed_id = ?", feed.ID).Count(&count)
 	if count != 2 {
 		t.Fatalf("落库条目 = %d, 期望 2", count)
 	}
@@ -330,7 +331,7 @@ func newManagerForTest(t *testing.T) (*Manager, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.ThreatIntelFeed{}, &store.IPListEntry{}); err != nil {
+	if err := db.AutoMigrate(&threatintel.ThreatIntelFeed{}, &iplist.IPListEntry{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	reloaded := 0
@@ -346,7 +347,7 @@ func TestSyncFeedReplacesEntriesAndRecordsStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	feed := &store.ThreatIntelFeed{Name: "t", URL: srv.URL, Kind: "blacklist", Action: "intercept", Enabled: true, SyncInterval: 3600}
+	feed := &threatintel.ThreatIntelFeed{Name: "t", URL: srv.URL, Kind: "blacklist", Action: "intercept", Enabled: true, SyncInterval: 3600}
 	if err := db.Create(feed).Error; err != nil {
 		t.Fatalf("create feed: %v", err)
 	}
@@ -356,12 +357,12 @@ func TestSyncFeedReplacesEntriesAndRecordsStatus(t *testing.T) {
 	}
 
 	var count int64
-	db.Model(&store.IPListEntry{}).Where("feed_id = ?", feed.ID).Count(&count)
+	db.Model(&iplist.IPListEntry{}).Where("feed_id = ?", feed.ID).Count(&count)
 	if count != 2 {
 		t.Fatalf("期望写入 2 条条目, 实得 %d", count)
 	}
 
-	var updated store.ThreatIntelFeed
+	var updated threatintel.ThreatIntelFeed
 	if err := db.First(&updated, feed.ID).Error; err != nil {
 		t.Fatalf("reload feed: %v", err)
 	}
@@ -383,7 +384,7 @@ func TestSyncFeedHTTPErrorRecordsLastError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	feed := &store.ThreatIntelFeed{Name: "t", URL: srv.URL, Kind: "blacklist", Action: "intercept", Enabled: true}
+	feed := &threatintel.ThreatIntelFeed{Name: "t", URL: srv.URL, Kind: "blacklist", Action: "intercept", Enabled: true}
 	if err := db.Create(feed).Error; err != nil {
 		t.Fatalf("create feed: %v", err)
 	}
@@ -392,7 +393,7 @@ func TestSyncFeedHTTPErrorRecordsLastError(t *testing.T) {
 		t.Fatalf("期望同步返回错误")
 	}
 
-	var updated store.ThreatIntelFeed
+	var updated threatintel.ThreatIntelFeed
 	db.First(&updated, feed.ID)
 	if updated.LastError == "" {
 		t.Errorf("失败同步应记录 LastError")
@@ -403,15 +404,15 @@ func TestIsDue(t *testing.T) {
 	m := &Manager{}
 	now := time.Now()
 	// 从未同步过 -> 到期
-	if !m.isDue(store.ThreatIntelFeed{SyncInterval: 60}, now) {
+	if !m.isDue(threatintel.ThreatIntelFeed{SyncInterval: 60}, now) {
 		t.Errorf("未同步过的 feed 应到期")
 	}
 	recent := now.Add(-30 * time.Second)
-	if m.isDue(store.ThreatIntelFeed{SyncInterval: 60, LastSyncAt: &recent}, now) {
+	if m.isDue(threatintel.ThreatIntelFeed{SyncInterval: 60, LastSyncAt: &recent}, now) {
 		t.Errorf("30 秒前同步、间隔 60 秒的 feed 不应到期")
 	}
 	old := now.Add(-120 * time.Second)
-	if !m.isDue(store.ThreatIntelFeed{SyncInterval: 60, LastSyncAt: &old}, now) {
+	if !m.isDue(threatintel.ThreatIntelFeed{SyncInterval: 60, LastSyncAt: &old}, now) {
 		t.Errorf("120 秒前同步、间隔 60 秒的 feed 应到期")
 	}
 }

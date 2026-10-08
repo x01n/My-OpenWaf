@@ -8,6 +8,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/waf/pageconfig"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 //go:embed templates/*.html
@@ -63,8 +65,8 @@ func renderCaptchaPage(challenge *CaptchaChallenge, reqID string, envJS string, 
 		Background:   template.CSS(pageconfig.SafeBackground(cfg.BgGradient, defaults.BgGradient)),
 		LogoURL:      pageconfig.SafeLogoURL(cfg.LogoURL),
 		CustomCSS:    template.CSS(pageconfig.SanitizeCSS(cfg.CustomCSS)),
-		WasmURL:      PowWasmURL(),
-		GlueURL:      PowGlueURL(),
+		WasmURL:      pow.PowWasmURL(),
+		GlueURL:      pow.PowGlueURL(),
 	}
 	var buf bytes.Buffer
 	if err := captchaPageTmpl.ExecuteTemplate(&buf, "captcha.html", data); err != nil {

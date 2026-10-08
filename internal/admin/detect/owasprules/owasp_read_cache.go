@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/core/action"
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/owasp"
 )
 
 const (
@@ -95,15 +95,15 @@ func owaspSnapshotState(db *gorm.DB, policyID uint) *owaspReadSnapshotState {
  * loadOWASPReadSnapshot 一次性读取活动目录和指定策略覆盖，并生成不可共享修改的视图。
  */
 func loadOWASPReadSnapshot(db *gorm.DB, policyID uint) (owaspReadSnapshot, error) {
-	var catalog []store.OWASPRuleCatalog
+	var catalog []owasp.OWASPRuleCatalog
 	if err := db.Where("active = ?", true).Order("rule_id ASC").Find(&catalog).Error; err != nil {
 		return owaspReadSnapshot{}, err
 	}
-	var configs []store.PolicyOWASPRuleConfig
+	var configs []owasp.PolicyOWASPRuleConfig
 	if err := db.Where("policy_id = ?", policyID).Find(&configs).Error; err != nil {
 		return owaspReadSnapshot{}, err
 	}
-	byRule := make(map[string]store.PolicyOWASPRuleConfig, len(configs))
+	byRule := make(map[string]owasp.PolicyOWASPRuleConfig, len(configs))
 	for i := range configs {
 		byRule[configs[i].RuleID] = configs[i]
 	}

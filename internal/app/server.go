@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/cloudwego/hertz/pkg/common/hlog"
+	"github.com/cloudwego/hertz/pkg/common/tracer/stats"
 	hertznet "github.com/cloudwego/hertz/pkg/network"
 	"github.com/cloudwego/hertz/pkg/network/standard"
 	rueidis "github.com/redis/rueidis"
@@ -36,6 +37,8 @@ import (
 	"My-OpenWaf/internal/admin"
 	"My-OpenWaf/internal/admin/auth"
 	adminsystem "My-OpenWaf/internal/admin/system"
+	admindashboard "My-OpenWaf/internal/admin/system/dashboard"
+	adminrealtime "My-OpenWaf/internal/admin/system/realtime"
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/core/engine"
@@ -43,12 +46,16 @@ import (
 	"My-OpenWaf/internal/core/lifecycle"
 	coreredis "My-OpenWaf/internal/core/redis"
 	"My-OpenWaf/internal/dataplane"
+	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
+	dptlsfp "My-OpenWaf/internal/dataplane/tlsfp"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/pkg/memreclaim"
 	"My-OpenWaf/internal/proxy"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
+	"My-OpenWaf/internal/store/iplist"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/upstream"
@@ -68,6 +75,34 @@ import (
 )
 
 var selfSignedCache = acmepkg.NewSelfSignedCache()
+
+/**
+ * dataPlaneTracer 是注册到全部数据面监听上的 Hertz Tracer，nil 表示不采集。
+ *
+ * 它是包级状态而不是 buildDataServerWithHTTP3Plans 的形参：该函数的调用点有近百处
+ * （生产 2 处、测试 90 余处），加形参会强迫所有测试调用点改签名，而遥测是进程级开关，
+ * 与单次建监听无关。与 selfSignedCache 同属"进程内共享的监听期资源"。
+ *
+ * 该变量在 Run 启动阶段写入后即只读；不用 atomic 是刻意的——tracer 的值在监听开始
+ * 服务前就已确定，若真出现并发写，那本身就是启动顺序错误，应当被 race detector 抓到。
+ */
+var dataPlaneTracer *observability.HTTPTrace
+
+/**
+ * httpTraceLevel 把配置里的级别字符串映射为 Hertz 的事件级别。
+ *
+ * 取值已在 LoadConfigFromEnv 校验过（非 base/detailed 会回退到默认值并告警），
+ * 因此这里只做映射，不做二次校验。
+ *
+ * @param level 配置级别：base 或 detailed。
+ * @return 对应的 Hertz 事件级别。
+ */
+func httpTraceLevel(level string) stats.Level {
+	if level == "base" {
+		return stats.LevelBase
+	}
+	return stats.LevelDetailed
+}
 
 func http2ServerFactoryOptions(cfg snapshotpkg.HTTP2Config) []shconfig.Option {
 	return []shconfig.Option{
@@ -204,24 +239,19 @@ func Run() {
 	}
 
 	seedLog := logger.New("seed")
-	token, password, err := store.SeedDefaults(rt.DB, rt.Config.AdminBind, seedLog)
+	password, err := authstore.SeedDefaults(rt.DB, rt.Config.AdminBind, seedLog)
 	if err != nil {
 		log.Error("seed defaults failed", slog.Any("err", err))
 		os.Exit(1)
 	}
-	if token != "" || password != "" {
-		var bannerLines []string
-		bannerLines = append(bannerLines, "FIRST RUN — save these credentials (shown only once)")
-		bannerLines = append(bannerLines, "")
-		if password != "" {
-			bannerLines = append(bannerLines, "  Admin Username : admin")
-			bannerLines = append(bannerLines, "  Admin Password : "+password)
-		}
-		if token != "" {
-			bannerLines = append(bannerLines, "  API Token      : "+token)
-		}
-		bannerLines = append(bannerLines, "")
-		logger.Banner(bannerLines...)
+	if password != "" {
+		logger.Banner(
+			"FIRST RUN — save these credentials (shown only once)",
+			"",
+			"  Admin Username : admin",
+			"  Admin Password : "+password,
+			"",
+		)
 	}
 
 	// 构建快照前先解析持久化进程密钥，否则动态防护会退化到
@@ -301,12 +331,14 @@ func Run() {
 
 	responseCache := cache.NewResponseCache(rt.Config.ResponseCacheMB, rt.Config.ResponseCacheTTLSec)
 	defer responseCache.Close()
+	proxy.SetRequestDecompressionMaxBytes(rt.Config.RequestDecompressionMaxBytes)
+	proxy.SetResponseDecompressionMaxBytes(rt.Config.ResponseDecompressionMaxBytes)
 	// 高并发峰值后周期性将空闲 heap 归还 OS，降低 RSS 粘滞。
 	stopMemReclaim := memreclaim.Start(memreclaim.Config{Logger: logger.New("memreclaim")})
 	defer stopMemReclaim()
 
 	// 数据面指标（所有数据监听共享）。
-	metrics := dataplane.NewMetrics()
+	metrics := dpmetrics.NewMetrics()
 	upstreamPool := upstream.NewPool()
 	upstreamPool.StartWithResult(ctx, func() []string {
 		if sn := rt.Snapshot.Load(); sn != nil {
@@ -420,6 +452,13 @@ func Run() {
 
 	// Prometheus 兼容的指标收集器。
 	promMetrics := observability.NewMetrics()
+	if rt.Config.HTTPTrace.Enabled {
+		dataPlaneTracer = observability.NewHTTPTrace(httpTraceLevel(rt.Config.HTTPTrace.Level))
+		promMetrics.SetHTTPTraceStatsProvider(dataPlaneTracer)
+		log.Info("HTTP trace telemetry enabled",
+			slog.String("level", rt.Config.HTTPTrace.Level),
+			slog.String("metrics_path", "/metrics"))
+	}
 	promMetrics.SetUnifiedWriterStatsProvider(unifiedWriter)
 	promMetrics.SetWriteQueueStatsProvider(writeQueue)
 	promMetrics.SetDataPlaneMetricsProvider(func() observability.DataPlaneMetricsSnapshot {
@@ -961,7 +1000,6 @@ func Run() {
 	}()
 
 	adminSrv := server.Default(server.WithHostPorts(rt.Config.AdminBind))
-	adminSrv.NoHijackConnPool = true
 	adminSrv.GET("/healthz", hc.LivenessHandler())
 	adminSrv.GET("/readyz", hc.ReadinessHandler())
 	adminSrv.GET("/status", hc.StatusHandler())
@@ -969,7 +1007,7 @@ func Run() {
 	acmeStore := adminsystem.NewACMEManagerStore(repos.SystemSettings, repos.Certificate, reload, logger.New("acme"))
 	dpOpts.ACMEChallengeResponse = acmeStore.GetChallengeResponse
 	go acmeStore.RenewLoop(acmeCtx, 12*time.Hour)
-	realtimeHub := adminsystem.NewRealtimeHub(&adminsystem.DashboardDeps{Metrics: metrics, ConfigDB: rt.DB, LogDB: rt.LogDB, Cache: redisKV, AccessRepo: repos.AccessLog}, upstreamPool, hc, repos.AccessLog, repos.SecurityEvent)
+	realtimeHub := adminrealtime.NewRealtimeHub(&admindashboard.DashboardDeps{Metrics: metrics, ConfigDB: rt.DB, LogDB: rt.LogDB, Cache: redisKV, AccessRepo: repos.AccessLog}, upstreamPool, hc, repos.AccessLog, repos.SecurityEvent)
 	realtimeHub.Start(ctx)
 
 	admin.RegisterRoutes(adminSrv, &admin.Dependencies{
@@ -1251,9 +1289,9 @@ func loadIPLists(rep *iprep.IPReputation, repo *repository.IPListRepo) {
 		if !ok {
 			continue
 		}
-		if it.Kind == store.IPListBlack {
+		if it.Kind == iplist.IPListBlack {
 			blacks = append(blacks, e)
-		} else if it.Kind == store.IPListWhite {
+		} else if it.Kind == iplist.IPListWhite {
 			whites = append(whites, e)
 		}
 	}
@@ -1452,7 +1490,7 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 		}
 		needsClientHelloFingerprint = needsTLSClientHelloFingerprint(siteRT)
 		if needsClientHelloFingerprint {
-			ln = dataplane.NewTLSFingerprintListener(rawLn)
+			ln = dptlsfp.NewTLSFingerprintListener(rawLn)
 		}
 		effectiveHTTP2 := alpnSliceIncludes(tlsCfg.NextProtos, "h2")
 		slog.Info("TLS listener configured",
@@ -1491,6 +1529,14 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 		// 将连接读缓冲从默认 4KB 提升到 16KB，减少读取请求头/体时的
 		// read 系统调用次数，属于保守的读路径吞吐优化，不影响超时与保活语义。
 		server.WithReadBufferSize(16 << 10),
+	}
+	// 遥测关闭时不注册 Tracer：框架的 engine.enableTrace 由 HasTracer() 决定，
+	// 不注册就等于连事件记录都被关掉，而不是"注册了但不处理"。
+	if dataPlaneTracer != nil {
+		opts = append(opts,
+			server.WithTracer(dataPlaneTracer),
+			server.WithTraceLevel(dataPlaneTracer.Level()),
+		)
 	}
 	if siteRT.Site.TLSEnabled {
 		opts = append(opts,

@@ -14,14 +14,14 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 )
 
 // RBAC 角色常量（从 store 镜像一份，方便本包直接引用）。
 const (
-	RoleAdmin    = store.RoleAdmin
-	RoleOperator = store.RoleOperator
-	RoleReadonly = store.RoleReadonly
+	RoleAdmin    = auth.RoleAdmin
+	RoleOperator = auth.RoleOperator
+	RoleReadonly = auth.RoleReadonly
 )
 
 // Claims 是短时效 access JWT 中携带的声明集合。
@@ -261,7 +261,7 @@ func (tm *TokenManager) BlacklistTokenChecked(jti string, expiresAt time.Time, r
 		return tm.db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "jti"}},
 			DoUpdates: clause.AssignmentColumns([]string{"expires_at", "reason"}),
-		}).Create(&store.TokenBlacklist{
+		}).Create(&auth.TokenBlacklist{
 			JTI:       jti,
 			ExpiresAt: expiresAt,
 			Reason:    reason,
@@ -289,7 +289,7 @@ func (tm *TokenManager) loadBlacklistFromDB() error {
 	if tm.db == nil {
 		return nil
 	}
-	var items []store.TokenBlacklist
+	var items []auth.TokenBlacklist
 	if err := tm.db.Where("expires_at > ?", time.Now()).Find(&items).Error; err != nil {
 		return err
 	}
@@ -314,7 +314,7 @@ func (tm *TokenManager) cleanupLoop() {
 			})
 			// 清理数据库中已过期的条目。
 			if tm.db != nil {
-				tm.db.Where("expires_at < ?", now).Delete(&store.TokenBlacklist{})
+				tm.db.Where("expires_at < ?", now).Delete(&auth.TokenBlacklist{})
 			}
 		case <-tm.stopCh:
 			return

@@ -102,11 +102,13 @@ type SiteRuntime struct {
 	// AccessControl 是站点访问控制网关配置（nil = 未启用）。
 	AccessControl *AccessControlConfig
 
-	ResponseCompressionConfigured  bool
-	ResponseCompressionEnabled     bool
-	ResponseCompressionGzipEnabled bool
-	ResponseCompressionMinBytes    int
-	BrotliEnabled                  bool
+	ResponseCompressionConfigured     bool
+	ResponseCompressionEnabled        bool
+	ResponseCompressionGzipEnabled    bool
+	ResponseCompressionDeflateEnabled bool
+	ResponseCompressionZstdEnabled    bool
+	ResponseCompressionMinBytes       int
+	BrotliEnabled                     bool
 
 	// 上游 Host 头覆盖（用于显式指定上游 Host 的解析）。
 	UpstreamHostHeader string
@@ -250,9 +252,11 @@ type Snapshot struct {
 	HPKPReportOnlyValue   string
 
 	// 响应压缩
-	ResponseCompressionEnabled     bool
-	ResponseCompressionGzipEnabled bool
-	ResponseCompressionMinBytes    int
+	ResponseCompressionEnabled        bool
+	ResponseCompressionGzipEnabled    bool
+	ResponseCompressionDeflateEnabled bool
+	ResponseCompressionZstdEnabled    bool
+	ResponseCompressionMinBytes       int
 
 	// Brotli
 	BrotliEnabled bool
@@ -481,8 +485,15 @@ const (
 )
 
 // 默认响应压缩设置。
+//
+// DefaultBrotliEnabled 是 brotli_enabled 与 response_compression_deflate_enabled、
+// response_compression_zstd_enabled 共用的缺省值：DB 里没有该设置行时按「开」
+// 处理（用户裁定「支持全部都开启」）。显式写入 "false" 仍然关闭。
 const (
 	DefaultResponseCompressionEnabled     = true
 	DefaultResponseCompressionGzipEnabled = true
 	DefaultResponseCompressionMinBytes    = 1024
+	DefaultBrotliEnabled                  = true
+	DefaultResponseCompressionDeflate     = true
+	DefaultResponseCompressionZstd        = true
 )

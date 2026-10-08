@@ -10,7 +10,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/route/param"
 
-	"My-OpenWaf/internal/store"
+	owaspstore "My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/waf/owasp"
 )
 
@@ -227,7 +227,7 @@ func TestUpdateSingleOWASPRuleAcceptsRedirectWithTarget(t *testing.T) {
 		"action":      "redirect",
 		"redirect_to": "https://example.com/blocked",
 	})
-	var config store.PolicyOWASPRuleConfig
+	var config owaspstore.PolicyOWASPRuleConfig
 	if err := repo.DB().Where("rule_id = ?", ruleID).First(&config).Error; err != nil {
 		t.Fatalf("load override: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestBatchUpdateOWASPRulesAppliesOverrides(t *testing.T) {
 		t.Fatalf("updated=%d, want 2", resp.Updated)
 	}
 
-	var config1, config2 store.PolicyOWASPRuleConfig
+	var config1, config2 owaspstore.PolicyOWASPRuleConfig
 	if err := repo.DB().Where("rule_id = ?", id1).First(&config1).Error; err != nil {
 		t.Fatalf("load first override: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestBatchUpdateOWASPRulesResetsOverridesAtomically(t *testing.T) {
 	id1, id2 := rules[0].RuleID, rules[1].RuleID
 	for _, ruleID := range []string{id1, id2} {
 		enabled := false
-		if err := repo.DB().Create(&store.PolicyOWASPRuleConfig{
+		if err := repo.DB().Create(&owaspstore.PolicyOWASPRuleConfig{
 			PolicyID: 1,
 			RuleID:   ruleID,
 			Enabled:  &enabled,
@@ -322,7 +322,7 @@ func TestBatchUpdateOWASPRulesResetsOverridesAtomically(t *testing.T) {
 		t.Fatalf("batch reset: want 200, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	var count int64
-	if err := repo.DB().Model(&store.PolicyOWASPRuleConfig{}).
+	if err := repo.DB().Model(&owaspstore.PolicyOWASPRuleConfig{}).
 		Where("policy_id = ? AND rule_id IN ?", 1, []string{id1, id2}).
 		Count(&count).Error; err != nil {
 		t.Fatalf("count reset overrides: %v", err)
@@ -362,7 +362,7 @@ func TestBatchUpdateOWASPRulesRejectsUnknownIDsAtomically(t *testing.T) {
 		t.Fatalf("want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	var count int64
-	if err := repo.DB().Model(&store.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil {
+	if err := repo.DB().Model(&owaspstore.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil {
 		t.Fatalf("count configs: %v", err)
 	}
 	if count != 0 {
@@ -385,7 +385,7 @@ func TestBatchUpdateOWASPRulesRejectsRedirectWithoutTarget(t *testing.T) {
 		t.Fatalf("want 400, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 	var count int64
-	if err := repo.DB().Model(&store.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil {
+	if err := repo.DB().Model(&owaspstore.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil {
 		t.Fatalf("count configs: %v", err)
 	}
 	if count != 0 {

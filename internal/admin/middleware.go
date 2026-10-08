@@ -14,6 +14,7 @@ import (
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -26,9 +27,19 @@ const (
 	adminHPKPReportOnlyHeaderName = "Public-Key-Pins-Report-Only"
 )
 
-// AuthMiddleware 支持 JWT（Bearer）或 API Key 两种认证方式。
-// 白名单路径会被跳过（健康检查、认证端点）。
-func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, sessionMgr *auth.SessionManager) app.HandlerFunc {
+/**
+ * AuthMiddleware 支持 JWT（Bearer）或 API Key 两种认证方式。
+ *
+ * 两种方式都会写入 auth_username（真实账号名）与 auth_role（账号角色）：
+ * API 令牌的身份与权限取自其所属 AdminAccount，账号被删除后令牌立即失效。
+ * 白名单路径会被跳过（健康检查、认证端点）。
+ *
+ * @param keyRepo 令牌仓储。
+ * @param accountRepo 账号仓储，用于解析令牌归属。
+ * @param tm JWT 令牌管理器。
+ * @param sessionMgr 会话管理器。
+ */
+func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, accountRepo *repository.AdminAccountRepo, tm *auth.TokenManager, sessionMgr *auth.SessionManager) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		path := string(c.Path())
 
@@ -59,6 +70,7 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 		if tm != nil {
 			if claims, err := tm.VerifyAccessToken(token); err == nil {
 				c.Set("auth_user", claims.Username)
+				c.Set("auth_username", claims.Username)
 				c.Set("auth_method", "jwt")
 				c.Set("auth_role", claims.Role)
 				c.Set("auth_jti", claims.ID)
@@ -78,7 +90,7 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 		}
 
 		// 回退：API Key。
-		var key *store.AdminAPIKey
+		var key *authstore.AdminAPIKey
 		ok := false
 		if keyRepo != nil {
 			key, ok = keyRepo.Verify(token)
@@ -88,10 +100,24 @@ func AuthMiddleware(keyRepo *repository.AdminAPIKeyRepo, tm *auth.TokenManager, 
 			c.Abort()
 			return
 		}
-		c.Set("auth_user", key.Name)
+		// 令牌的权限与身份都取自所属账号，不再按 key 名冒充身份，
+		// 也不再无条件赋予 admin 角色。
+		var owner *authstore.AdminAccount
+		if accountRepo != nil && key.UserID != 0 {
+			if a, err := accountRepo.GetByID(key.UserID); err == nil && a.ID != 0 {
+				owner = a
+			}
+		}
+		if owner == nil {
+			c.JSON(401, map[string]string{"error": "api key owner account no longer exists"})
+			c.Abort()
+			return
+		}
+		c.Set("auth_user", owner.Username)
+		c.Set("auth_username", owner.Username)
 		c.Set("auth_method", "api_key")
 		c.Set("api_key_id", key.ID)
-		c.Set("auth_role", auth.RoleAdmin) // API Key 默认赋予 admin 角色。
+		c.Set("auth_role", owner.Role)
 		c.Next(ctx)
 	}
 }

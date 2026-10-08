@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/shared"
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/falsepositive"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -78,7 +78,7 @@ func CreateFalsePositive(repo *repository.FalsePositiveRepo, securityEvents *rep
 			}
 		}
 		sourceEventKey := "security-event:" + strconv.FormatUint(uint64(event.ID), 10)
-		rec := &store.FalsePositiveReport{
+		rec := &falsepositive.FalsePositiveReport{
 			SecurityEventID: event.ID,
 			RequestID:       event.RequestID,
 			SourceEventKey:  &sourceEventKey,

@@ -30,6 +30,7 @@ import (
 	"My-OpenWaf/internal/dataplane"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 	"My-OpenWaf/internal/store/repository"
 
 	happ "github.com/cloudwego/hertz/pkg/app"
@@ -9993,7 +9994,7 @@ func TestNeedsTLSClientHelloFingerprint(t *testing.T) {
 			rt: snapshotpkg.SiteRuntime{
 				EffectiveProtection: &baseProtection,
 				AppRouteRules: []appresource.CompiledRule{
-					{Target: store.AppRouteTargetFingerprint},
+					{Target: approute.AppRouteTargetFingerprint},
 				},
 			},
 			want: true,

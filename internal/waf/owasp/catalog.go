@@ -5,19 +5,19 @@ import (
 	"strconv"
 	"strings"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/owasp"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // BuiltinRuleDefinitions 返回检测器实际发出的每个稳定 RuleID 的完整元信息清单。
-func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
-	definitions := make(map[string]store.OWASPRuleCatalog)
+func BuiltinRuleDefinitions() []owasp.OWASPRuleCatalog {
+	definitions := make(map[string]owasp.OWASPRuleCatalog)
 	patterns := CollectRulePatterns()
 	for _, rule := range DefaultOWASPRegistry.All() {
 		info := patterns[rule.ID]
-		definitions[rule.ID] = store.OWASPRuleCatalog{
+		definitions[rule.ID] = owasp.OWASPRuleCatalog{
 			RuleID: rule.ID, Category: rule.Category, Name: rule.Name, Description: rule.Description,
 			Pattern: info.Pattern, Score: info.Score,
 			DefaultEnabled: rule.Enabled, DefaultAction: "intercept", BuiltinVersion: "1", Active: true,
@@ -27,7 +27,7 @@ func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 		if _, exists := definitions[ruleID]; exists {
 			return
 		}
-		definitions[ruleID] = store.OWASPRuleCatalog{
+		definitions[ruleID] = owasp.OWASPRuleCatalog{
 			RuleID: ruleID, Category: category, Name: name, Description: description,
 			DefaultEnabled: true, DefaultAction: "intercept", BuiltinVersion: "1", Active: true,
 		}
@@ -80,7 +80,7 @@ func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 	// 不属于 crlfPatterns 切片，因此只能在此登记，不能写进 builtinRuleMeta。
 	add("owasp:crlf:006", string(CatCRLF), "RFC-2047 编码头内嵌换行", "检测 RFC-2047 编码字（=?charset?B/Q?...?=）内部嵌入的换行符；风险分值 3")
 
-	items := make([]store.OWASPRuleCatalog, 0, len(definitions))
+	items := make([]owasp.OWASPRuleCatalog, 0, len(definitions))
 	for _, item := range definitions {
 		items = append(items, item)
 	}
@@ -91,7 +91,7 @@ func BuiltinRuleDefinitions() []store.OWASPRuleCatalog {
 func ReconcileBuiltinCatalog(db *gorm.DB) error {
 	definitions := BuiltinRuleDefinitions()
 	return db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&store.OWASPRuleCatalog{}).Where("active = ?", true).Update("active", false).Error; err != nil {
+		if err := tx.Model(&owasp.OWASPRuleCatalog{}).Where("active = ?", true).Update("active", false).Error; err != nil {
 			return err
 		}
 		for i := range definitions {

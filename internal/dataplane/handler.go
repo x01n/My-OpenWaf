@@ -29,18 +29,22 @@ import (
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
 	"My-OpenWaf/internal/core/rules"
+	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
+	dpreqid "My-OpenWaf/internal/dataplane/reqid"
 	dpstream "My-OpenWaf/internal/dataplane/stream"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/proxy"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/upstream"
 	"My-OpenWaf/internal/visitorfusion"
 	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/challenge"
+	challengepow "My-OpenWaf/internal/waf/challenge/pow"
 	"My-OpenWaf/internal/waf/drop"
 	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
 	wafescalation "My-OpenWaf/internal/waf/escalation"
@@ -55,7 +59,7 @@ import (
 type Options struct {
 	Holder                *snapshot.Holder
 	Engine                *engine.Engine
-	Metrics               *Metrics
+	Metrics               *dpmetrics.Metrics
 	Writer                *observability.UnifiedWriter
 	ResponseCache         *cache.ResponseCache
 	Log                   *slog.Logger
@@ -220,7 +224,7 @@ func Handler(opts Options) app.HandlerFunc {
 
 	return func(ctx context.Context, c *app.RequestContext) {
 		ctx, closeNotifyCancel := bindCloseNotify(ctx, c)
-		requestID := fastRequestID()
+		requestID := dpreqid.FastRequestID()
 		c.Response.Header.Set("X-Request-ID", requestID)
 		c.Response.Header.Del("Server")
 		defer func() {
@@ -310,6 +314,8 @@ func Handler(opts Options) app.HandlerFunc {
 			rt.ResponseCompressionConfigured = true
 			rt.ResponseCompressionEnabled = sn.ResponseCompressionEnabled
 			rt.ResponseCompressionGzipEnabled = sn.ResponseCompressionGzipEnabled
+			rt.ResponseCompressionDeflateEnabled = sn.ResponseCompressionDeflateEnabled
+			rt.ResponseCompressionZstdEnabled = sn.ResponseCompressionZstdEnabled
 			rt.ResponseCompressionMinBytes = sn.ResponseCompressionMinBytes
 			rt.BrotliEnabled = sn.BrotliEnabled
 		}
@@ -388,7 +394,15 @@ func Handler(opts Options) app.HandlerFunc {
 
 		// 站点白名单需要在挑战失败计数前确定；实际名单决策由引擎 IP 声誉阶段统一执行。
 		siteIPWhitelisted := siteIPWhitelistContains(rt.SiteIPWhitelist, clientIP)
+		// 解压降级的接收端必须在取样本之前挂好：采样解压发生在
+		// requestBodySampleBeforePipeline → ensureRequestBodySnapshot 里，
+		// 挂晚了就收不到采样阶段的降级信号。只在请求真的带 Content-Encoding
+		// 时挂载，绝大多数请求不为此多一次上下文写入。
+		if len(requestBodyContentEncoding(c)) > 0 {
+			ContextWithCompressionEventObserver(c, opts, rt.Site.ID, reqID, cipStr, host, method, ua)
+		}
 		body, _, _ := requestBodySampleBeforePipeline(c)
+		recordUndetectedCompressedBodyEvent(c, opts, rt.Site.ID, reqID, cipStr, host, method, ua)
 		challengePassed := false
 		if method == "POST" {
 			sub, ok := challengeSubmissionValues(body, string(c.Request.Header.ContentType()))
@@ -399,7 +413,7 @@ func Handler(opts Options) app.HandlerFunc {
 					5*time.Minute)
 			// 工作量证明：以 token 为 nonce 重算 SHA-256(token+counter)，
 			// 确保客户端确实付出了算力，且该工作量无法跨挑战复用。
-			if challengePassed && !challenge.VerifyChallengeProof(sub.Token, sub.Counter, sub.Proof) {
+			if challengePassed && !challengepow.VerifyChallengeProof(sub.Token, sub.Counter, sub.Proof) {
 				challengePassed = false
 			}
 			// WASM 环境评分：签名有效时才采信，且仅在命中确定性自动化硬信号
@@ -1338,7 +1352,10 @@ func Handler(opts Options) app.HandlerFunc {
 				}
 			}
 			cacheGeneration := opts.ResponseCache.Generation()
-			bufferedResp, err := proxy.FetchHTTPForCache(ctx, c, *result.Site, base, clientIP, host, opts.ResponseCache.MaxEntryBodySize())
+			// 必须赋值给外层 bufferedResp：switch 之后的 tryRecordAppRouteResource
+			// 依赖它取上游原始响应头；用 := 会遮蔽外层变量，使该记录退化为本进程响应头。
+			var err error
+			bufferedResp, err = proxy.FetchHTTPForCache(ctx, c, *result.Site, base, clientIP, host, opts.ResponseCache.MaxEntryBodySize())
 			if err != nil {
 				// 重新检查 generation，避免缓存清理/unsafe 失效发生在
 				// BeginFill 等待或上游请求期间后仍然回放旧内容。
@@ -1501,7 +1518,7 @@ func shouldRecordAppRouteResponseBody(rt *snapshot.SiteRuntime) bool {
 	}
 	for _, rule := range rt.AppRouteRules {
 		switch rule.Target {
-		case store.AppRouteTargetResponseBody, store.AppRouteTargetFullHTTPResponse:
+		case approute.AppRouteTargetResponseBody, approute.AppRouteTargetFullHTTPResponse:
 			return true
 		}
 	}
@@ -2543,7 +2560,7 @@ func recordChallengeVerifyAccessLog(c *app.RequestContext, opts Options) {
 	}
 	requestID := strings.TrimSpace(string(c.Response.Header.Peek("X-Request-ID")))
 	if requestID == "" {
-		requestID = fastRequestID()
+		requestID = dpreqid.FastRequestID()
 		c.Response.Header.Set("X-Request-ID", requestID)
 	}
 	statusCode := c.Response.StatusCode()
@@ -3286,10 +3303,10 @@ func handleWASMAssets(c *app.RequestContext) bool {
 	path := string(c.Path())
 	switch path {
 	case "/__owaf/pow.wasm":
-		challenge.ServePoWWASM(c)
+		challengepow.ServePoWWASM(c)
 		return true
 	case "/__owaf/pow_glue.js":
-		challenge.ServePowGlueJS(c)
+		challengepow.ServePowGlueJS(c)
 		return true
 	}
 	return false
@@ -3349,7 +3366,7 @@ func handleDynamicProtectionKey(c *app.RequestContext, opts Options) bool {
 	}
 	statusCode := http.StatusOK
 	wafAction := "dynamic_key"
-	requestID := fastRequestID()
+	requestID := dpreqid.FastRequestID()
 	c.Response.Header.Set("X-Request-ID", requestID)
 	c.Response.Header.Set("Cache-Control", "no-store")
 	c.Response.Header.Set("Pragma", "no-cache")
@@ -3491,15 +3508,10 @@ func siteIPWhitelistContains(entries []iprep.IPListEntry, clientIP net.IP) bool 
 	return false
 }
 
-// requestProtoFromContext 从请求头或 TLS 上下文提取请求协议。
+// requestProtoFromContext 从连接协商结果（TLS 状态或已认证的 HTTP/3 元数据）提取请求
+// scheme。客户端自带的转发头不得参与：该结果会拼进 OAuth redirect_uri 等绝对 URL。
 func requestProtoFromContext(c *app.RequestContext) string {
-	if v := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto"))); v != "" {
-		return strings.ToLower(v)
-	}
-	if fp, ok := tlsFingerprintFromRequestContext(c); ok && fp.TLSVersion != "" {
-		return "https"
-	}
-	return "http"
+	return TrustedInboundForwardedProto(c)
 }
 
 func handleCaptchaVerify(c *app.RequestContext, opts Options) bool {

@@ -24,6 +24,8 @@ import (
 	"github.com/wenlng/go-captcha/v2/click"
 	"github.com/wenlng/go-captcha/v2/rotate"
 	"github.com/wenlng/go-captcha/v2/slide"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // GoCaptchaConfig 存储 GoCaptcha 相关配置。
@@ -727,7 +729,7 @@ func (p *GoCaptchaProvider) randomSelectChars() []string {
 	shuffled := make([]string, len(pool))
 	copy(shuffled, pool)
 	for i := len(shuffled) - 1; i > 0; i-- {
-		j := randIntN(i + 1)
+		j := pow.RandIntN(i + 1)
 		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 	}
 	return shuffled[:count]

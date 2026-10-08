@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"My-OpenWaf/internal/store"
+	cvestore "My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/waf/cve"
 
 	"github.com/glebarez/sqlite"
@@ -26,7 +26,7 @@ func newCVERuleCacheTestRepo(t *testing.T) (*CVERuleRepo, *atomic.Int64) {
 		t.Fatalf("get sql db: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&cve.CVERuleModel{}, &store.CVERuleScopeOverride{}); err != nil {
+	if err := db.AutoMigrate(&cve.CVERuleModel{}, &cvestore.CVERuleScopeOverride{}); err != nil {
 		t.Fatalf("migrate CVE cache tables: %v", err)
 	}
 	rule := cve.CVERuleModel{
@@ -45,9 +45,9 @@ func newCVERuleCacheTestRepo(t *testing.T) (*CVERuleRepo, *atomic.Int64) {
 		t.Fatalf("create CVE rule: %v", err)
 	}
 	action := "observe"
-	override := store.CVERuleScopeOverride{
+	override := cvestore.CVERuleScopeOverride{
 		RuleID:    rule.ID,
-		ScopeType: store.CVEScopeGlobal,
+		ScopeType: cvestore.CVEScopeGlobal,
 		ScopeID:   0,
 		Action:    &action,
 	}
@@ -116,7 +116,7 @@ func TestCVERuleCanonicalSnapshotReturnsDeepCopies(t *testing.T) {
 	ruleID := first.Rules[0].ID
 	first.Rules[0].Description = "mutated by caller"
 	first.OverridesByRule[ruleID][0].Action = nil
-	first.OverridesByRule[ruleID] = append(first.OverridesByRule[ruleID], store.CVERuleScopeOverride{RuleID: ruleID})
+	first.OverridesByRule[ruleID] = append(first.OverridesByRule[ruleID], cvestore.CVERuleScopeOverride{RuleID: ruleID})
 	delete(first.OverridesByRule, ruleID)
 
 	second, err := repo.CanonicalSnapshot()
@@ -226,9 +226,9 @@ func TestCVERuleRepositoryDeleteRemovesScopeOverrides(t *testing.T) {
 		t.Fatalf("create rule: %v", err)
 	}
 	enabled := false
-	override := store.CVERuleScopeOverride{
+	override := cvestore.CVERuleScopeOverride{
 		RuleID:    rule.ID,
-		ScopeType: store.CVEScopeGlobal,
+		ScopeType: cvestore.CVEScopeGlobal,
 		ScopeID:   0,
 		Enabled:   &enabled,
 	}
@@ -239,7 +239,7 @@ func TestCVERuleRepositoryDeleteRemovesScopeOverrides(t *testing.T) {
 		t.Fatalf("delete rule: %v", err)
 	}
 	var count int64
-	if err := repo.db.Model(&store.CVERuleScopeOverride{}).
+	if err := repo.db.Model(&cvestore.CVERuleScopeOverride{}).
 		Where("rule_id = ?", rule.ID).Count(&count).Error; err != nil {
 		t.Fatalf("count scope overrides: %v", err)
 	}

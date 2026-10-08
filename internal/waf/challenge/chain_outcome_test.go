@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // solveChainPoW 按会话锁定的难度求出合法 PoW 解答。
@@ -11,7 +13,7 @@ func solveChainPoW(t *testing.T, nonce string, difficulty int) (counter string, 
 	t.Helper()
 	prefix := strings.Repeat("0", difficulty)
 	for i := int64(0); i < 5_000_000; i++ {
-		h := sha256Hex(nonce + strconv.FormatInt(i, 10))
+		h := pow.SHA256Hex(nonce + strconv.FormatInt(i, 10))
 		if strings.HasPrefix(h, prefix) {
 			return strconv.FormatInt(i, 10), h
 		}

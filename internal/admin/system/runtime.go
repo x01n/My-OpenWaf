@@ -47,12 +47,16 @@ type RuntimeConfigResponse struct {
 	BrotliEnabled                  bool                                `json:"brotli_enabled"`
 	ResponseCompressionEnabled     bool                                `json:"response_compression_enabled"`
 	ResponseCompressionGzipEnabled bool                                `json:"response_compression_gzip_enabled"`
-	ResponseCompressionMinBytes    int                                 `json:"response_compression_min_bytes"`
-	Source                         string                              `json:"source"`
-	Editable                       bool                                `json:"editable"`
-	RestartRequired                bool                                `json:"restart_required"`
-	UpstreamTransportPools         RuntimeTransportPools               `json:"upstream_transport_pools"`
-	TLSCapabilities                []TLSCapabilityStatus               `json:"tls_capabilities"`
+	// ResponseCompressionDeflateEnabled/ZstdEnabled 与 Gzip 同构；三者在
+	// 快照里缺失设置行时都按 true 装载（见 snapshot.settingBoolDefault）。
+	ResponseCompressionDeflateEnabled bool                  `json:"response_compression_deflate_enabled"`
+	ResponseCompressionZstdEnabled    bool                  `json:"response_compression_zstd_enabled"`
+	ResponseCompressionMinBytes       int                   `json:"response_compression_min_bytes"`
+	Source                            string                `json:"source"`
+	Editable                          bool                  `json:"editable"`
+	RestartRequired                   bool                  `json:"restart_required"`
+	UpstreamTransportPools            RuntimeTransportPools `json:"upstream_transport_pools"`
+	TLSCapabilities                   []TLSCapabilityStatus `json:"tls_capabilities"`
 }
 
 type RuntimeTransportPools struct {
@@ -94,6 +98,10 @@ func GetRuntimeConfig(load RuntimeStateProvider, holder *snapshot.Holder, settin
 		hpkpReportOnlyValue := snapshot.DefaultHPKPReportOnlyValue
 		responseCompressionEnabled := snapshot.DefaultResponseCompressionEnabled
 		responseCompressionGzipEnabled := snapshot.DefaultResponseCompressionGzipEnabled
+		// deflate/zstd 与 gzip 同构，缺省值同为「开」；brotli 的历史默认是
+		// false，这里保持不动——只有回落到快照取值时才跟随 snapshot.BrotliEnabled。
+		responseCompressionDeflateEnabled := snapshot.DefaultResponseCompressionDeflate
+		responseCompressionZstdEnabled := snapshot.DefaultResponseCompressionZstd
 		responseCompressionMinBytes := snapshot.DefaultResponseCompressionMinBytes
 		brotliEnabled := false
 		acmeCfg := defaultACMEConfig()
@@ -135,49 +143,53 @@ func GetRuntimeConfig(load RuntimeStateProvider, holder *snapshot.Holder, settin
 				if sn.ResponseCompressionMinBytes > 0 {
 					responseCompressionEnabled = sn.ResponseCompressionEnabled
 					responseCompressionGzipEnabled = sn.ResponseCompressionGzipEnabled
+					responseCompressionDeflateEnabled = sn.ResponseCompressionDeflateEnabled
+					responseCompressionZstdEnabled = sn.ResponseCompressionZstdEnabled
 					responseCompressionMinBytes = sn.ResponseCompressionMinBytes
 				}
 			}
 		}
 		dropEnabled := loadRuntimeDropEnabled(settingsRepo, cfg.Drop.Enabled)
-		tlsCapabilities := buildTLSCapabilityStatuses(networkDefaults, tlsDefaults, caaStatus, ocspStaplingStatus, hstsEnabled, xssProtectionEnabled, expectCTEnabled, hpkpEnabled, hpkpReportOnlyEnabled, responseCompressionEnabled, responseCompressionGzipEnabled, brotliEnabled)
+		tlsCapabilities := buildTLSCapabilityStatuses(networkDefaults, tlsDefaults, caaStatus, ocspStaplingStatus, hstsEnabled, xssProtectionEnabled, expectCTEnabled, hpkpEnabled, hpkpReportOnlyEnabled, responseCompressionEnabled, responseCompressionGzipEnabled, responseCompressionDeflateEnabled, responseCompressionZstdEnabled, brotliEnabled)
 		tlsCapabilities = enrichTLSCapabilitiesWithHTTP2Config(tlsCapabilities, http2Config)
 		tlsCapabilities = enrichTLSCapabilitiesWithHTTP3RouteConflicts(tlsCapabilities, runtimeSnapshot)
 		upstreamTransportPools := runtimeTransportPools(proxy.UpstreamTransportPoolStatsSnapshot())
 		c.JSON(200, RuntimeConfigResponse{
-			Revision:                       revision,
-			ConfigDiagnostics:              configDiagnostics,
-			DBDriver:                       cfg.DBDriver,
-			DBDSN:                          maskDSN(cfg.DBDSN),
-			LogDBDSN:                       maskDSN(cfg.LogDBDSN),
-			DataDir:                        cfg.DataDir,
-			RedisAddr:                      cfg.RedisAddr,
-			RedisEnabled:                   redisEnabled,
-			RedisDB:                        cfg.RedisDB,
-			AdminBind:                      cfg.AdminBind,
-			AdminStaticDir:                 cfg.AdminStaticDir,
-			GeoIPDBPath:                    cfg.Bot.GeoIPDBPath,
-			CVEEnabled:                     cfg.CVE.Enabled,
-			CVEFeedEnabled:                 cfg.CVE.FeedEnabled,
-			CVEFeedInterval:                cfg.CVE.FeedInterval,
-			DropEnabled:                    dropEnabled,
-			HSTSEnabled:                    hstsEnabled,
-			XSSProtectionEnabled:           xssProtectionEnabled,
-			ExpectCTEnabled:                expectCTEnabled,
-			ExpectCTValue:                  expectCTValue,
-			HPKPEnabled:                    hpkpEnabled,
-			HPKPValue:                      hpkpValue,
-			HPKPReportOnlyEnabled:          hpkpReportOnlyEnabled,
-			HPKPReportOnlyValue:            hpkpReportOnlyValue,
-			BrotliEnabled:                  brotliEnabled,
-			ResponseCompressionEnabled:     responseCompressionEnabled,
-			ResponseCompressionGzipEnabled: responseCompressionGzipEnabled,
-			ResponseCompressionMinBytes:    responseCompressionMinBytes,
-			Source:                         "runtime",
-			Editable:                       false,
-			RestartRequired:                false,
-			UpstreamTransportPools:         upstreamTransportPools,
-			TLSCapabilities:                tlsCapabilities,
+			Revision:                          revision,
+			ConfigDiagnostics:                 configDiagnostics,
+			DBDriver:                          cfg.DBDriver,
+			DBDSN:                             maskDSN(cfg.DBDSN),
+			LogDBDSN:                          maskDSN(cfg.LogDBDSN),
+			DataDir:                           cfg.DataDir,
+			RedisAddr:                         cfg.RedisAddr,
+			RedisEnabled:                      redisEnabled,
+			RedisDB:                           cfg.RedisDB,
+			AdminBind:                         cfg.AdminBind,
+			AdminStaticDir:                    cfg.AdminStaticDir,
+			GeoIPDBPath:                       cfg.Bot.GeoIPDBPath,
+			CVEEnabled:                        cfg.CVE.Enabled,
+			CVEFeedEnabled:                    cfg.CVE.FeedEnabled,
+			CVEFeedInterval:                   cfg.CVE.FeedInterval,
+			DropEnabled:                       dropEnabled,
+			HSTSEnabled:                       hstsEnabled,
+			XSSProtectionEnabled:              xssProtectionEnabled,
+			ExpectCTEnabled:                   expectCTEnabled,
+			ExpectCTValue:                     expectCTValue,
+			HPKPEnabled:                       hpkpEnabled,
+			HPKPValue:                         hpkpValue,
+			HPKPReportOnlyEnabled:             hpkpReportOnlyEnabled,
+			HPKPReportOnlyValue:               hpkpReportOnlyValue,
+			BrotliEnabled:                     brotliEnabled,
+			ResponseCompressionEnabled:        responseCompressionEnabled,
+			ResponseCompressionGzipEnabled:    responseCompressionGzipEnabled,
+			ResponseCompressionDeflateEnabled: responseCompressionDeflateEnabled,
+			ResponseCompressionZstdEnabled:    responseCompressionZstdEnabled,
+			ResponseCompressionMinBytes:       responseCompressionMinBytes,
+			Source:                            "runtime",
+			Editable:                          false,
+			RestartRequired:                   false,
+			UpstreamTransportPools:            upstreamTransportPools,
+			TLSCapabilities:                   tlsCapabilities,
 		})
 	}
 }
@@ -196,7 +208,7 @@ func runtimeTransportPools(stats proxy.UpstreamTransportPoolStats) RuntimeTransp
 	}
 }
 
-func buildTLSCapabilityStatuses(networkDefaults snapshot.NetworkDefaults, tlsDefaults snapshot.TLSDefaults, caaStatus, ocspStaplingStatus TLSCapabilityStatus, hstsEnabled, xssProtectionEnabled, expectCTEnabled, hpkpEnabled, hpkpReportOnlyEnabled, responseCompressionEnabled, responseCompressionGzipEnabled, brotliEnabled bool) []TLSCapabilityStatus {
+func buildTLSCapabilityStatuses(networkDefaults snapshot.NetworkDefaults, tlsDefaults snapshot.TLSDefaults, caaStatus, ocspStaplingStatus TLSCapabilityStatus, hstsEnabled, xssProtectionEnabled, expectCTEnabled, hpkpEnabled, hpkpReportOnlyEnabled, responseCompressionEnabled, responseCompressionGzipEnabled, responseCompressionDeflateEnabled, responseCompressionZstdEnabled, brotliEnabled bool) []TLSCapabilityStatus {
 	return []TLSCapabilityStatus{
 		{Key: "http2", Label: "HTTP/2", Status: boolStatus(networkDefaults.HTTP2Enabled), Detail: runtimeHTTP2Detail(networkDefaults, tlsDefaults)},
 		{Key: "http3", Label: "HTTP/3", Status: boolStatus(networkDefaults.HTTP3Enabled), Detail: runtimeHTTP3Detail(networkDefaults, tlsDefaults)},
@@ -224,6 +236,8 @@ func buildTLSCapabilityStatuses(networkDefaults snapshot.NetworkDefaults, tlsDef
 		{Key: "response_compression", Label: "响应压缩", Status: boolStatus(responseCompressionEnabled), Detail: boolDetail(responseCompressionEnabled, "当前快照允许对客户端响应进行压缩协商。", "当前快照关闭响应压缩总开关。")},
 		{Key: "gzip_compression", Label: "Gzip 压缩", Status: boolStatus(responseCompressionEnabled && responseCompressionGzipEnabled), Detail: boolDetail(responseCompressionEnabled && responseCompressionGzipEnabled, "当前快照允许输出 gzip 响应。", "当前快照不会输出 gzip 响应。")},
 		{Key: "brotli_compression", Label: "Brotli 压缩", Status: boolStatus(responseCompressionEnabled && brotliEnabled), Detail: boolDetail(responseCompressionEnabled && brotliEnabled, "当前快照允许输出 Brotli 响应。", "当前快照不会输出 Brotli 响应。")},
+		{Key: "deflate_compression", Label: "Deflate 压缩", Status: boolStatus(responseCompressionEnabled && responseCompressionDeflateEnabled), Detail: boolDetail(responseCompressionEnabled && responseCompressionDeflateEnabled, "当前快照允许输出 deflate 响应。", "当前快照不会输出 deflate 响应。")},
+		{Key: "zstd_compression", Label: "Zstd 压缩", Status: boolStatus(responseCompressionEnabled && responseCompressionZstdEnabled), Detail: boolDetail(responseCompressionEnabled && responseCompressionZstdEnabled, "当前快照允许输出 zstd 响应。", "当前快照不会输出 zstd 响应；协商顺序为 zstd → br → gzip → deflate。")},
 	}
 }
 

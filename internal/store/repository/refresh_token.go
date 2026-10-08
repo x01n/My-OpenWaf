@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -17,8 +17,8 @@ var ErrRefreshTokenUnavailable = errors.New("refresh token is expired or revoked
 
 func NewRefreshTokenRepo(db *gorm.DB) *RefreshTokenRepo { return &RefreshTokenRepo{db: db} }
 
-func (r *RefreshTokenRepo) Create(jti, tokenHash, username, role string, expiresAt time.Time) (*store.RefreshToken, error) {
-	rt := &store.RefreshToken{
+func (r *RefreshTokenRepo) Create(jti, tokenHash, username, role string, expiresAt time.Time) (*auth.RefreshToken, error) {
+	rt := &auth.RefreshToken{
 		JTI:       jti,
 		TokenHash: tokenHash,
 		Username:  username,
@@ -28,13 +28,13 @@ func (r *RefreshTokenRepo) Create(jti, tokenHash, username, role string, expires
 	return rt, r.db.Create(rt).Error
 }
 
-func (r *RefreshTokenRepo) FindByJTI(jti string) (*store.RefreshToken, error) {
-	var rt store.RefreshToken
+func (r *RefreshTokenRepo) FindByJTI(jti string) (*auth.RefreshToken, error) {
+	var rt auth.RefreshToken
 	return &rt, r.db.Where("jti = ? AND revoked = ? AND expires_at > ?", jti, false, time.Now()).First(&rt).Error
 }
 
 func (r *RefreshTokenRepo) Revoke(jti, replacedBy string) error {
-	return r.db.Model(&store.RefreshToken{}).Where("jti = ?", jti).
+	return r.db.Model(&auth.RefreshToken{}).Where("jti = ?", jti).
 		Updates(map[string]any{"revoked": true, "replaced_by": replacedBy}).Error
 }
 
@@ -53,7 +53,7 @@ func (r *RefreshTokenRepo) RevokeFamily(jti string) error {
 			}
 			seen[current] = struct{}{}
 
-			var token store.RefreshToken
+			var token auth.RefreshToken
 			if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
 				Where("jti = ?", current).First(&token).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -61,7 +61,7 @@ func (r *RefreshTokenRepo) RevokeFamily(jti string) error {
 				}
 				return err
 			}
-			if err := tx.Model(&store.RefreshToken{}).
+			if err := tx.Model(&auth.RefreshToken{}).
 				Where("jti = ?", current).
 				Update("revoked", true).Error; err != nil {
 				return err
@@ -69,7 +69,7 @@ func (r *RefreshTokenRepo) RevokeFamily(jti string) error {
 
 			// 重新读取 replacement，确保并发 refresh 已提交的后继令牌
 			// 也被纳入本次注销；行锁在支持的数据库上避免旧快照。
-			var latest store.RefreshToken
+			var latest auth.RefreshToken
 			if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
 				Select("replaced_by").
 				Where("jti = ?", current).First(&latest).Error; err != nil {
@@ -85,8 +85,8 @@ func (r *RefreshTokenRepo) RevokeFamily(jti string) error {
 }
 
 // Rotate 原子地消费一个活跃 refresh token，并创建它的替代者。
-func (r *RefreshTokenRepo) Rotate(oldJTI, newJTI, tokenHash, username, role string, expiresAt time.Time) (*store.RefreshToken, error) {
-	next := &store.RefreshToken{
+func (r *RefreshTokenRepo) Rotate(oldJTI, newJTI, tokenHash, username, role string, expiresAt time.Time) (*auth.RefreshToken, error) {
+	next := &auth.RefreshToken{
 		JTI:       newJTI,
 		TokenHash: tokenHash,
 		Username:  username,
@@ -94,7 +94,7 @@ func (r *RefreshTokenRepo) Rotate(oldJTI, newJTI, tokenHash, username, role stri
 		ExpiresAt: expiresAt,
 	}
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&store.RefreshToken{}).
+		result := tx.Model(&auth.RefreshToken{}).
 			Where("jti = ? AND revoked = ? AND expires_at > ?", oldJTI, false, time.Now()).
 			Updates(map[string]any{"revoked": true, "replaced_by": newJTI})
 		if result.Error != nil {
@@ -116,7 +116,7 @@ func (r *RefreshTokenRepo) Rotate(oldJTI, newJTI, tokenHash, username, role stri
 
 // RevokeByUsername 吊销某个账号名下的全部活跃 refresh token。
 func (r *RefreshTokenRepo) RevokeByUsername(username string) error {
-	query := r.db.Model(&store.RefreshToken{})
+	query := r.db.Model(&auth.RefreshToken{})
 	if username == "admin" {
 		query = query.Where("(username = ? OR username = '')", username)
 	} else {
@@ -127,7 +127,7 @@ func (r *RefreshTokenRepo) RevokeByUsername(username string) error {
 }
 
 func (r *RefreshTokenRepo) RevokeAll() error {
-	return r.db.Model(&store.RefreshToken{}).Where("revoked = ?", false).
+	return r.db.Model(&auth.RefreshToken{}).Where("revoked = ?", false).
 		Update("revoked", true).Error
 }
 
@@ -140,7 +140,7 @@ func (r *RefreshTokenRepo) CleanExpired(limits ...int) error {
 		return nil
 	}
 	var ids []uint
-	if err := r.db.Model(&store.RefreshToken{}).
+	if err := r.db.Model(&auth.RefreshToken{}).
 		Where("revoked = ? OR expires_at <= ?", true, time.Now()).
 		Order("id ASC").
 		Limit(limit).
@@ -150,5 +150,5 @@ func (r *RefreshTokenRepo) CleanExpired(limits ...int) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Where("id IN ?", ids).Delete(&store.RefreshToken{}).Error
+	return r.db.Where("id IN ?", ids).Delete(&auth.RefreshToken{}).Error
 }

@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/auth"
-	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -31,10 +31,10 @@ func newRevocationTestState(t *testing.T, targetRole string) *revocationTestStat
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(
-		&store.AdminAccount{},
-		&store.RefreshToken{},
-		&store.TokenBlacklist{},
-		&store.ActiveSession{},
+		&authstore.AdminAccount{},
+		&authstore.RefreshToken{},
+		&authstore.TokenBlacklist{},
+		&authstore.ActiveSession{},
 	); err != nil {
 		t.Fatalf("migrate auth tables: %v", err)
 	}
@@ -94,7 +94,7 @@ func (s *revocationTestState) assertCredentialsRevoked(t *testing.T) {
 		t.Fatalf("active sessions remain: %#v", sessions)
 	}
 	var activeRows int64
-	if err := s.db.Model(&store.ActiveSession{}).Where("username = ?", "target").Count(&activeRows).Error; err != nil {
+	if err := s.db.Model(&authstore.ActiveSession{}).Where("username = ?", "target").Count(&activeRows).Error; err != nil {
 		t.Fatalf("count active sessions: %v", err)
 	}
 	if activeRows != 0 {

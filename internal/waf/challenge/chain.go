@@ -14,6 +14,8 @@ import (
 	"time"
 
 	rueidis "github.com/redis/rueidis"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // ChainStepType 定义链式挑战单个步骤的类型。
@@ -65,7 +67,7 @@ func (s *ChainState) powDifficulty(fallback int) int {
 	if s == nil || s.Difficulty <= 0 {
 		return 0
 	}
-	return ClampPoWDifficulty(s.Difficulty)
+	return pow.ClampPoWDifficulty(s.Difficulty)
 }
 
 // chainStateTTL 是 chain 会话的有效期，Redis 与内存两条路径共用。
@@ -256,7 +258,7 @@ func (cm *ChainChallengeManager) ReconfigureWithCaptchaType(steps []ChainStepCon
 	if difficulty <= 0 {
 		difficulty = 4
 	}
-	difficulty = ClampPoWDifficulty(difficulty)
+	difficulty = pow.ClampPoWDifficulty(difficulty)
 	captchaType = normalizeChainCaptchaType(captchaType)
 	cm.mu.Lock()
 	cm.steps = normalizeChainStepsWithCaptchaType(steps, captchaType)
@@ -317,7 +319,7 @@ func (cm *ChainChallengeManager) StartChainWithBinding(originalURL string, bindi
 		Steps:                   cm.configuredSteps(),
 		Scores:                  make(map[string]int),
 		OriginalURL:             originalURL,
-		Nonce:                   GeneratePoWNonce(),
+		Nonce:                   pow.GeneratePoWNonce(),
 		Difficulty:              cm.difficultyValue(),
 		CreatedAt:               time.Now(),
 	}
@@ -406,13 +408,13 @@ func (cm *ChainChallengeManager) processStepWithBinding(sessionID string, formDa
 		hash := formData["pow_hash"]
 		counterStr := strings.TrimSpace(formData["pow_counter"])
 		if counterStr == "" {
-			state.Nonce = GeneratePoWNonce()
+			state.Nonce = pow.GeneratePoWNonce()
 			cm.saveChainState(state)
 			return false, "", cm.renderStepHTML(state), true
 		}
 		counter, err := strconv.ParseInt(counterStr, 10, 64)
-		if err != nil || counter < 0 || !VerifyPoW(state.Nonce, counter, hash, state.powDifficulty(cm.difficultyValue())) {
-			state.Nonce = GeneratePoWNonce()
+		if err != nil || counter < 0 || !pow.VerifyPoW(state.Nonce, counter, hash, state.powDifficulty(cm.difficultyValue())) {
+			state.Nonce = pow.GeneratePoWNonce()
 			cm.saveChainState(state)
 			return false, "", cm.renderStepHTML(state), true
 		}
@@ -442,7 +444,7 @@ func (cm *ChainChallengeManager) processStepWithBinding(sessionID string, formDa
 	}
 	ns := state.Steps[state.CurrentStep]
 	if ns.Type == ChainStepPoW {
-		state.Nonce = GeneratePoWNonce()
+		state.Nonce = pow.GeneratePoWNonce()
 	} else if ns.Type == ChainStepCaptcha {
 		ch, _ := cm.captcha.GenerateWithBinding(normalizeChainCaptchaType(ns.CaptchaType), false, state.ChallengeSessionBinding)
 		if ch != nil {
@@ -536,8 +538,8 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 		Total:     len(state.Steps),
 		SessionID: state.SessionID,
 		Dots:      make([]string, len(state.Steps)),
-		WasmURL:   PowWasmURL(),
-		GlueURL:   PowGlueURL(),
+		WasmURL:   pow.PowWasmURL(),
+		GlueURL:   pow.PowGlueURL(),
 	}
 	for i := range state.Steps {
 		className := "sd"
@@ -567,7 +569,7 @@ func (cm *ChainChallengeManager) renderStepHTML(state *ChainState) string {
 		cm.saveChainState(state)
 	case ChainStepPoW:
 		data.IsPoW = true
-		data.PowJS = template.JS(GeneratePoWWASMScript(state.powDifficulty(state.Difficulty), state.Nonce))
+		data.PowJS = template.JS(pow.GeneratePoWWASMScript(state.powDifficulty(state.Difficulty), state.Nonce))
 	case ChainStepCaptcha:
 		data.IsCaptcha = true
 		captchaChallenge, _ := cm.captcha.GenerateWithBinding(normalizeChainCaptchaType(step.CaptchaType), false, state.ChallengeSessionBinding)

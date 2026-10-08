@@ -4207,6 +4207,12 @@ func isHarmlessInlineScriptOnly(lower string) bool {
 			bodyEnd = i + closeIdx
 		}
 		openEnd := i + end + 1
+		// '</script' 落在 '>' 之前时开标签被截断（如 "<script </script>"），
+		// 既不是合法元素结构，也没有可判定的标签体：交回通用判据，
+		// 且必须先于切片判定，否则 bodyEnd < openEnd 会越界。
+		if openEnd > bodyEnd {
+			return false
+		}
 		if !isHarmlessScriptElement(lower[i:openEnd], lower[openEnd:bodyEnd]) {
 			return false
 		}

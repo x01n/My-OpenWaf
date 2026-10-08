@@ -5,6 +5,11 @@ import (
 	"reflect"
 	"testing"
 
+	"My-OpenWaf/internal/store/iplist"
+	"My-OpenWaf/internal/store/luaplugin"
+	"My-OpenWaf/internal/store/owasp"
+	"My-OpenWaf/internal/store/threatintel"
+
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
@@ -28,10 +33,10 @@ func newBackupTestDB(t *testing.T) *gorm.DB {
 // ThreatIntelFeed 的新增认证头字段。
 func TestBackupRoundTripThreatIntelAuthHeaders(t *testing.T) {
 	src := newBackupTestDB(t)
-	if err := src.AutoMigrate(&ThreatIntelFeed{}, &IPListEntry{}); err != nil {
+	if err := src.AutoMigrate(&threatintel.ThreatIntelFeed{}, &iplist.IPListEntry{}); err != nil {
 		t.Fatalf("migrate src: %v", err)
 	}
-	feed := &ThreatIntelFeed{
+	feed := &threatintel.ThreatIntelFeed{
 		Name: "affiliate", URL: "https://intel.example.test/auth.gz", Kind: "blacklist",
 		Action: "intercept", Enabled: true, SyncInterval: 7200,
 		AuthHeaderName: "Authorization", AuthHeaderValue: "Bearer legacy-token",
@@ -51,13 +56,13 @@ func TestBackupRoundTripThreatIntelAuthHeaders(t *testing.T) {
 	}
 
 	dst := newBackupTestDB(t)
-	if err := dst.AutoMigrate(&ThreatIntelFeed{}, &IPListEntry{}); err != nil {
+	if err := dst.AutoMigrate(&threatintel.ThreatIntelFeed{}, &iplist.IPListEntry{}); err != nil {
 		t.Fatalf("migrate dst: %v", err)
 	}
 	if err := ImportBackup(dst, snapshot, false); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	var restored ThreatIntelFeed
+	var restored threatintel.ThreatIntelFeed
 	if err := dst.First(&restored).Error; err != nil {
 		t.Fatalf("load restored feed: %v", err)
 	}
@@ -73,7 +78,7 @@ func TestBackupRoundTripThreatIntelAuthHeaders(t *testing.T) {
  */
 func TestExportBackupPreservesThreatIntelAuthHeaders(t *testing.T) {
 	db := newBackupTestDB(t)
-	feed := &ThreatIntelFeed{
+	feed := &threatintel.ThreatIntelFeed{
 		Name: "contract", URL: "https://intel.example.test/auth.gz", Kind: "blacklist",
 		Action: "intercept", Enabled: true, SyncInterval: 7200,
 		AuthHeaderName: "Authorization", AuthHeaderValue: "Bearer contract-token",
@@ -111,7 +116,7 @@ func seedBackupData(t *testing.T, db *gorm.DB) {
 	statusCode := 429
 	redirectTo := "/verify"
 	whitelist := `["/health","/metrics"]`
-	owaspConfig := PolicyOWASPRuleConfig{
+	owaspConfig := owasp.PolicyOWASPRuleConfig{
 		PolicyID:    policy.ID,
 		RuleID:      "owasp:test:backup",
 		Enabled:     &enabled,
@@ -128,7 +133,7 @@ func seedBackupData(t *testing.T, db *gorm.DB) {
 	if err := db.Create(&site).Error; err != nil {
 		t.Fatalf("create site: %v", err)
 	}
-	ip := IPListEntry{Kind: IPListBlack, Value: "1.2.3.4", Action: "intercept", SiteID: &site.ID}
+	ip := iplist.IPListEntry{Kind: iplist.IPListBlack, Value: "1.2.3.4", Action: "intercept", SiteID: &site.ID}
 	if err := db.Create(&ip).Error; err != nil {
 		t.Fatalf("create ip: %v", err)
 	}
@@ -232,7 +237,7 @@ func TestImportBackupReplaceMode(t *testing.T) {
 		t.Fatalf("seed old policy: %v", err)
 	}
 	oldWhitelist := `["/stale"]`
-	if err := dst.Create(&PolicyOWASPRuleConfig{
+	if err := dst.Create(&owasp.PolicyOWASPRuleConfig{
 		PolicyID:  oldPolicy.ID,
 		RuleID:    "owasp:test:stale",
 		Whitelist: &oldWhitelist,
@@ -306,10 +311,10 @@ func TestBackupIncludesLuaPlugins(t *testing.T) {
 	src := newBackupTestDB(t)
 
 	siteScoped := uint(7)
-	plugins := []LuaPlugin{
+	plugins := []luaplugin.LuaPlugin{
 		{
 			Name:        "global-pre",
-			Stage:       LuaStagePre,
+			Stage:       luaplugin.LuaStagePre,
 			Source:      `function handle(ctx) return nil end`,
 			Enabled:     true,
 			Priority:    50,
@@ -318,7 +323,7 @@ func TestBackupIncludesLuaPlugins(t *testing.T) {
 		},
 		{
 			Name:     "site-post",
-			Stage:    LuaStagePost,
+			Stage:    luaplugin.LuaStagePost,
 			Source:   `function handle(ctx) if ctx.action == "intercept" then return "allow" end return nil end`,
 			Enabled:  false,
 			Priority: 100,
@@ -333,7 +338,7 @@ func TestBackupIncludesLuaPlugins(t *testing.T) {
 	// Enabled 带 gorm:"default:true"，Create 会把 false 当零值忽略而落库为 true。
 	// 这里用 UpdateColumn 绕过该行为，确保源库里确实是 false——否则本测试
 	// 根本测不到「停用状态能否被备份保留」。
-	if err := src.Model(&LuaPlugin{}).Where("name = ?", "site-post").
+	if err := src.Model(&luaplugin.LuaPlugin{}).Where("name = ?", "site-post").
 		UpdateColumn("enabled", false).Error; err != nil {
 		t.Fatalf("强制停用: %v", err)
 	}
@@ -357,7 +362,7 @@ func TestBackupIncludesLuaPlugins(t *testing.T) {
 		t.Fatalf("import: %v", err)
 	}
 
-	var restored []LuaPlugin
+	var restored []luaplugin.LuaPlugin
 	if err := dst.Order("name").Find(&restored).Error; err != nil {
 		t.Fatalf("查询恢复结果: %v", err)
 	}
@@ -365,7 +370,7 @@ func TestBackupIncludesLuaPlugins(t *testing.T) {
 		t.Fatalf("恢复的 Lua 脚本数 = %d, want 2", len(restored))
 	}
 
-	byName := map[string]LuaPlugin{}
+	byName := map[string]luaplugin.LuaPlugin{}
 	for _, p := range restored {
 		byName[p.Name] = p
 	}
@@ -378,7 +383,7 @@ func TestBackupIncludesLuaPlugins(t *testing.T) {
 	if global.Source != plugins[0].Source {
 		t.Errorf("源码不一致\n得到: %q\nwant: %q", global.Source, plugins[0].Source)
 	}
-	if global.Stage != LuaStagePre || global.Priority != 50 || global.TimeoutMS != 200 {
+	if global.Stage != luaplugin.LuaStagePre || global.Priority != 50 || global.TimeoutMS != 200 {
 		t.Errorf("字段丢失: stage=%q priority=%d timeout=%d", global.Stage, global.Priority, global.TimeoutMS)
 	}
 	if global.SiteID != nil {
@@ -411,9 +416,9 @@ func TestBackupIncludesLuaPlugins(t *testing.T) {
 // 目标实例上原有的脚本残留下来，与导入的配置叠加生效。
 func TestImportBackupReplaceModeClearsLuaPlugins(t *testing.T) {
 	dst := newBackupTestDB(t)
-	stale := LuaPlugin{
+	stale := luaplugin.LuaPlugin{
 		Name:    "stale-should-be-removed",
-		Stage:   LuaStagePre,
+		Stage:   luaplugin.LuaStagePre,
 		Source:  `function handle(ctx) return "intercept" end`,
 		Enabled: true,
 	}
@@ -422,9 +427,9 @@ func TestImportBackupReplaceModeClearsLuaPlugins(t *testing.T) {
 	}
 
 	src := newBackupTestDB(t)
-	fresh := LuaPlugin{
+	fresh := luaplugin.LuaPlugin{
 		Name:    "fresh",
-		Stage:   LuaStagePre,
+		Stage:   luaplugin.LuaStagePre,
 		Source:  `function handle(ctx) return nil end`,
 		Enabled: true,
 	}
@@ -440,7 +445,7 @@ func TestImportBackupReplaceModeClearsLuaPlugins(t *testing.T) {
 		t.Fatalf("import replace: %v", err)
 	}
 
-	var got []LuaPlugin
+	var got []luaplugin.LuaPlugin
 	if err := dst.Find(&got).Error; err != nil {
 		t.Fatalf("查询: %v", err)
 	}
@@ -596,7 +601,7 @@ func TestImportBackupRejectsInvalidRuleCaptchaType(t *testing.T) {
 	invalid := "drag"
 	data := &BackupData{
 		Version: BackupVersion,
-		PolicyOWASPRuleConfigs: []PolicyOWASPRuleConfig{{
+		PolicyOWASPRuleConfigs: []owasp.PolicyOWASPRuleConfig{{
 			PolicyID: 1, RuleID: "owasp:sqli:001", CaptchaType: &invalid,
 		}},
 	}

@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/core/action"
+	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/store"
 )
@@ -86,7 +87,7 @@ func TestRequestSmugglingSniffParsedResidualWritesEvent(t *testing.T) {
 		t.Fatalf("migrate logs: %v", err)
 	}
 	writer := observability.NewUnifiedWriter(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	metrics := NewMetrics()
+	metrics := dpmetrics.NewMetrics()
 
 	ctx := app.NewContext(0)
 	ctx.Request.Header.SetMethod(http.MethodPost)
@@ -122,7 +123,7 @@ func TestRequestSmugglingSniffLegitNoHit(t *testing.T) {
 		t.Fatalf("migrate logs: %v", err)
 	}
 	writer := observability.NewUnifiedWriter(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	metrics := NewMetrics()
+	metrics := dpmetrics.NewMetrics()
 
 	ctx := app.NewContext(0)
 	ctx.Request.Header.SetMethod(http.MethodPost)

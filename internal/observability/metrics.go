@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -91,6 +92,11 @@ type CacheStatsSnapshotProvider func() []CacheLayerStats
 // LuaScriptStatsProvider 返回各 Lua 策略插件的计数器。
 type LuaScriptStatsProvider func() []LuaScriptStats
 
+// HTTPTraceStatsProvider 返回数据面请求的分阶段耗时快照。
+type HTTPTraceStatsProvider interface {
+	Stats() HTTPTraceStats
+}
+
 // DataPlaneMetricsSnapshotProvider 返回当前的数据面指标快照。
 type DataPlaneMetricsSnapshotProvider func() DataPlaneMetricsSnapshot
 
@@ -108,6 +114,7 @@ type Metrics struct {
 	upstreamMetricsProvider    atomic.Value
 	cacheStatsProvider         atomic.Value
 	luaScriptStatsProvider     atomic.Value
+	httpTraceStatsProvider     atomic.Value
 }
 
 // NewMetrics 创建一个新的指标收集器。
@@ -164,6 +171,17 @@ func (m *Metrics) SetLuaScriptStatsProvider(provider LuaScriptStatsProvider) {
 		return
 	}
 	m.luaScriptStatsProvider.Store(provider)
+}
+
+// SetHTTPTraceStatsProvider 把数据面分阶段耗时挂到 /metrics。
+//
+// 未启用遥测时不要调用：该 provider 一旦挂上就会在每次抓取时遍历一次协议与阶段表，
+// 没有 Tracer 就只是白跑。
+func (m *Metrics) SetHTTPTraceStatsProvider(provider HTTPTraceStatsProvider) {
+	if provider == nil {
+		return
+	}
+	m.httpTraceStatsProvider.Store(provider)
 }
 
 // PrometheusHandler 返回以 Prometheus 文本格式提供 /metrics 的 Hertz 处理函数。
@@ -257,6 +275,11 @@ openwaf_gc_pause_total_ns %d
 	if v := m.luaScriptStatsProvider.Load(); v != nil {
 		if provider, ok := v.(LuaScriptStatsProvider); ok {
 			body += prometheusLuaScriptStats(provider())
+		}
+	}
+	if v := m.httpTraceStatsProvider.Load(); v != nil {
+		if provider, ok := v.(HTTPTraceStatsProvider); ok {
+			body += prometheusHTTPTraceStats(provider.Stats())
 		}
 	}
 
@@ -462,6 +485,139 @@ func prometheusLuaScriptStats(scripts []LuaScriptStats) string {
 	}
 
 	return b.String()
+}
+
+/**
+ * prometheusHTTPTraceStats 渲染数据面请求的分阶段耗时。
+ *
+ * 分协议输出是有意为之：x01n/http2 fork v0.3.0 不记录 ReadBody*、Write* 事件，
+ * h2 的覆盖天然不完整。若把协议混在一起，h2 的缺口会被 h1 的样本掩盖。运维看到
+ * 某个阶段在 h2 上恒为 0 时，需要能直接判断这是「未采集」而不是「耗时为零」——
+ * 因此缺失阶段不补零，只有指标名下的 count=0。
+ *
+ * 注意 phase="server_handle" 的语义：它是 handler 全周期，**含同步等待上游的时间**，
+ * 不是纯 WAF 计算时间。权威说明见 HTTPTracePhaseServerHandleDoc。
+ *
+ * 没有 Tracer 注册时返回空串而不是空的 HELP/TYPE 头：没有采集就没有系列。
+ *
+ * @param stats 分阶段耗时快照。
+ * @return Prometheus 文本片段，以空行开头以便直接拼接。
+ */
+func prometheusHTTPTraceStats(stats HTTPTraceStats) string {
+	if len(stats.Protos) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n# HELP openwaf_httptrace_samples_total Data-plane requests with a complete Hertz trace record\n")
+	b.WriteString("# TYPE openwaf_httptrace_samples_total counter\n")
+	for _, p := range stats.Protos {
+		fmt.Fprintf(&b, "openwaf_httptrace_samples_total{proto=\"%s\"} %d\n",
+			escapePrometheusLabelValue(p.Proto), p.Samples)
+	}
+
+	b.WriteString("\n# HELP openwaf_httptrace_skipped_total Hertz tracer finish calls without a matching HTTPStart, for example keep-alive idle connection reaping\n")
+	b.WriteString("# TYPE openwaf_httptrace_skipped_total counter\n")
+	for _, p := range stats.Protos {
+		fmt.Fprintf(&b, "openwaf_httptrace_skipped_total{proto=\"%s\"} %d\n",
+			escapePrometheusLabelValue(p.Proto), p.Skipped)
+	}
+
+	b.WriteString("\n# HELP openwaf_httptrace_errors_total Data-plane requests whose Hertz trace record carried an error\n")
+	b.WriteString("# TYPE openwaf_httptrace_errors_total counter\n")
+	for _, p := range stats.Protos {
+		fmt.Fprintf(&b, "openwaf_httptrace_errors_total{proto=\"%s\"} %d\n",
+			escapePrometheusLabelValue(p.Proto), p.Errors)
+	}
+
+	b.WriteString("\n# HELP openwaf_httptrace_skipped_bytes_total Request bytes observed while draining a keep-alive connection that closed without a complete request; counted separately because the exchange is not a request\n")
+	b.WriteString("# TYPE openwaf_httptrace_skipped_bytes_total counter\n")
+	for _, p := range stats.Protos {
+		fmt.Fprintf(&b, "openwaf_httptrace_skipped_bytes_total{proto=\"%s\"} %d\n",
+			escapePrometheusLabelValue(p.Proto), p.SkippedBytes)
+	}
+
+	b.WriteString("\n# HELP openwaf_httptrace_request_bytes_total Request header and body bytes recorded by the Hertz trace record; 0 when the length is indeterminate\n")
+	b.WriteString("# TYPE openwaf_httptrace_request_bytes_total counter\n")
+	for _, p := range stats.Protos {
+		fmt.Fprintf(&b, "openwaf_httptrace_request_bytes_total{proto=\"%s\"} %d\n",
+			escapePrometheusLabelValue(p.Proto), p.RequestBytes)
+	}
+
+	b.WriteString("\n# HELP openwaf_httptrace_response_bytes_total Response header and body bytes recorded by the Hertz trace record; 0 when the length is indeterminate\n")
+	b.WriteString("# TYPE openwaf_httptrace_response_bytes_total counter\n")
+	for _, p := range stats.Protos {
+		fmt.Fprintf(&b, "openwaf_httptrace_response_bytes_total{proto=\"%s\"} %d\n",
+			escapePrometheusLabelValue(p.Proto), p.ResponseBytes)
+	}
+
+	// 直方图与累计和共用一组标签；先算一次避免重复拼接。
+	//
+	// 只渲染有有效样本的协议。三种情况会落到 samples=0：keep-alive 空闲回收（协议读不到）、
+	// 从没被完整解析的连接，以及探测型连接。它们的信息已由 skipped_total 与 errors_total
+	// 表达，若照样渲染直方图，每次抓取会多出 16 桶 × 5 阶段的 80 行恒零样本，把要看的
+	// 数字淹掉。注意这与"某个阶段在 h2 上恒零"不同：后者属于已解析协议的正常输出，
+	// 必须保留，因为"未采集"正是运维需要看到的。
+	type labeled struct {
+		proto string
+		phase HTTPTracePhaseStats
+	}
+	all := make([]labeled, 0, len(stats.Protos)*5)
+	for _, p := range stats.Protos {
+		if p.Samples == 0 {
+			continue
+		}
+		for _, phase := range p.Phases {
+			all = append(all, labeled{proto: p.Proto, phase: phase})
+		}
+	}
+
+	b.WriteString("\n# HELP openwaf_httptrace_phase_duration_seconds Cumulative duration of a data-plane request phase by protocol; phase=\"server_handle\" is the whole handler lifetime including the synchronous upstream round trip, not pure WAF compute time\n")
+	b.WriteString("# TYPE openwaf_httptrace_phase_duration_seconds histogram\n")
+	for _, item := range all {
+		labels := fmt.Sprintf("proto=\"%s\",phase=\"%s\"",
+			escapePrometheusLabelValue(item.proto), escapePrometheusLabelValue(item.phase.Name))
+		var cumulative int64
+		for i, bound := range stats.BucketBoundsMs {
+			if i < len(item.phase.Buckets) {
+				cumulative += item.phase.Buckets[i]
+			}
+			fmt.Fprintf(&b, "openwaf_httptrace_phase_duration_seconds_bucket{%s,le=\"%s\"} %d\n",
+				labels, formatPrometheusBucketBound(bound), cumulative)
+		}
+		if len(item.phase.Buckets) > 0 {
+			cumulative += item.phase.Buckets[len(item.phase.Buckets)-1]
+		}
+		fmt.Fprintf(&b, "openwaf_httptrace_phase_duration_seconds_bucket{%s,le=\"+Inf\"} %d\n", labels, cumulative)
+		fmt.Fprintf(&b, "openwaf_httptrace_phase_duration_seconds_sum{%s} %.6f\n", labels, item.phase.SumMs/1000.0)
+		fmt.Fprintf(&b, "openwaf_httptrace_phase_duration_seconds_count{%s} %d\n", labels, item.phase.Count)
+	}
+
+	// 负耗时样本单独成指标而不是并进 count：它衡量的是上游事件配对的健康度，
+	// 不是请求耗时。并进 count 会让 count - 各桶之和 出现无法解释的差额。
+	b.WriteString("\n# HELP openwaf_httptrace_phase_invalid_total Rejected phase samples whose end event preceded its start event, indicating broken event pairing in the protocol stack\n")
+	b.WriteString("# TYPE openwaf_httptrace_phase_invalid_total counter\n")
+	for _, item := range all {
+		labels := fmt.Sprintf("proto=\"%s\",phase=\"%s\"",
+			escapePrometheusLabelValue(item.proto), escapePrometheusLabelValue(item.phase.Name))
+		fmt.Fprintf(&b, "openwaf_httptrace_phase_invalid_total{%s} %d\n", labels, item.phase.Invalid)
+	}
+
+	return b.String()
+}
+
+/**
+ * formatPrometheusBucketBound 渲染直方图的 le 标签值。
+ *
+ * 去掉无意义的尾随零（1.000000 → 1），既贴近 Prometheus 客户端的惯例，也让
+ * Grafana 的 legend 不必额外格式化。边界值全部由 httpTraceBucketBoundsUs 派生，
+ * 是有限小数，不会出现需要科学计数法的取值。
+ *
+ * @param bound 桶上界（毫秒）。
+ * @return 已格式化的 le 值。
+ */
+func formatPrometheusBucketBound(bound float64) string {
+	return strconv.FormatFloat(bound, 'f', -1, 64)
 }
 
 func prometheusUnifiedWriterStats(stats UnifiedWriterStats) string {

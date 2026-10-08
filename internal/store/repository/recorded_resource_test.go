@@ -3,7 +3,7 @@ package repository
 import (
 	"testing"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -14,12 +14,12 @@ func TestRecordedResourceRepoUpsertIncrementsHitCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource: %v", err)
 	}
 
 	repo := NewRecordedResourceRepo(db)
-	first := &store.RecordedResource{
+	first := &approute.RecordedResource{
 		SiteID:         1,
 		Method:         "GET",
 		Host:           "example.com",
@@ -37,7 +37,7 @@ func TestRecordedResourceRepoUpsertIncrementsHitCount(t *testing.T) {
 	if err := repo.Upsert(first); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
-	second := &store.RecordedResource{
+	second := &approute.RecordedResource{
 		SiteID:         1,
 		Method:         "GET",
 		Host:           "example.com",
@@ -56,7 +56,7 @@ func TestRecordedResourceRepoUpsertIncrementsHitCount(t *testing.T) {
 		t.Fatalf("second upsert: %v", err)
 	}
 
-	var got store.RecordedResource
+	var got approute.RecordedResource
 	if err := db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "GET", "example.com", "/login").First(&got).Error; err != nil {
 		t.Fatalf("load recorded resource: %v", err)
 	}
@@ -70,12 +70,12 @@ func TestRecordedResourceRepoUpsertSeparatesQueryStringVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource: %v", err)
 	}
 
 	repo := NewRecordedResourceRepo(db)
-	rows := []*store.RecordedResource{
+	rows := []*approute.RecordedResource{
 		{
 			SiteID:      1,
 			Method:      "GET",
@@ -108,7 +108,7 @@ func TestRecordedResourceRepoUpsertSeparatesQueryStringVariants(t *testing.T) {
 	}
 
 	var total int64
-	if err := db.Model(&store.RecordedResource{}).Count(&total).Error; err != nil {
+	if err := db.Model(&approute.RecordedResource{}).Count(&total).Error; err != nil {
 		t.Fatalf("count recorded resources: %v", err)
 	}
 	if total != 2 {
@@ -121,12 +121,12 @@ func TestRecordedResourceRepoUpsertPreservesHistoricalRuleMetadataWhenCurrentReq
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource: %v", err)
 	}
 
 	repo := NewRecordedResourceRepo(db)
-	first := &store.RecordedResource{
+	first := &approute.RecordedResource{
 		SiteID:         1,
 		Method:         "GET",
 		Host:           "example.com",
@@ -140,7 +140,7 @@ func TestRecordedResourceRepoUpsertPreservesHistoricalRuleMetadataWhenCurrentReq
 	if err := repo.Upsert(first); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
-	second := &store.RecordedResource{
+	second := &approute.RecordedResource{
 		SiteID:      1,
 		Method:      "GET",
 		Host:        "example.com",
@@ -153,7 +153,7 @@ func TestRecordedResourceRepoUpsertPreservesHistoricalRuleMetadataWhenCurrentReq
 		t.Fatalf("second upsert: %v", err)
 	}
 
-	var got store.RecordedResource
+	var got approute.RecordedResource
 	if err := db.Where("site_id = ? AND method = ? AND host = ? AND path = ? AND query_string = ?", 1, "GET", "example.com", "/catalog", "page=1").First(&got).Error; err != nil {
 		t.Fatalf("load recorded resource: %v", err)
 	}
@@ -173,11 +173,11 @@ func TestRecordedResourceRepoListBySiteAppliesFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resource: %v", err)
 	}
 
-	rows := []store.RecordedResource{
+	rows := []approute.RecordedResource{
 		{
 			SiteID:         1,
 			Method:         "GET",

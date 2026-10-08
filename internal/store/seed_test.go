@@ -7,167 +7,109 @@ import (
 	"sync"
 	"testing"
 
+	"My-OpenWaf/internal/store/auth"
+
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
-// TestSeedDefaultsDoesNotRecreateDeletedAPIKey 验证 API Key 仅在首次空库生成一次。
-func TestSeedDefaultsDoesNotRecreateDeletedAPIKey(t *testing.T) {
+/**
+ * TestSeedDefaultsNeverCreatesAPIKey 锁定「初始化不预置 API 令牌」这条契约。
+ *
+ * 令牌一律由已登录的管理员在自己的账号下主动创建，因此无论首次运行、
+ * 重启还是并发首次运行，SeedDefaults 都不得写入 admin_api_keys。
+ */
+func TestSeedDefaultsNeverCreatesAPIKey(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&AdminAPIKey{}, &AdminAccount{}, &SystemSettings{}); err != nil {
+	if err := db.AutoMigrate(&auth.AdminAPIKey{}, &auth.AdminAccount{}, &SystemSettings{}); err != nil {
 		t.Fatalf("migrate auth tables: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	token, password, err := SeedDefaults(db, ":9443", log)
+	password, err := auth.SeedDefaults(db, ":9443", log)
 	if err != nil {
 		t.Fatalf("first seed: %v", err)
 	}
-	if token == "" || password == "" {
-		t.Fatalf("first seed credentials must be generated, token=%t password=%t", token != "", password != "")
+	if password == "" {
+		t.Fatal("first seed must still generate the admin password")
 	}
 
-	var key AdminAPIKey
-	if err := db.First(&key).Error; err != nil {
-		t.Fatalf("load seeded api key: %v", err)
+	var count int64
+	if err := db.Unscoped().Model(&auth.AdminAPIKey{}).Count(&count).Error; err != nil {
+		t.Fatalf("count api keys: %v", err)
 	}
-	if err := db.Delete(&key).Error; err != nil {
-		t.Fatalf("delete seeded api key: %v", err)
+	if count != 0 {
+		t.Fatalf("first seed must not create api keys, got %d row(s)", count)
 	}
 
-	restartedToken, restartedPassword, err := SeedDefaults(db, ":9443", log)
+	restartedPassword, err := auth.SeedDefaults(db, ":9443", log)
 	if err != nil {
 		t.Fatalf("restart seed: %v", err)
 	}
-	if restartedToken != "" || restartedPassword != "" {
-		t.Fatalf("restart must not regenerate credentials, token=%t password=%t", restartedToken != "", restartedPassword != "")
+	if restartedPassword != "" {
+		t.Fatalf("restart must not regenerate the admin password, got %q", restartedPassword)
 	}
-
-	var activeCount int64
-	if err := db.Model(&AdminAPIKey{}).Count(&activeCount).Error; err != nil {
-		t.Fatalf("count active api keys: %v", err)
+	if err := db.Unscoped().Model(&auth.AdminAPIKey{}).Count(&count).Error; err != nil {
+		t.Fatalf("count api keys after restart: %v", err)
 	}
-	var allCount int64
-	if err := db.Unscoped().Model(&AdminAPIKey{}).Count(&allCount).Error; err != nil {
-		t.Fatalf("count all api keys: %v", err)
-	}
-	if activeCount != 0 || allCount != 1 {
-		t.Fatalf("api key counts after restart = active:%d all:%d, want active:0 all:1", activeCount, allCount)
+	if count != 0 {
+		t.Fatalf("restart must not create api keys, got %d row(s)", count)
 	}
 }
 
-func TestSeedDefaultsConcurrentFirstRunCreatesOneAPIKey(t *testing.T) {
-	dsn := filepath.Join(t.TempDir(), "seed.db") + "?_pragma=busy_timeout(10000)"
+/**
+ * TestSeedDefaultsConcurrentFirstRunStaysAPIKeyFree 验证并发首次运行下
+ * 也不会出现「两个进程各自补一枚初始令牌」的竞态 —— 因为根本不再创建令牌。
+ */
+func TestSeedDefaultsConcurrentFirstRunStaysAPIKeyFree(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "seed.db") + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&AdminAPIKey{}, &AdminAccount{}, &SystemSettings{}); err != nil {
+	if err := db.AutoMigrate(&auth.AdminAPIKey{}, &auth.AdminAccount{}, &SystemSettings{}); err != nil {
 		t.Fatalf("migrate auth tables: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	var wg sync.WaitGroup
-	results := make(chan string, 2)
+	passwords := make(chan string, 2)
 	errs := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			token, _, seedErr := SeedDefaults(db, ":9443", log)
-			results <- token
+			pw, seedErr := auth.SeedDefaults(db, ":9443", log)
+			passwords <- pw
 			errs <- seedErr
 		}()
 	}
 	wg.Wait()
-	close(results)
+	close(passwords)
 	close(errs)
 	for err := range errs {
 		if err != nil {
 			t.Fatalf("concurrent seed: %v", err)
 		}
 	}
-	tokens := 0
-	for token := range results {
-		if token != "" {
-			tokens++
+	generated := 0
+	for pw := range passwords {
+		if pw != "" {
+			generated++
 		}
 	}
-	if tokens != 1 {
-		t.Fatalf("first-run token count = %d, want exactly 1", tokens)
+	if generated > 1 {
+		t.Fatalf("admin password generated %d times, want at most 1", generated)
 	}
+
 	var keyCount int64
-	if err := db.Unscoped().Model(&AdminAPIKey{}).Count(&keyCount).Error; err != nil {
+	if err := db.Unscoped().Model(&auth.AdminAPIKey{}).Count(&keyCount).Error; err != nil {
 		t.Fatalf("count api keys: %v", err)
 	}
-	if keyCount != 1 {
-		t.Fatalf("api key rows = %d, want 1", keyCount)
-	}
-}
-
-func TestSeedDefaultsConcurrentIndependentConnectionsCreateOneAPIKey(t *testing.T) {
-	dsn := filepath.Join(t.TempDir(), "seed-independent.db") + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)"
-	bootstrap, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open bootstrap sqlite: %v", err)
-	}
-	if err := bootstrap.AutoMigrate(&AdminAPIKey{}, &AdminAccount{}, &SystemSettings{}); err != nil {
-		t.Fatalf("migrate auth tables: %v", err)
-	}
-	bootstrapSQL, err := bootstrap.DB()
-	if err != nil {
-		t.Fatalf("get bootstrap sql db: %v", err)
-	}
-	if err := bootstrapSQL.Close(); err != nil {
-		t.Fatalf("close bootstrap sql db: %v", err)
-	}
-
-	first, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open first sqlite: %v", err)
-	}
-	second, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open second sqlite: %v", err)
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	var wg sync.WaitGroup
-	results := make(chan string, 2)
-	errs := make(chan error, 2)
-	for _, db := range []*gorm.DB{first, second} {
-		wg.Add(1)
-		go func(db *gorm.DB) {
-			defer wg.Done()
-			token, _, seedErr := SeedDefaults(db, ":9443", log)
-			results <- token
-			errs <- seedErr
-		}(db)
-	}
-	wg.Wait()
-	close(results)
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("independent concurrent seed: %v", err)
-		}
-	}
-	tokens := 0
-	for token := range results {
-		if token != "" {
-			tokens++
-		}
-	}
-	if tokens != 1 {
-		t.Fatalf("independent first-run token count = %d, want exactly 1", tokens)
-	}
-	var keyCount int64
-	if err := first.Unscoped().Model(&AdminAPIKey{}).Count(&keyCount).Error; err != nil {
-		t.Fatalf("count independent api keys: %v", err)
-	}
-	if keyCount != 1 {
-		t.Fatalf("independent api key rows = %d, want 1", keyCount)
+	if keyCount != 0 {
+		t.Fatalf("api key rows = %d, want 0", keyCount)
 	}
 }

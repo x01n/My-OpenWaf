@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,15 +16,15 @@ func NewApplicationRouteRuleRepo(db *gorm.DB) *ApplicationRouteRuleRepo {
 	return &ApplicationRouteRuleRepo{db: db}
 }
 
-func (r *ApplicationRouteRuleRepo) ListBySite(siteID uint) ([]store.ApplicationRouteRule, error) {
-	var list []store.ApplicationRouteRule
+func (r *ApplicationRouteRuleRepo) ListBySite(siteID uint) ([]approute.ApplicationRouteRule, error) {
+	var list []approute.ApplicationRouteRule
 	return list, r.db.Where("site_id = ?", siteID).Order("priority DESC, id ASC").Find(&list).Error
 }
 
-func (r *ApplicationRouteRuleRepo) ListBySitePaged(siteID uint, offset, limit int) ([]store.ApplicationRouteRule, int64, error) {
-	var list []store.ApplicationRouteRule
+func (r *ApplicationRouteRuleRepo) ListBySitePaged(siteID uint, offset, limit int) ([]approute.ApplicationRouteRule, int64, error) {
+	var list []approute.ApplicationRouteRule
 	var total int64
-	q := r.db.Model(&store.ApplicationRouteRule{}).Where("site_id = ?", siteID)
+	q := r.db.Model(&approute.ApplicationRouteRule{}).Where("site_id = ?", siteID)
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
@@ -34,15 +34,15 @@ func (r *ApplicationRouteRuleRepo) ListBySitePaged(siteID uint, offset, limit in
 	return list, total, nil
 }
 
-func (r *ApplicationRouteRuleRepo) Get(id uint) (*store.ApplicationRouteRule, error) {
-	var item store.ApplicationRouteRule
+func (r *ApplicationRouteRuleRepo) Get(id uint) (*approute.ApplicationRouteRule, error) {
+	var item approute.ApplicationRouteRule
 	if err := r.db.First(&item, id).Error; err != nil {
 		return nil, err
 	}
 	return &item, nil
 }
 
-func (r *ApplicationRouteRuleRepo) Create(item *store.ApplicationRouteRule) error {
+func (r *ApplicationRouteRuleRepo) Create(item *approute.ApplicationRouteRule) error {
 	enabled := item.Enabled
 	if err := r.db.Create(item).Error; err != nil {
 		return err
@@ -56,12 +56,12 @@ func (r *ApplicationRouteRuleRepo) Create(item *store.ApplicationRouteRule) erro
 	return nil
 }
 
-func (r *ApplicationRouteRuleRepo) Update(item *store.ApplicationRouteRule) error {
+func (r *ApplicationRouteRuleRepo) Update(item *approute.ApplicationRouteRule) error {
 	return r.db.Save(item).Error
 }
 
 func (r *ApplicationRouteRuleRepo) Delete(id uint) error {
-	return r.db.Delete(&store.ApplicationRouteRule{}, id).Error
+	return r.db.Delete(&approute.ApplicationRouteRule{}, id).Error
 }
 
 // RecordedResourceRepo 持久化聚合后的站点资源行及其历史规则元数据。
@@ -88,11 +88,11 @@ type RecordedResourceFilter struct {
 	RuleID      uint
 }
 
-func (r *RecordedResourceRepo) ListBySite(siteID uint, offset, limit int, f RecordedResourceFilter) ([]store.RecordedResource, int64, error) {
+func (r *RecordedResourceRepo) ListBySite(siteID uint, offset, limit int, f RecordedResourceFilter) ([]approute.RecordedResource, int64, error) {
 	f = normalizeRecordedResourceFilter(f)
-	var list []store.RecordedResource
+	var list []approute.RecordedResource
 	var total int64
-	q := r.db.Model(&store.RecordedResource{}).Where("site_id = ?", siteID)
+	q := r.db.Model(&approute.RecordedResource{}).Where("site_id = ?", siteID)
 	q = applyRecordedResourceFilters(q, f)
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -104,11 +104,11 @@ func (r *RecordedResourceRepo) ListBySite(siteID uint, offset, limit int, f Reco
 }
 
 func (r *RecordedResourceRepo) ClearSite(siteID uint) error {
-	return r.db.Where("site_id = ?", siteID).Delete(&store.RecordedResource{}).Error
+	return r.db.Where("site_id = ?", siteID).Delete(&approute.RecordedResource{}).Error
 }
 
 // Upsert 在同一资源键再次出现时递增 hit_count 并刷新元数据。
-func (r *RecordedResourceRepo) Upsert(rec *store.RecordedResource) error {
+func (r *RecordedResourceRepo) Upsert(rec *approute.RecordedResource) error {
 	if rec == nil {
 		return nil
 	}

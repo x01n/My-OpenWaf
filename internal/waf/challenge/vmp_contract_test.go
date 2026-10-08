@@ -505,28 +505,53 @@ func TestISAMagicMatches(t *testing.T) {
 	}
 }
 
+// vmpSourcePath 是执行器的位置（相对仓库根）。
+const vmpSourcePath = "../../../wasm-pow-solver/src/vmp.rs"
+
+// readVmpSource 读取 vmp.rs 源文本。
+func readVmpSource(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Clean(vmpSourcePath))
+	if err != nil {
+		t.Fatalf("read %s: %v", vmpSourcePath, err)
+	}
+	return string(raw)
+}
+
 /**
  * TestISADeclaresDelegationToVmp 锁定「执行循环不在 isa.rs」这条架构边界。
  *
  * 机制：isa.rs 的职责是常量 + 解码表 + 校验；dispatch 循环属于 vmp.rs。
- * 本用例以文件内容断言这条边界，防止有人把执行循环塞回 isa.rs 而两侧重复实现。
+ * 两侧分家后，字面编码与运行时语义各有单一真源，不会重复实现。
+ *
+ * 断言方式是结构性的，而非匹配某句注释文字：isa.rs 必须具备解码入口并
+ * 不得出现执行机制符号，vmp.rs 必须真正持有执行机制。注释的措辞可以改，
+ * 但这条边界一旦被破坏（把 Vm/run/step 搬回 isa.rs，或让 vmp.rs 空掉），
+ * 用例即变红。
  */
 func TestISADeclaresDelegationToVmp(t *testing.T) {
-	src := readISASource(t)
-	for _, marker := range []string{
-		"执行循环（dispatch、预算、寄存器语义、标志）不在本文件",
-		"pub fn parse(",
-		"pub fn parse_bytes(",
-		"pub enum ProgramError",
-	} {
-		if !strings.Contains(src, marker) {
-			t.Fatalf("isa.rs is missing expected marker %q", marker)
+	isa := readISASource(t)
+
+	// isa.rs 的职责：必须是解码入口。
+	for _, required := range []string{"pub fn parse(", "pub fn parse_bytes(", "pub enum ProgramError"} {
+		if !strings.Contains(isa, required) {
+			t.Fatalf("isa.rs is missing %q; it owns the decode surface", required)
 		}
 	}
-	// 反向：isa.rs 不得出现「执行」相关的实现符号，避免与 vmp.rs 重复。
-	for _, forbidden := range []string{"struct Vm", "fn run(", "fn step("} {
-		if strings.Contains(src, forbidden) {
+
+	// 边界本身：执行机制不得出现在 isa.rs。
+	executionMachinery := []string{"struct Vm", "fn run(", "fn step("}
+	for _, forbidden := range executionMachinery {
+		if strings.Contains(isa, forbidden) {
 			t.Fatalf("isa.rs must not define execution machinery %q; that belongs to vmp.rs", forbidden)
+		}
+	}
+
+	// 反向锚点：vmp.rs 必须真的持有这些机制，否则「已委托」无从谈起。
+	vmp := readVmpSource(t)
+	for _, required := range executionMachinery {
+		if !strings.Contains(vmp, required) {
+			t.Fatalf("vmp.rs is missing %q; the execution loop must live there", required)
 		}
 	}
 }

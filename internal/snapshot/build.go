@@ -12,6 +12,12 @@ import (
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/pkg/schemealias"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
+	"My-OpenWaf/internal/store/approute"
+	cvestore "My-OpenWaf/internal/store/cve"
+	"My-OpenWaf/internal/store/iplist"
+	owaspstore "My-OpenWaf/internal/store/owasp"
+	"My-OpenWaf/internal/store/upstream"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/cve"
 	"My-OpenWaf/internal/waf/dynamic"
@@ -135,11 +141,11 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	}
 
 	// 加载应用路由规则并按站点编译。
-	var appRulesRaw []store.ApplicationRouteRule
+	var appRulesRaw []approute.ApplicationRouteRule
 	if err := db.Where("enabled = ?", true).Find(&appRulesRaw).Error; err != nil {
 		return nil, fmt.Errorf("load app route rules: %w", err)
 	}
-	rawBySite := make(map[uint][]store.ApplicationRouteRule)
+	rawBySite := make(map[uint][]approute.ApplicationRouteRule)
 	for _, ar := range appRulesRaw {
 		rawBySite[ar.SiteID] = append(rawBySite[ar.SiteID], ar)
 	}
@@ -178,10 +184,14 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	hpkpValue := settingStr(settingsMap, store.SettingKeyHPKPValue, DefaultHPKPValue)
 	hpkpReportOnlyEnabled := settingBool(settingsMap, store.SettingKeyHPKPReportOnly)
 	hpkpReportOnlyValue := settingStr(settingsMap, store.SettingKeyHPKPReportOnlyValue, DefaultHPKPReportOnlyValue)
-	brotliEnabled := settingBool(settingsMap, "brotli_enabled")
-	responseCompressionEnabled := settingBool(settingsMap, "response_compression_enabled")
-	responseCompressionGzipEnabled := settingBool(settingsMap, "response_compression_gzip_enabled")
-	responseCompressionMinBytes := settingInt(settingsMap, "response_compression_min_bytes", DefaultResponseCompressionMinBytes)
+	// 响应压缩：这四个开关的缺省值是「开」——DB 里没有对应设置行时按启用处理
+	// （用户裁定「支持全部都开启」）。显式写入 "false"/"0"/"no" 仍然关闭。
+	brotliEnabled := settingBoolDefault(settingsMap, store.SettingKeyBrotliEnabled, DefaultBrotliEnabled)
+	responseCompressionEnabled := settingBoolDefault(settingsMap, store.SettingKeyResponseCompressionEnabled, DefaultResponseCompressionEnabled)
+	responseCompressionGzipEnabled := settingBoolDefault(settingsMap, store.SettingKeyResponseCompressionGzipEnabled, DefaultResponseCompressionGzipEnabled)
+	responseCompressionDeflateEnabled := settingBoolDefault(settingsMap, store.SettingKeyResponseCompressionDeflateEnabled, DefaultResponseCompressionDeflate)
+	responseCompressionZstdEnabled := settingBoolDefault(settingsMap, store.SettingKeyResponseCompressionZstdEnabled, DefaultResponseCompressionZstd)
+	responseCompressionMinBytes := settingInt(settingsMap, store.SettingKeyResponseCompressionMinBytes, DefaultResponseCompressionMinBytes)
 	captchaPage := pageconfig.ParseCaptchaPageConfig(settingsMap[pageconfig.SettingKeyCaptchaPage])
 	challengePage := pageconfig.ParseChallengePageConfig(settingsMap[pageconfig.SettingKeyChallengePage])
 	blockPage := pageconfig.ParseBlockPageConfig(settingsMap[pageconfig.SettingKeyBlockPage])
@@ -196,13 +206,13 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	for i := range sites {
 		pre := &sites[i]
 		pre.PrepareUpstreamMTLSRuntime()
-		if pre.UpstreamTLSClientCertPEM != nil && len(*pre.UpstreamTLSClientCertPEM) > store.MaxUpstreamMTLSPEMBytes {
+		if pre.UpstreamTLSClientCertPEM != nil && len(*pre.UpstreamTLSClientCertPEM) > upstream.MaxUpstreamMTLSPEMBytes {
 			certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
 				Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
 				Error: "upstream_mtls_pem_overflow", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
 				Kind: "upstream_mtls", Reason: "upstream_mtls_pem_overflow", SiteID: pre.ID,
 			})
-		} else if pre.UpstreamTLSClientKeyPEM != nil && len(*pre.UpstreamTLSClientKeyPEM) > store.MaxUpstreamMTLSPEMBytes {
+		} else if pre.UpstreamTLSClientKeyPEM != nil && len(*pre.UpstreamTLSClientKeyPEM) > upstream.MaxUpstreamMTLSPEMBytes {
 			certificateDiagnostics = append(certificateDiagnostics, SnapshotConfigDiagnostic{
 				Source: DiagnosticSourceSites, Field: DiagnosticFieldUpstreamMTLS,
 				Error: "upstream_mtls_pem_overflow", HandlingStrategy: DiagnosticHandlingSkipInvalidField,
@@ -421,22 +431,24 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 				MaintenanceHTML:      s.MaintenanceHTML,
 				MaintenanceStatus:    s.MaintenanceStatus,
 				// 站点级质询策略（nil = 继承全局，数据面渲染时再回退）。
-				ChallengeAction:                maybeSiteString(s.ChallengeAction),
-				ChallengeCaptchaType:           maybeSiteString(s.SiteCaptchaType),
-				BlockHTML:                      s.BlockHTML,
-				BlockStatus:                    s.BlockStatus,
-				AntiReplayEnabled:              protection.AntiReplayEnabled,
-				AntiReplayAction:               s.AntiReplayAction,
-				AppRouteRules:                  appRulesBySite[s.ID],
-				DynamicProtection:              siteDynamicProtection,
-				AccessControl:                  accessControlBySite[s.ID],
-				SiteIPWhitelist:                siteIPLists[s.ID].whitelist,
-				SiteIPBlacklist:                siteIPLists[s.ID].blacklist,
-				ResponseCompressionConfigured:  true,
-				ResponseCompressionEnabled:     responseCompressionEnabled,
-				ResponseCompressionGzipEnabled: responseCompressionGzipEnabled,
-				ResponseCompressionMinBytes:    responseCompressionMinBytes,
-				BrotliEnabled:                  brotliEnabled,
+				ChallengeAction:                   maybeSiteString(s.ChallengeAction),
+				ChallengeCaptchaType:              maybeSiteString(s.SiteCaptchaType),
+				BlockHTML:                         s.BlockHTML,
+				BlockStatus:                       s.BlockStatus,
+				AntiReplayEnabled:                 protection.AntiReplayEnabled,
+				AntiReplayAction:                  s.AntiReplayAction,
+				AppRouteRules:                     appRulesBySite[s.ID],
+				DynamicProtection:                 siteDynamicProtection,
+				AccessControl:                     accessControlBySite[s.ID],
+				SiteIPWhitelist:                   siteIPLists[s.ID].whitelist,
+				SiteIPBlacklist:                   siteIPLists[s.ID].blacklist,
+				ResponseCompressionConfigured:     true,
+				ResponseCompressionEnabled:        responseCompressionEnabled,
+				ResponseCompressionGzipEnabled:    responseCompressionGzipEnabled,
+				ResponseCompressionDeflateEnabled: responseCompressionDeflateEnabled,
+				ResponseCompressionZstdEnabled:    responseCompressionZstdEnabled,
+				ResponseCompressionMinBytes:       responseCompressionMinBytes,
+				BrotliEnabled:                     brotliEnabled,
 			}
 			if err := registerSiteKeys(siteMap, &rt); err != nil {
 				return nil, err
@@ -482,46 +494,48 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	configDiagnostics = append(configDiagnostics, certificateDiagnostics...)
 
 	return &Snapshot{
-		LuaPlugins:                     luaScripts,
-		LuaPluginErrors:                luaErrs,
-		JSPlugins:                      jsScripts,
-		JSPluginErrors:                 jsErrs,
-		ConfigDiagnostics:              configDiagnostics,
-		Revision:                       rev,
-		Sites:                          siteMap,
-		NetworkDefaults:                networkDefaults,
-		TLSDefaults:                    tlsDefaults,
-		DefaultBlockHTML:               "",
-		CaptchaPage:                    captchaPage,
-		ChallengePage:                  challengePage,
-		BlockPage:                      blockPage,
-		SiteTLSCertBySNI:               sniCerts,
-		SiteTLSCertStateBySNI:          sniCertStates,
-		Protection:                     protection,
-		HTTP2Config:                    http2Config,
-		HSTSEnabled:                    hstsEnabled,
-		XSSProtectionEnabled:           xssProtectionEnabled,
-		ExpectCTEnabled:                expectCTEnabled,
-		ExpectCTValue:                  expectCTValue,
-		HPKPEnabled:                    hpkpEnabled,
-		HPKPValue:                      hpkpValue,
-		HPKPReportOnlyEnabled:          hpkpReportOnlyEnabled,
-		HPKPReportOnlyValue:            hpkpReportOnlyValue,
-		ResponseCompressionEnabled:     responseCompressionEnabled,
-		ResponseCompressionGzipEnabled: responseCompressionGzipEnabled,
-		ResponseCompressionMinBytes:    responseCompressionMinBytes,
-		BrotliEnabled:                  brotliEnabled,
-		ExcludeRecordHeaders:           excludeRecordHeaders,
+		LuaPlugins:                        luaScripts,
+		LuaPluginErrors:                   luaErrs,
+		JSPlugins:                         jsScripts,
+		JSPluginErrors:                    jsErrs,
+		ConfigDiagnostics:                 configDiagnostics,
+		Revision:                          rev,
+		Sites:                             siteMap,
+		NetworkDefaults:                   networkDefaults,
+		TLSDefaults:                       tlsDefaults,
+		DefaultBlockHTML:                  "",
+		CaptchaPage:                       captchaPage,
+		ChallengePage:                     challengePage,
+		BlockPage:                         blockPage,
+		SiteTLSCertBySNI:                  sniCerts,
+		SiteTLSCertStateBySNI:             sniCertStates,
+		Protection:                        protection,
+		HTTP2Config:                       http2Config,
+		HSTSEnabled:                       hstsEnabled,
+		XSSProtectionEnabled:              xssProtectionEnabled,
+		ExpectCTEnabled:                   expectCTEnabled,
+		ExpectCTValue:                     expectCTValue,
+		HPKPEnabled:                       hpkpEnabled,
+		HPKPValue:                         hpkpValue,
+		HPKPReportOnlyEnabled:             hpkpReportOnlyEnabled,
+		HPKPReportOnlyValue:               hpkpReportOnlyValue,
+		ResponseCompressionEnabled:        responseCompressionEnabled,
+		ResponseCompressionGzipEnabled:    responseCompressionGzipEnabled,
+		ResponseCompressionDeflateEnabled: responseCompressionDeflateEnabled,
+		ResponseCompressionZstdEnabled:    responseCompressionZstdEnabled,
+		ResponseCompressionMinBytes:       responseCompressionMinBytes,
+		BrotliEnabled:                     brotliEnabled,
+		ExcludeRecordHeaders:              excludeRecordHeaders,
 	}, nil
 }
 
 func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, []SnapshotConfigDiagnostic, error) {
 	result := make(map[uint]string)
 	diagnostics := make([]SnapshotConfigDiagnostic, 0)
-	if !db.Migrator().HasTable(&store.PolicyOWASPRuleConfig{}) {
+	if !db.Migrator().HasTable(&owaspstore.PolicyOWASPRuleConfig{}) {
 		return result, diagnostics, nil
 	}
-	var configs []store.PolicyOWASPRuleConfig
+	var configs []owaspstore.PolicyOWASPRuleConfig
 	if err := db.Order("policy_id ASC, rule_id ASC, id ASC").Find(&configs).Error; err != nil {
 		return nil, nil, fmt.Errorf("load policy OWASP configs: %w", err)
 	}
@@ -575,18 +589,18 @@ func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, []SnapshotConfigDiagn
 }
 
 func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (map[uint]string, error) {
-	if !db.Migrator().HasTable(&store.CVERuleRecord{}) || !db.Migrator().HasTable(&store.CVERuleScopeOverride{}) {
+	if !db.Migrator().HasTable(&cvestore.CVERuleRecord{}) || !db.Migrator().HasTable(&cvestore.CVERuleScopeOverride{}) {
 		return map[uint]string{}, nil
 	}
-	var rules []store.CVERuleRecord
+	var rules []cvestore.CVERuleRecord
 	if err := db.Where("approved = ?", true).Find(&rules).Error; err != nil {
 		return nil, fmt.Errorf("load CVE catalog: %w", err)
 	}
-	var scoped []store.CVERuleScopeOverride
+	var scoped []cvestore.CVERuleScopeOverride
 	if err := db.Find(&scoped).Error; err != nil {
 		return nil, fmt.Errorf("load CVE scope overrides: %w", err)
 	}
-	byRule := make(map[uint][]store.CVERuleScopeOverride)
+	byRule := make(map[uint][]cvestore.CVERuleScopeOverride)
 	for _, item := range scoped {
 		byRule[item.RuleID] = append(byRule[item.RuleID], item)
 	}
@@ -631,9 +645,9 @@ func loadSiteCVEConfigs(db *gorm.DB, sites []store.Site, defaultPolicyID uint) (
 					}
 				}
 			}
-			apply(store.CVEScopeGlobal, 0)
-			apply(store.CVEScopePolicy, policyID)
-			apply(store.CVEScopeSite, site.ID)
+			apply(cvestore.CVEScopeGlobal, 0)
+			apply(cvestore.CVEScopePolicy, policyID)
+			apply(cvestore.CVEScopeSite, site.ID)
 			// 运行时先按 Pattern 查找覆盖；必须保留规则级键，否则两个
 			// 自定义规则使用同一 CVE 编号时会互相覆盖。编号键仅在唯一
 			// 时保留，用于兼容旧快照和内置规则配置。
@@ -1357,6 +1371,27 @@ func settingBool(m map[string]string, key string) bool {
 	return v == "true" || v == "1" || v == "yes"
 }
 
+/**
+ * settingBoolDefault 读取布尔设置，缺行时回退到给定默认值。
+ *
+ * 与 settingBool 的区别只在「键不存在或值为空」这一种情形：此时返回
+ * defaultValue 而不是 false。显式写入的值仍按 settingBool 的口径解析，
+ * 因此 "false"/"0"/"no" 一律是关闭，其余非空取值一律按开启处理——
+ * 这与 settingBool 的判定完全一致。
+ *
+ * @param m 预加载的 settings map。
+ * @param key 设置键。
+ * @param defaultValue 键缺失或值为空时的取值。
+ * @returns 解析后的布尔值。
+ */
+func settingBoolDefault(m map[string]string, key string, defaultValue bool) bool {
+	v := strings.TrimSpace(strings.ToLower(m[key]))
+	if v == "" {
+		return defaultValue
+	}
+	return v == "true" || v == "1" || v == "yes"
+}
+
 // settingStr 从预加载的 settings map 中读取字符串，为空时返回默认值。
 func settingStr(m map[string]string, key string, defaultValue string) string {
 	v := m[key]
@@ -1410,19 +1445,19 @@ func ResolveOutboundHost(rt SiteRuntime, upstreamHost string, incomingHost strin
 // loadAccessControlConfigs 从数据库批量加载所有站点的访问控制配置，避免 N+1 查询。
 func loadAccessControlConfigs(db *gorm.DB) (map[uint]*AccessControlConfig, error) {
 	result := make(map[uint]*AccessControlConfig)
-	if !db.Migrator().HasTable(&store.SiteAccessConfig{}) {
+	if !db.Migrator().HasTable(&access.SiteAccessConfig{}) {
 		return result, nil
 	}
 
-	var configs []store.SiteAccessConfig
+	var configs []access.SiteAccessConfig
 	if err := db.Where("enabled = ?", true).Find(&configs).Error; err != nil {
 		return nil, err
 	}
 
 	// 批量加载所有启用的 provider，按 site_id 分组。
-	var allProviders []store.AccessProvider
-	providersBySite := make(map[uint][]store.AccessProvider)
-	if db.Migrator().HasTable(&store.AccessProvider{}) {
+	var allProviders []access.AccessProvider
+	providersBySite := make(map[uint][]access.AccessProvider)
+	if db.Migrator().HasTable(&access.AccessProvider{}) {
 		if err := db.Where("enabled = ?", true).
 			Order("site_id ASC, priority ASC, id ASC").Find(&allProviders).Error; err != nil {
 			return nil, err
@@ -1433,9 +1468,9 @@ func loadAccessControlConfigs(db *gorm.DB) (map[uint]*AccessControlConfig, error
 	}
 
 	// 批量加载所有启用的路径规则，按 site_id 分组。
-	var allPathRules []store.AccessPathRule
-	pathRulesBySite := make(map[uint][]store.AccessPathRule)
-	if db.Migrator().HasTable(&store.AccessPathRule{}) {
+	var allPathRules []access.AccessPathRule
+	pathRulesBySite := make(map[uint][]access.AccessPathRule)
+	if db.Migrator().HasTable(&access.AccessPathRule{}) {
 		if err := db.Where("enabled = ?", true).
 			Order("site_id ASC, priority ASC, id ASC").Find(&allPathRules).Error; err != nil {
 			return nil, err
@@ -1485,11 +1520,11 @@ type siteIPListPair struct {
 func loadSiteIPLists(db *gorm.DB) (map[uint]siteIPListPair, []SnapshotConfigDiagnostic, error) {
 	result := make(map[uint]siteIPListPair)
 	diagnostics := make([]SnapshotConfigDiagnostic, 0)
-	if !db.Migrator().HasTable(&store.IPListEntry{}) {
+	if !db.Migrator().HasTable(&iplist.IPListEntry{}) {
 		return result, diagnostics, nil
 	}
 
-	var items []store.IPListEntry
+	var items []iplist.IPListEntry
 	if err := db.Where("enabled = ?", true).Order("id ASC").Find(&items).Error; err != nil {
 		return nil, nil, err
 	}
@@ -1522,9 +1557,9 @@ func loadSiteIPLists(db *gorm.DB) (map[uint]siteIPListPair, []SnapshotConfigDiag
 		}
 		siteID := *it.SiteID
 		pair := result[siteID]
-		if it.Kind == store.IPListWhite {
+		if it.Kind == iplist.IPListWhite {
 			pair.whitelist = append(pair.whitelist, entry)
-		} else if it.Kind == store.IPListBlack {
+		} else if it.Kind == iplist.IPListBlack {
 			pair.blacklist = append(pair.blacklist, entry)
 		}
 		result[siteID] = pair

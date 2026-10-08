@@ -8,7 +8,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
-	"My-OpenWaf/internal/store"
+	cvestore "My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 	"My-OpenWaf/internal/waf/cve"
@@ -91,7 +91,7 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		patch := store.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo, CaptchaType: req.CaptchaType}
+		patch := cvestore.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo, CaptchaType: req.CaptchaType}
 		if err := validateCVEScopePatch(&patch); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
@@ -99,7 +99,7 @@ func BatchUpdateCVERules(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 		err = repo.DB().Transaction(func(tx *gorm.DB) error {
 			for _, id := range req.IDs {
 				var count int64
-				if err := tx.Model(&store.CVERuleRecord{}).Where("id = ?", id).Count(&count).Error; err != nil {
+				if err := tx.Model(&cvestore.CVERuleRecord{}).Where("id = ?", id).Count(&count).Error; err != nil {
 					return err
 				}
 				if count != 1 {
@@ -158,7 +158,7 @@ func UpdateSingleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManag
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		patch := store.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo, CaptchaType: req.CaptchaType}
+		patch := cvestore.CVERuleScopeOverride{Enabled: req.Enabled, Action: req.Action, Sensitivity: req.Sensitivity, StatusCode: req.StatusCode, RedirectTo: req.RedirectTo, CaptchaType: req.CaptchaType}
 		if err := validateCVEScopePatch(&patch); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return

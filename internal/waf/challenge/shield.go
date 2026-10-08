@@ -15,6 +15,8 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	rueidis "github.com/redis/rueidis"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // ShieldConfig 定义 5s 盾的高级配置。
@@ -189,7 +191,7 @@ type ShieldManager struct {
 func NewShieldManager(captcha *CaptchaManager, redis rueidis.Client, difficulty int) *ShieldManager {
 	cfg := DefaultShieldConfig()
 	if difficulty > 0 {
-		cfg.Difficulty = ClampPoWDifficulty(difficulty)
+		cfg.Difficulty = pow.ClampPoWDifficulty(difficulty)
 	}
 	sm := &ShieldManager{
 		captcha:  captcha,
@@ -270,7 +272,7 @@ func (sm *ShieldManager) SetConfig(cfg ShieldConfig) {
 	if cfg.Difficulty <= 0 {
 		cfg.Difficulty = 4
 	}
-	cfg.Difficulty = ClampPoWDifficulty(cfg.Difficulty)
+	cfg.Difficulty = pow.ClampPoWDifficulty(cfg.Difficulty)
 	if cfg.TimeoutSecs <= 0 {
 		cfg.TimeoutSecs = 30
 	}
@@ -295,7 +297,7 @@ func (sm *ShieldManager) difficultyValue() int {
 	if difficulty <= 0 {
 		return 4
 	}
-	return ClampPoWDifficulty(difficulty)
+	return pow.ClampPoWDifficulty(difficulty)
 }
 
 // Config 返回当前配置的副本。
@@ -325,7 +327,7 @@ func (sm *ShieldManager) GenerateChallenge(originalURL string, requestProtocol s
 
 func (sm *ShieldManager) GenerateChallengeWithBinding(originalURL string, requestProtocol string, binding ChallengeSessionBinding) (*ShieldSession, error) {
 	cfg := sm.Config()
-	nonce := GeneratePoWNonce()
+	nonce := pow.GeneratePoWNonce()
 	sessionID := shieldGenSessionID()
 	envKey := GenerateEnvSessionKey()
 	if len(envKey) != envSessionKeySize {
@@ -393,7 +395,7 @@ func (sm *ShieldManager) VerifyChallengeWithBinding(sessionID, captchaAnswer str
 	if !shieldProtocolAllowed(sm.shieldPageConfig(session), requestProtocol) {
 		return false, session.OriginalURL
 	}
-	if !VerifyPoW(session.Nonce, powCounter, powHash, session.Difficulty) {
+	if !pow.VerifyPoW(session.Nonce, powCounter, powHash, session.Difficulty) {
 		return false, session.OriginalURL
 	}
 	if !session.EnableEnvCheck {
@@ -515,7 +517,7 @@ func (sm *ShieldManager) WriteShieldChallengeResponse(c *app.RequestContext, req
 		return
 	}
 	cfg := sm.shieldPageConfig(session)
-	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
+	powScript := pow.GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	envJS := ""
 	behaviorJS := ""
 	aad := EnvFingerprintAAD("shield", session.ID, binding)
@@ -578,7 +580,7 @@ func shieldPageHTMLWithConfig(sessionID string, cfg ShieldConfig, requestProtoco
 }
 
 func obfuscateShieldJS(html string) string {
-	v := randomVarNames(16)
+	v := pow.RandomVarNames(16)
 	r := strings.NewReplacer(
 		"var sid=", "var "+v[0]+"=",
 		",sid,", ","+v[0]+",",

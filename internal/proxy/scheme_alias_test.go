@@ -91,26 +91,29 @@ func TestHTTPProtoForBaseRPCAliases(t *testing.T) {
 	}
 }
 
+// TestTransportKeyForUpstreamRPCAliases 校验活跃键只看 isHTTPS 维度：RPC 别名
+// 与对应传输 scheme 同键（tls/grpcs 同 https），h2c 侧恒为零值——h2c 走
+// h2cTransportForUpstream 单例，从不写入 transportPool，标 h2cPrior 只会让
+// 活跃集里出现一个永不匹配池内键的条目（详见 prune_transport_key_test.go）。
 func TestTransportKeyForUpstreamRPCAliases(t *testing.T) {
 	tests := []struct {
-		raw          string
-		wantHTTPS    bool
-		wantH2CPrior bool
+		raw       string
+		wantHTTPS bool
 	}{
 		{raw: "https://svc:443", wantHTTPS: true},
 		{raw: "grpcs://svc:443", wantHTTPS: true},
 		{raw: "tls://svc:443", wantHTTPS: true},
 		{raw: "grpc+https://svc:443", wantHTTPS: true},
-		{raw: "grpc://svc:9000", wantH2CPrior: true},
-		{raw: "http://svc:80", wantHTTPS: false, wantH2CPrior: false},
+		{raw: "grpc://svc:9000", wantHTTPS: false},
+		{raw: "http://svc:80", wantHTTPS: false},
 	}
 	for _, tt := range tests {
 		key := transportKeyForUpstream(tt.raw, snapshot.SiteRuntime{})
 		if key.isHTTPS != tt.wantHTTPS {
 			t.Fatalf("transportKeyForUpstream(%q).isHTTPS = %v, want %v", tt.raw, key.isHTTPS, tt.wantHTTPS)
 		}
-		if key.h2cPrior != tt.wantH2CPrior {
-			t.Fatalf("transportKeyForUpstream(%q).h2cPrior = %v, want %v", tt.raw, key.h2cPrior, tt.wantH2CPrior)
+		if key.h2cPrior {
+			t.Fatalf("transportKeyForUpstream(%q).h2cPrior = true, want false (h2c never enters transportPool)", tt.raw)
 		}
 	}
 }

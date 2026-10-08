@@ -12,7 +12,10 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/dataplane"
+	dashboard "My-OpenWaf/internal/admin/system/dashboard"
+	policyhandler "My-OpenWaf/internal/admin/system/policy"
+	adminupstream "My-OpenWaf/internal/admin/system/upstream"
+	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/upstream"
@@ -256,7 +259,7 @@ func TestDeletePolicyBlocksWhileReferenced(t *testing.T) {
 	idStr := strconv.FormatUint(uint64(policyID), 10)
 
 	reloadCount := 0
-	ctx := invokePolicyHandler(t, DeletePolicy(policyRepo, siteRepo, func() error {
+	ctx := invokePolicyHandler(t, policyhandler.DeletePolicy(policyRepo, siteRepo, func() error {
 		reloadCount++
 		return nil
 	}), "POST", "/api/v1/policies/"+idStr+"/delete", param.Params{{Key: "id", Value: idStr}}, nil)
@@ -301,7 +304,7 @@ func TestDeletePolicySucceedsWhenUnreferenced(t *testing.T) {
 	idParams := param.Params{{Key: "id", Value: idStr}}
 
 	reloadCount := 0
-	ctx := invokePolicyHandler(t, DeletePolicy(policyRepo, siteRepo, func() error {
+	ctx := invokePolicyHandler(t, policyhandler.DeletePolicy(policyRepo, siteRepo, func() error {
 		reloadCount++
 		return nil
 	}), "POST", "/api/v1/policies/"+idStr+"/delete", idParams, nil)
@@ -315,7 +318,7 @@ func TestDeletePolicySucceedsWhenUnreferenced(t *testing.T) {
 		t.Fatalf("policy should be gone after delete")
 	}
 
-	badID := invokePolicyHandler(t, DeletePolicy(policyRepo, siteRepo, func() error { return nil }),
+	badID := invokePolicyHandler(t, policyhandler.DeletePolicy(policyRepo, siteRepo, func() error { return nil }),
 		"POST", "/api/v1/policies/nan/delete", param.Params{{Key: "id", Value: "nan"}}, nil)
 	if badID.Response.StatusCode() != 400 {
 		t.Fatalf("invalid id status = %d, want 400", badID.Response.StatusCode())
@@ -339,7 +342,7 @@ func TestDeletePolicyReportsReloadFailure(t *testing.T) {
 	}
 	idStr := strconv.FormatUint(uint64(policy.ID), 10)
 
-	ctx := invokePolicyHandler(t, DeletePolicy(policyRepo, siteRepo, func() error { return errors.New("reload boom") }),
+	ctx := invokePolicyHandler(t, policyhandler.DeletePolicy(policyRepo, siteRepo, func() error { return errors.New("reload boom") }),
 		"POST", "/api/v1/policies/"+idStr+"/delete", param.Params{{Key: "id", Value: idStr}}, nil)
 	if ctx.Response.StatusCode() != 500 {
 		t.Fatalf("reload failure status = %d, want 500", ctx.Response.StatusCode())
@@ -350,13 +353,13 @@ func TestDeletePolicyReportsReloadFailure(t *testing.T) {
 }
 
 func TestDashboardSummaryHandlerServesSnapshot(t *testing.T) {
-	deps := &DashboardDeps{
-		Metrics:  dataplane.NewMetrics(),
+	deps := &dashboard.DashboardDeps{
+		Metrics:  dpmetrics.NewMetrics(),
 		ConfigDB: newDashboardConfigDBForTest(t),
 		LogDB:    newDashboardLogDBForTest(t),
 	}
 
-	ctx := invokeSystemConfigHandler(t, DashboardSummary(deps), "GET", "/api/v1/dashboard", nil)
+	ctx := invokeSystemConfigHandler(t, dashboard.DashboardSummary(deps), "GET", "/api/v1/dashboard", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("dashboard status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -386,14 +389,14 @@ func TestUpstreamStatusHandlerReturnsSortedItems(t *testing.T) {
 	pool.MarkResult("http://b.example.test", nil, 20*time.Millisecond)
 	pool.MarkResult("http://a.example.test", assertErr{}, 80*time.Millisecond)
 
-	ctx := invokeSystemConfigHandler(t, UpstreamStatus(pool), "GET", "/api/v1/upstream-status", nil)
+	ctx := invokeSystemConfigHandler(t, adminupstream.UpstreamStatus(pool), "GET", "/api/v1/upstream-status", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("upstream status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 
 	var resp struct {
-		Items []upstreamStatusItem `json:"items"`
-		Total int                  `json:"total"`
+		Items []adminupstream.UpstreamStatusItem `json:"items"`
+		Total int                                `json:"total"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode upstream status: %v", err)
@@ -420,7 +423,7 @@ func TestUpstreamStatusHandlerReturnsSortedItems(t *testing.T) {
 }
 
 func TestUpstreamStatusHandlerWithEmptyPool(t *testing.T) {
-	ctx := invokeSystemConfigHandler(t, UpstreamStatus(upstream.NewPool()), "GET", "/api/v1/upstream-status", nil)
+	ctx := invokeSystemConfigHandler(t, adminupstream.UpstreamStatus(upstream.NewPool()), "GET", "/api/v1/upstream-status", nil)
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("upstream status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}

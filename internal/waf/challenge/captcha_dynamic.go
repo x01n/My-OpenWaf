@@ -1,6 +1,10 @@
 package challenge
 
-import "strings"
+import (
+	"strings"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
+)
 
 // 本文件实现验证码「执行逻辑动态下发」：服务端每次签发新题目时，为信封生成一段
 // 行为等价但文本多态的交互脚本（exec_script），随题目一起进入 SM4-GCM 信封；
@@ -239,7 +243,7 @@ var captchaScriptEncodeLiterals = []string{
 func captchaScriptEncoders() []string {
 	out := make([]string, len(captchaScriptEncodeLiterals))
 	for i, literal := range captchaScriptEncodeLiterals {
-		out[i] = polymorphicEncode(literal)
+		out[i] = pow.PolymorphicEncode(literal)
 	}
 	return out
 }
@@ -261,7 +265,7 @@ func captchaExecScriptVariants(t CaptchaType) []string {
 	default:
 		return nil
 	}
-	names := randomVarNames(captchaScriptNameSlots)
+	names := pow.RandomVarNames(captchaScriptNameSlots)
 	enc := captchaScriptEncoders()
 	return []string{
 		renderCaptchaScriptVariant(segA, names, enc),
@@ -302,5 +306,5 @@ func BuildCaptchaExecScript(t CaptchaType) string {
 	if len(variants) == 0 {
 		return ""
 	}
-	return variants[randIntN(len(variants))]
+	return variants[pow.RandIntN(len(variants))]
 }

@@ -12,6 +12,7 @@ import (
 	"My-OpenWaf/internal/core/adminweb"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/waf/challenge"
+	challengepow "My-OpenWaf/internal/waf/challenge/pow"
 	"My-OpenWaf/internal/waf/pageconfig"
 )
 
@@ -119,7 +120,7 @@ func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.Si
 	powEnvelope := ""
 	powKeyHex := ""
 	if key != nil {
-		envelope, shell, err := challenge.GeneratePoWShardedEnvelope(challenge.ChallengeProofDifficulty, token, key)
+		envelope, shell, err := challenge.GeneratePoWShardedEnvelope(challengepow.ChallengeProofDifficulty, token, key)
 		if err == nil && envelope != "" && shell != "" && challenge.EnvSessionKeyHex(key) != "" {
 			powScript = shell
 			powEnvelope = envelope
@@ -127,7 +128,7 @@ func WriteChallengeResponse(c *app.RequestContext, reqID string, rt *snapshot.Si
 		}
 	}
 	if powScript == "" {
-		sharded := challenge.GeneratePoWShardedScript(challenge.ChallengeProofDifficulty, token)
+		sharded := challenge.GeneratePoWShardedScript(challengepow.ChallengeProofDifficulty, token)
 		powScript = sharded.PageScript
 	}
 

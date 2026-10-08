@@ -7,7 +7,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/snapshot"
-	"My-OpenWaf/internal/waf/challenge"
+	challengepow "My-OpenWaf/internal/waf/challenge/pow"
 	"My-OpenWaf/internal/waf/pageconfig"
 )
 
@@ -177,8 +177,8 @@ func WriteCookieRenewPage(c *app.RequestContext, reqID string, rt *snapshot.Site
 		SeedEnvelope:   seed.Envelope,
 		SeedKeyHex:     seed.KeyHex,
 		HasSeed:        seed.Envelope != "" && seed.KeyHex != "",
-		WasmURL:        challenge.PowWasmURL(),
-		GlueURL:        challenge.PowGlueURL(),
+		WasmURL:        challengepow.PowWasmURL(),
+		GlueURL:        challengepow.PowGlueURL(),
 	}
 	var buf bytes.Buffer
 	if err := cookieRenewPageTemplate.Execute(&buf, data); err != nil {

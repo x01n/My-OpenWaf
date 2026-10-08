@@ -9,7 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"My-OpenWaf/internal/store/access"
+	"My-OpenWaf/internal/store/approute"
+	"My-OpenWaf/internal/store/cve"
+	"My-OpenWaf/internal/store/iplist"
+	"My-OpenWaf/internal/store/luaplugin"
 	"My-OpenWaf/internal/store/migrations"
+	"My-OpenWaf/internal/store/owasp"
+	"My-OpenWaf/internal/store/threatintel"
 	"My-OpenWaf/internal/waf/challenge"
 
 	"gorm.io/gorm"
@@ -27,24 +34,24 @@ type BackupData struct {
 	ExportedAt      time.Time `json:"exported_at"`
 	DefaultPolicyID *uint     `json:"default_policy_id,omitempty"`
 
-	Certificates           []Certificate           `json:"certificates"`
-	Policies               []Policy                `json:"policies"`
-	PolicyOWASPRuleConfigs []PolicyOWASPRuleConfig `json:"policy_owasp_rule_configs"`
-	Rules                  []Rule                  `json:"rules"`
-	Sites                  []Site                  `json:"sites"`
-	SiteListeners          []SiteListener          `json:"site_listeners"`
-	IPListEntries          []IPListEntry           `json:"ip_list_entries"`
-	ThreatIntelFeeds       []ThreatIntelFeed       `json:"threat_intel_feeds"`
-	CVERuleRecords         []CVERuleRecord         `json:"cve_rule_records"`
-	CVERuleScopeOverrides  []CVERuleScopeOverride  `json:"cve_rule_scope_overrides"`
-	ApplicationRoutes      []ApplicationRouteRule  `json:"application_routes"`
-	SiteAccessConfigs      []SiteAccessConfig      `json:"site_access_configs"`
-	AccessProviders        []AccessProvider        `json:"access_providers"`
-	AccessUsers            []AccessUser            `json:"access_users"`
-	AccessPathRules        []AccessPathRule        `json:"access_path_rules"`
-	LuaPlugins             []LuaPlugin             `json:"lua_plugins"`
-	JSPlugins              []JSPlugin              `json:"js_plugins"`
-	SystemSettings         []SystemSettings        `json:"system_settings"`
+	Certificates           []Certificate                   `json:"certificates"`
+	Policies               []Policy                        `json:"policies"`
+	PolicyOWASPRuleConfigs []owasp.PolicyOWASPRuleConfig   `json:"policy_owasp_rule_configs"`
+	Rules                  []Rule                          `json:"rules"`
+	Sites                  []Site                          `json:"sites"`
+	SiteListeners          []SiteListener                  `json:"site_listeners"`
+	IPListEntries          []iplist.IPListEntry            `json:"ip_list_entries"`
+	ThreatIntelFeeds       []threatintel.ThreatIntelFeed   `json:"threat_intel_feeds"`
+	CVERuleRecords         []cve.CVERuleRecord             `json:"cve_rule_records"`
+	CVERuleScopeOverrides  []cve.CVERuleScopeOverride      `json:"cve_rule_scope_overrides"`
+	ApplicationRoutes      []approute.ApplicationRouteRule `json:"application_routes"`
+	SiteAccessConfigs      []access.SiteAccessConfig       `json:"site_access_configs"`
+	AccessProviders        []access.AccessProvider         `json:"access_providers"`
+	AccessUsers            []access.AccessUser             `json:"access_users"`
+	AccessPathRules        []access.AccessPathRule         `json:"access_path_rules"`
+	LuaPlugins             []luaplugin.LuaPlugin           `json:"lua_plugins"`
+	JSPlugins              []JSPlugin                      `json:"js_plugins"`
+	SystemSettings         []SystemSettings                `json:"system_settings"`
 }
 
 // BackupVersion 是当前备份格式版本号。
@@ -69,10 +76,10 @@ var ErrInvalidBackupRuleConfig = errors.New("invalid rule config backup")
  */
 func BackupModels() []interface{} {
 	return []interface{}{
-		&Certificate{}, &Policy{}, &PolicyOWASPRuleConfig{}, &Rule{}, &Site{}, &SiteListener{},
-		&IPListEntry{}, &ThreatIntelFeed{}, &CVERuleRecord{}, &CVERuleScopeOverride{},
-		&ApplicationRouteRule{}, &SiteAccessConfig{}, &AccessProvider{},
-		&AccessUser{}, &AccessPathRule{}, &LuaPlugin{}, &JSPlugin{}, &SystemSettings{},
+		&Certificate{}, &Policy{}, &owasp.PolicyOWASPRuleConfig{}, &Rule{}, &Site{}, &SiteListener{},
+		&iplist.IPListEntry{}, &threatintel.ThreatIntelFeed{}, &cve.CVERuleRecord{}, &cve.CVERuleScopeOverride{},
+		&approute.ApplicationRouteRule{}, &access.SiteAccessConfig{}, &access.AccessProvider{},
+		&access.AccessUser{}, &access.AccessPathRule{}, &luaplugin.LuaPlugin{}, &JSPlugin{}, &SystemSettings{},
 	}
 }
 
@@ -364,7 +371,7 @@ func upsertSlice(tx *gorm.DB, records interface{}) error {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []PolicyOWASPRuleConfig:
+	case []owasp.PolicyOWASPRuleConfig:
 		if len(v) == 0 {
 			return nil
 		}
@@ -384,52 +391,52 @@ func upsertSlice(tx *gorm.DB, records interface{}) error {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []IPListEntry:
+	case []iplist.IPListEntry:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []ThreatIntelFeed:
+	case []threatintel.ThreatIntelFeed:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []CVERuleRecord:
+	case []cve.CVERuleRecord:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []CVERuleScopeOverride:
+	case []cve.CVERuleScopeOverride:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []ApplicationRouteRule:
+	case []approute.ApplicationRouteRule:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []SiteAccessConfig:
+	case []access.SiteAccessConfig:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []AccessProvider:
+	case []access.AccessProvider:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []AccessUser:
+	case []access.AccessUser:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []AccessPathRule:
+	case []access.AccessPathRule:
 		if len(v) == 0 {
 			return nil
 		}
 		return upsertBatch(tx, v)
-	case []LuaPlugin:
+	case []luaplugin.LuaPlugin:
 		if len(v) == 0 {
 			return nil
 		}
@@ -532,20 +539,20 @@ func clearConfigTables(tx *gorm.DB) error {
 	models := []interface{}{
 		// JSPlugin 与 LuaPlugin 都可引用 Site，须在 Site 之前清空。
 		&JSPlugin{},
-		&LuaPlugin{},
-		&AccessPathRule{},
-		&AccessUser{},
-		&AccessProvider{},
-		&SiteAccessConfig{},
-		&ApplicationRouteRule{},
-		&CVERuleScopeOverride{},
-		&CVERuleRecord{},
-		&IPListEntry{},
+		&luaplugin.LuaPlugin{},
+		&access.AccessPathRule{},
+		&access.AccessUser{},
+		&access.AccessProvider{},
+		&access.SiteAccessConfig{},
+		&approute.ApplicationRouteRule{},
+		&cve.CVERuleScopeOverride{},
+		&cve.CVERuleRecord{},
+		&iplist.IPListEntry{},
 		&Rule{},
 		&SiteListener{},
 		&Site{},
-		&ThreatIntelFeed{},
-		&PolicyOWASPRuleConfig{},
+		&threatintel.ThreatIntelFeed{},
+		&owasp.PolicyOWASPRuleConfig{},
 		&Policy{},
 		&Certificate{},
 	}

@@ -8,7 +8,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 )
 
 // refreshCookieName 是管理端 refresh-token Cookie 名。
@@ -65,7 +65,7 @@ func recordLoginAttempt(db *gorm.DB, username, ip, userAgent string, success boo
 	if db == nil {
 		return
 	}
-	db.Create(&store.LoginAttempt{
+	db.Create(&auth.LoginAttempt{
 		Username:  username,
 		IP:        ip,
 		Success:   success,

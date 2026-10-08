@@ -81,7 +81,7 @@ func TestAuthMiddlewareSkipsWhitelistedPaths(t *testing.T) {
 		"/api/v1/auth/logout",
 	} {
 		ctx := newMiddlewareCtx(path, nil)
-		AuthMiddleware(nil, nil, nil)(context.Background(), ctx)
+		AuthMiddleware(nil, nil, nil, nil)(context.Background(), ctx)
 		if ctx.Response.StatusCode() == 401 {
 			t.Errorf("whitelisted path %q must not require auth", path)
 		}
@@ -90,7 +90,7 @@ func TestAuthMiddlewareSkipsWhitelistedPaths(t *testing.T) {
 
 func TestAuthMiddlewareRejectsMissingHeader(t *testing.T) {
 	ctx := newMiddlewareCtx("/api/v1/sites", nil)
-	AuthMiddleware(nil, nil, nil)(context.Background(), ctx)
+	AuthMiddleware(nil, nil, nil, nil)(context.Background(), ctx)
 	if ctx.Response.StatusCode() != 401 {
 		t.Fatalf("missing Authorization: want 401, got %d", ctx.Response.StatusCode())
 	}
@@ -104,7 +104,7 @@ func TestAuthMiddlewareRejectsNonBearerFormat(t *testing.T) {
 		"bearer lowercase-prefix",
 	} {
 		ctx := newMiddlewareCtx("/api/v1/sites", map[string]string{"Authorization": header})
-		AuthMiddleware(nil, nil, nil)(context.Background(), ctx)
+		AuthMiddleware(nil, nil, nil, nil)(context.Background(), ctx)
 		if ctx.Response.StatusCode() != 401 {
 			t.Errorf("header %q: want 401, got %d", header, ctx.Response.StatusCode())
 		}
@@ -123,7 +123,7 @@ func TestAuthMiddlewareReturns503WhenBlacklistIsUnavailable(t *testing.T) {
 		t.Fatalf("sign token: %v", err)
 	}
 	ctx := newMiddlewareCtx("/api/v1/sites", map[string]string{"Authorization": "Bearer " + token})
-	AuthMiddleware(nil, tm, nil)(context.Background(), ctx)
+	AuthMiddleware(nil, nil, tm, nil)(context.Background(), ctx)
 	if ctx.Response.StatusCode() != 503 {
 		t.Fatalf("blacklist unavailable: want 503, got %d", ctx.Response.StatusCode())
 	}

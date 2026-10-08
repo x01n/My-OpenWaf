@@ -28,6 +28,7 @@ import (
 	"My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
+	dptlsfp "My-OpenWaf/internal/dataplane/tlsfp"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/upstream"
@@ -1159,9 +1160,10 @@ func TestTLSFingerprintCarrierPreservesHandshakeUpdates(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	pc := &peekConn{Conn: server, fingerprint: tlsfp.TLSClientFingerprint{JA3Hash: "ja3"}}
-	wrapped := tlsfp.WrapFingerprintConn(pc, pc.fingerprint)
-	pc.SetTLSHandshakeInfo("TLS13", "client.example", "h2")
+	initial := tlsfp.TLSClientFingerprint{JA3Hash: "ja3"}
+	pc := dptlsfp.NewPeekConn(server, initial)
+	wrapped := tlsfp.WrapFingerprintConn(pc, initial)
+	pc.(interface{ SetTLSHandshakeInfo(string, string, string) }).SetTLSHandshakeInfo("TLS13", "client.example", "h2")
 
 	fp, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
@@ -1320,14 +1322,14 @@ func TestFixURIWrappersForwardHandshakeInfoThroughNetConn(t *testing.T) {
 		SNI:        "client.example",
 		ALPN:       []string{"h2", "http/1.1"},
 	}
-	pc := &peekConn{Conn: server, fingerprint: parsed}
+	pc := dptlsfp.NewPeekConn(server, parsed)
 	tlsLike := &testNetConnUnwrapper{Conn: server, inner: pc}
 	fixed := &FixURIConn{Conn: tlsLike}
 	hertzConn := newFixURIHertzConn(fixed)
 
 	hertzConn.SetTLSHandshakeInfo("TLS12", "client.example", "http/1.1")
 
-	fp, ok := pc.TLSFingerprint()
+	fp, ok := tlsfp.TLSFingerprintFromConn(pc)
 	if !ok {
 		t.Fatal("expected fingerprint after handshake update")
 	}

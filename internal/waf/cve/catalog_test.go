@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/cve"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -23,7 +23,7 @@ func newCatalogTestDB(t *testing.T) (*gorm.DB, *catalogSQLCounter) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&CVERuleModel{}, &store.CVERuleScopeOverride{}); err != nil {
+	if err := db.AutoMigrate(&CVERuleModel{}, &cve.CVERuleScopeOverride{}); err != nil {
 		t.Fatalf("migrate CVE catalog: %v", err)
 	}
 	counter := &catalogSQLCounter{}
@@ -141,9 +141,9 @@ func TestReconcileBuiltinCatalogPreservesDuplicateRowsAndOverrides(t *testing.T)
 		t.Fatalf("create duplicate row: %v", err)
 	}
 	overrideEnabled := true
-	override := store.CVERuleScopeOverride{
+	override := cve.CVERuleScopeOverride{
 		RuleID:    duplicate.ID,
-		ScopeType: store.CVEScopeGlobal,
+		ScopeType: cve.CVEScopeGlobal,
 		ScopeID:   0,
 		Enabled:   &overrideEnabled,
 	}
@@ -173,7 +173,7 @@ func TestReconcileBuiltinCatalogPreservesDuplicateRowsAndOverrides(t *testing.T)
 	if duplicates[0].Action != "observe" || duplicates[1].Action != "challenge" {
 		t.Fatalf("actions changed: %q, %q", duplicates[0].Action, duplicates[1].Action)
 	}
-	var savedOverride store.CVERuleScopeOverride
+	var savedOverride cve.CVERuleScopeOverride
 	if err := db.First(&savedOverride, override.ID).Error; err != nil {
 		t.Fatalf("duplicate override removed: %v", err)
 	}

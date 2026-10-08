@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"My-OpenWaf/internal/waf/challenge/gm"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // deterministicRandReader 提供可重放的确定性字节流：每次新建实例都从
@@ -46,7 +48,7 @@ var _ io.Reader = (*deterministicRandReader)(nil)
 // 小部分覆盖空串边界；调用方按需取得空串用例。
 func randNonceForTest(t *testing.T, allowEmpty bool) string {
 	t.Helper()
-	if allowEmpty && randIntN(8) == 0 {
+	if allowEmpty && pow.RandIntN(8) == 0 {
 		return ""
 	}
 	b := make([]byte, 16)
@@ -85,9 +87,9 @@ func TestGeneratePoWScriptBodyMatchesLegacy(t *testing.T) {
 			// 每次对照都从同一随机流起点出发，两条生成路径的
 			// 随机性消耗序列必须完全一致。
 			replayRandFromStart(t)
-			legacy := GeneratePoWWASMScript(difficulty, nonce)
+			legacy := pow.GeneratePoWWASMScript(difficulty, nonce)
 			replayRandFromStart(t)
-			body := generatePoWScriptBody(difficulty, nonce)
+			body := pow.GeneratePoWScriptBody(difficulty, nonce)
 			if legacy != body {
 				t.Fatalf(
 					"output mismatch: difficulty=%d nonce=%q legacyLen=%d bodyLen=%d",
@@ -110,7 +112,7 @@ func TestPowShardScriptRoundTripEquivalence(t *testing.T) {
 			replayRandFromStart(t)
 			sharded := GeneratePoWShardedScript(difficulty, nonce)
 			replayRandFromStart(t)
-			expected := generatePoWScriptBody(difficulty, nonce)
+			expected := pow.GeneratePoWScriptBody(difficulty, nonce)
 
 			if fnv1a32(expected) != sharded.Checksum {
 				t.Fatalf(
@@ -202,7 +204,7 @@ func TestSplitPointsAssembleLosslessly(t *testing.T) {
 
 	const xsRounds = 40
 	for round := 0; round < xsRounds; round++ {
-		sample := generatePoWScriptBody(1+randIntN(7), randNonceForTest(t, false))
+		sample := pow.GeneratePoWScriptBody(1+pow.RandIntN(7), randNonceForTest(t, false))
 		pieces := SplitPowShardBody(sample)
 		if got := strings.Join(pieces, ""); got != sample {
 			t.Fatalf("real-body join mismatch at round=%d: gotLen=%d wantLen=%d", round, len(got), len(sample))
@@ -222,7 +224,7 @@ func TestGeneratePoWShardedEnvelopeEquivalence(t *testing.T) {
 			key := GenerateEnvSessionKey()
 
 			replayRandFromStart(t)
-			generated := generatePoWScriptBody(difficulty, nonce)
+			generated := pow.GeneratePoWScriptBody(difficulty, nonce)
 			replayRandFromStart(t)
 			envelope, bootstrap, err := GeneratePoWShardedEnvelope(difficulty, nonce, key)
 			if err != nil {

@@ -12,7 +12,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/route/param"
 	"golang.org/x/crypto/bcrypt"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 )
 
 // invokeWithSiteAndSubID 构造带 siteID + 子资源 ID 双参数的请求。
@@ -84,7 +84,7 @@ func TestListPathRulesReturnsSeededRules(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
 	var resp struct {
-		Rules []store.AccessPathRule `json:"rules"`
+		Rules []access.AccessPathRule `json:"rules"`
 	}
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -138,7 +138,7 @@ func TestUpdatePathRulePatchesFields(t *testing.T) {
 	creq.CopyTo(&cctx.Request)
 	cctx.Params = param.Params{{Key: "id", Value: "1"}}
 	CreatePathRule(repo, func() error { return nil })(context.Background(), cctx)
-	var rule store.AccessPathRule
+	var rule access.AccessPathRule
 	json.Unmarshal(cctx.Response.Body(), &rule)
 
 	ridStr := strconv.FormatUint(uint64(rule.ID), 10)
@@ -156,7 +156,7 @@ func TestUpdatePathRulePatchesFields(t *testing.T) {
 	if uctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", uctx.Response.StatusCode(), bytes.TrimSpace(uctx.Response.Body()))
 	}
-	var updated store.AccessPathRule
+	var updated access.AccessPathRule
 	json.Unmarshal(uctx.Response.Body(), &updated)
 	if updated.Path != "/new" {
 		t.Fatalf("path not updated: got %q", updated.Path)
@@ -178,7 +178,7 @@ func TestUpdatePathRuleRejectsInvalidAction(t *testing.T) {
 	creq.CopyTo(&cctx.Request)
 	cctx.Params = param.Params{{Key: "id", Value: "1"}}
 	CreatePathRule(repo, func() error { return nil })(context.Background(), cctx)
-	var rule store.AccessPathRule
+	var rule access.AccessPathRule
 	json.Unmarshal(cctx.Response.Body(), &rule)
 
 	ridStr := strconv.FormatUint(uint64(rule.ID), 10)
@@ -209,7 +209,7 @@ func TestDeletePathRuleSucceeds(t *testing.T) {
 	creq.CopyTo(&cctx.Request)
 	cctx.Params = param.Params{{Key: "id", Value: "1"}}
 	CreatePathRule(repo, func() error { return nil })(context.Background(), cctx)
-	var rule store.AccessPathRule
+	var rule access.AccessPathRule
 	json.Unmarshal(cctx.Response.Body(), &rule)
 	ridStr := strconv.FormatUint(uint64(rule.ID), 10)
 
@@ -237,7 +237,7 @@ func TestDeletePathRuleCrossSiteReturns404(t *testing.T) {
 	creq.CopyTo(&cctx.Request)
 	cctx.Params = param.Params{{Key: "id", Value: "1"}}
 	CreatePathRule(repo, func() error { return nil })(context.Background(), cctx)
-	var rule store.AccessPathRule
+	var rule access.AccessPathRule
 	json.Unmarshal(cctx.Response.Body(), &rule)
 	ridStr := strconv.FormatUint(uint64(rule.ID), 10)
 
@@ -256,11 +256,11 @@ func TestDeletePathRuleCrossSiteReturns404(t *testing.T) {
 // User CRUD
 
 func seedUser(t *testing.T, repo interface {
-	CreateAccessUser(*store.AccessUser) error
-}, siteID uint, username string) *store.AccessUser {
+	CreateAccessUser(*access.AccessUser) error
+}, siteID uint, username string) *access.AccessUser {
 	t.Helper()
 	hash, _ := bcrypt.GenerateFromPassword([]byte("pass"), bcryptCost)
-	u := &store.AccessUser{SiteID: siteID, Username: username, PasswordHash: string(hash), Enabled: true}
+	u := &access.AccessUser{SiteID: siteID, Username: username, PasswordHash: string(hash), Enabled: true}
 	if err := repo.CreateAccessUser(u); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestUpdateUserChangesEnabledState(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	var updated store.AccessUser
+	var updated access.AccessUser
 	json.Unmarshal(ctx.Response.Body(), &updated)
 	if updated.Enabled {
 		t.Fatal("enabled should be false after update")
@@ -401,7 +401,7 @@ func TestCreatePathRuleHonorsExplicitDisabled(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	var resp store.AccessPathRule
+	var resp access.AccessPathRule
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestCreateUserHonorsExplicitDisabled(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("want 200, got %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	var resp store.AccessUser
+	var resp access.AccessUser
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

@@ -3,7 +3,8 @@ package repository
 import (
 	"testing"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/iplist"
+	"My-OpenWaf/internal/store/threatintel"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -15,7 +16,7 @@ func newThreatIntelRepoForTest(t *testing.T) *ThreatIntelRepo {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.ThreatIntelFeed{}, &store.IPListEntry{}); err != nil {
+	if err := db.AutoMigrate(&threatintel.ThreatIntelFeed{}, &iplist.IPListEntry{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return NewThreatIntelRepo(db)
@@ -24,8 +25,8 @@ func newThreatIntelRepoForTest(t *testing.T) *ThreatIntelRepo {
 func TestThreatIntelRepoCRUDAndListEnabled(t *testing.T) {
 	repo := newThreatIntelRepoForTest(t)
 
-	f1 := &store.ThreatIntelFeed{Name: "feed-a", URL: "http://x/a.txt", Kind: "blacklist", Action: "intercept", Enabled: true}
-	f2 := &store.ThreatIntelFeed{Name: "feed-b", URL: "http://x/b.txt", Kind: "whitelist", Action: "drop", Enabled: true}
+	f1 := &threatintel.ThreatIntelFeed{Name: "feed-a", URL: "http://x/a.txt", Kind: "blacklist", Action: "intercept", Enabled: true}
+	f2 := &threatintel.ThreatIntelFeed{Name: "feed-b", URL: "http://x/b.txt", Kind: "whitelist", Action: "drop", Enabled: true}
 	if err := repo.Create(f1); err != nil {
 		t.Fatalf("create f1: %v", err)
 	}
@@ -79,21 +80,21 @@ func TestThreatIntelRepoCRUDAndListEnabled(t *testing.T) {
 
 func TestThreatIntelRepoReplaceFeedEntries(t *testing.T) {
 	repo := newThreatIntelRepoForTest(t)
-	feed := &store.ThreatIntelFeed{Name: "feed", URL: "http://x", Kind: "blacklist", Action: "intercept", Enabled: true}
+	feed := &threatintel.ThreatIntelFeed{Name: "feed", URL: "http://x", Kind: "blacklist", Action: "intercept", Enabled: true}
 	if err := repo.Create(feed); err != nil {
 		t.Fatalf("create feed: %v", err)
 	}
 	fid := feed.ID
 
 	// 手动条目（FeedID 为 nil），不应被替换逻辑清除。
-	manual := store.IPListEntry{Kind: store.IPListBlack, Value: "9.9.9.9", Enabled: true, Action: "intercept"}
+	manual := iplist.IPListEntry{Kind: iplist.IPListBlack, Value: "9.9.9.9", Enabled: true, Action: "intercept"}
 	if err := repo.db.Create(&manual).Error; err != nil {
 		t.Fatalf("create manual entry: %v", err)
 	}
 
-	first := []store.IPListEntry{
-		{Kind: store.IPListBlack, Value: "1.1.1.1", Enabled: true, Action: "intercept", FeedID: &fid},
-		{Kind: store.IPListBlack, Value: "2.2.2.0/24", Enabled: true, Action: "intercept", FeedID: &fid},
+	first := []iplist.IPListEntry{
+		{Kind: iplist.IPListBlack, Value: "1.1.1.1", Enabled: true, Action: "intercept", FeedID: &fid},
+		{Kind: iplist.IPListBlack, Value: "2.2.2.0/24", Enabled: true, Action: "intercept", FeedID: &fid},
 	}
 	if err := repo.ReplaceFeedEntries(fid, first); err != nil {
 		t.Fatalf("replace first: %v", err)
@@ -103,8 +104,8 @@ func TestThreatIntelRepoReplaceFeedEntries(t *testing.T) {
 	}
 
 	// 第二次替换应清除旧的 feed 条目并写入新的。
-	second := []store.IPListEntry{
-		{Kind: store.IPListBlack, Value: "3.3.3.3", Enabled: true, Action: "intercept", FeedID: &fid},
+	second := []iplist.IPListEntry{
+		{Kind: iplist.IPListBlack, Value: "3.3.3.3", Enabled: true, Action: "intercept", FeedID: &fid},
 	}
 	if err := repo.ReplaceFeedEntries(fid, second); err != nil {
 		t.Fatalf("replace second: %v", err)
@@ -115,7 +116,7 @@ func TestThreatIntelRepoReplaceFeedEntries(t *testing.T) {
 
 	// 手动条目应仍然存在。
 	var manualCount int64
-	repo.db.Model(&store.IPListEntry{}).Where("feed_id IS NULL").Count(&manualCount)
+	repo.db.Model(&iplist.IPListEntry{}).Where("feed_id IS NULL").Count(&manualCount)
 	if manualCount != 1 {
 		t.Fatalf("手动条目应保留 1 条, 实得 %d", manualCount)
 	}
@@ -123,14 +124,14 @@ func TestThreatIntelRepoReplaceFeedEntries(t *testing.T) {
 
 func TestThreatIntelRepoDeleteCascadesEntries(t *testing.T) {
 	repo := newThreatIntelRepoForTest(t)
-	feed := &store.ThreatIntelFeed{Name: "feed", URL: "http://x", Kind: "blacklist", Action: "intercept", Enabled: true}
+	feed := &threatintel.ThreatIntelFeed{Name: "feed", URL: "http://x", Kind: "blacklist", Action: "intercept", Enabled: true}
 	if err := repo.Create(feed); err != nil {
 		t.Fatalf("create feed: %v", err)
 	}
 	fid := feed.ID
-	entries := []store.IPListEntry{
-		{Kind: store.IPListBlack, Value: "1.1.1.1", Enabled: true, Action: "intercept", FeedID: &fid},
-		{Kind: store.IPListBlack, Value: "2.2.2.2", Enabled: true, Action: "intercept", FeedID: &fid},
+	entries := []iplist.IPListEntry{
+		{Kind: iplist.IPListBlack, Value: "1.1.1.1", Enabled: true, Action: "intercept", FeedID: &fid},
+		{Kind: iplist.IPListBlack, Value: "2.2.2.2", Enabled: true, Action: "intercept", FeedID: &fid},
 	}
 	if err := repo.ReplaceFeedEntries(fid, entries); err != nil {
 		t.Fatalf("seed entries: %v", err)

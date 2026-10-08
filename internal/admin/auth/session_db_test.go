@@ -8,7 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 )
 
 /**
@@ -22,7 +22,7 @@ import (
 func seedActiveSession(t *testing.T, db *gorm.DB, username, jti string, expiresAt time.Time) {
 	t.Helper()
 	now := time.Now()
-	if err := db.Create(&store.ActiveSession{
+	if err := db.Create(&auth.ActiveSession{
 		Username:     username,
 		JTI:          jti,
 		IP:           "192.0.2.1",
@@ -46,7 +46,7 @@ func seedActiveSession(t *testing.T, db *gorm.DB, username, jti string, expiresA
 func countSessionRows(t *testing.T, db *gorm.DB, jti string) int64 {
 	t.Helper()
 	var n int64
-	if err := db.Model(&store.ActiveSession{}).Where("jti = ?", jti).Count(&n).Error; err != nil {
+	if err := db.Model(&auth.ActiveSession{}).Where("jti = ?", jti).Count(&n).Error; err != nil {
 		t.Fatalf("count sessions: %v", err)
 	}
 	return n
@@ -107,7 +107,7 @@ func TestCreateSessionPersistsToDB(t *testing.T) {
 	exp := time.Now().Add(time.Hour)
 	sm.CreateSession("bob", "jti-persist", "203.0.113.5", "UA/1.0", "laptop", exp)
 
-	var row store.ActiveSession
+	var row auth.ActiveSession
 	if err := db.Where("jti = ?", "jti-persist").First(&row).Error; err != nil {
 		t.Fatalf("会话应持久化到数据库: %v", err)
 	}

@@ -13,6 +13,8 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
+	"My-OpenWaf/internal/store/threatintel"
 )
 
 func newBackupDBForTest(t *testing.T) *gorm.DB {
@@ -148,7 +150,7 @@ func TestExportBackupSetsContentDisposition(t *testing.T) {
  */
 func TestExportBackupMasksThreatIntelAuthHeaders(t *testing.T) {
 	db := newBackupDBForTest(t)
-	seed := []store.ThreatIntelFeed{
+	seed := []threatintel.ThreatIntelFeed{
 		{Name: "long-token", Kind: "blacklist", Action: "intercept", AuthHeaderName: "Authorization", AuthHeaderValue: "Bearer secret-token-value"},
 		{Name: "short-token", Kind: "blacklist", Action: "intercept", AuthHeaderName: "X-Token", AuthHeaderValue: "abc"},
 		{Name: "no-token", Kind: "blacklist", Action: "intercept", AuthHeaderName: "X-Token"},
@@ -195,7 +197,7 @@ func TestExportBackupMasksThreatIntelAuthHeaders(t *testing.T) {
  */
 func TestExportBackupMaskedImportKeepsExistingSecrets(t *testing.T) {
 	dst := newBackupDBForTest(t)
-	existing := &store.ThreatIntelFeed{
+	existing := &threatintel.ThreatIntelFeed{
 		Name: "existing", URL: "https://old.example.test/feed", Kind: "blacklist",
 		Action: "intercept", Enabled: true, SyncInterval: 3600,
 		AuthHeaderName: "X-Token", AuthHeaderValue: "old-secret-kept",
@@ -206,7 +208,7 @@ func TestExportBackupMaskedImportKeepsExistingSecrets(t *testing.T) {
 
 	masked := &store.BackupData{
 		Version: store.BackupVersion,
-		ThreatIntelFeeds: []store.ThreatIntelFeed{
+		ThreatIntelFeeds: []threatintel.ThreatIntelFeed{
 			{ID: existing.ID, Name: "existing", URL: "https://old.example.test/feed", Kind: "blacklist",
 				Action: "intercept", Enabled: true, SyncInterval: 7200,
 				AuthHeaderName: "X-Token", AuthHeaderValue: ""},
@@ -215,7 +217,7 @@ func TestExportBackupMaskedImportKeepsExistingSecrets(t *testing.T) {
 	if err := store.ImportBackup(dst, masked, false); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	var got store.ThreatIntelFeed
+	var got threatintel.ThreatIntelFeed
 	if err := dst.First(&got, existing.ID).Error; err != nil {
 		t.Fatalf("load restored feed: %v", err)
 	}
@@ -236,7 +238,7 @@ func TestExportBackupMasksOAuthClientSecrets(t *testing.T) {
 	db := newBackupDBForTest(t)
 	secretJSON := func(secret string) string {
 		t.Helper()
-		cfg := store.OAuthProviderConfig{
+		cfg := access.OAuthProviderConfig{
 			ClientID:     "client-app-1",
 			ClientSecret: secret,
 			AuthURL:      "https://auth.example.test/authorize",
@@ -247,12 +249,12 @@ func TestExportBackupMasksOAuthClientSecrets(t *testing.T) {
 		}
 		return string(raw)
 	}
-	seed := []store.AccessProvider{
-		{SiteID: 1, Type: store.AccessProviderOAuth2, Name: "oauth-long", Config: secretJSON("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=")},
-		{SiteID: 1, Type: store.AccessProviderOAuth2, Name: "oauth-short", Config: secretJSON("abcd")},
-		{SiteID: 1, Type: store.AccessProviderOIDC, Name: "oidc-empty", Config: secretJSON("")},
-		{SiteID: 1, Type: store.AccessProviderPassword, Name: "password-noconfig"},
-		{SiteID: 1, Type: store.AccessProviderOAuth2, Name: "oauth-badjson", Config: `{not-valid-json`},
+	seed := []access.AccessProvider{
+		{SiteID: 1, Type: access.AccessProviderOAuth2, Name: "oauth-long", Config: secretJSON("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=")},
+		{SiteID: 1, Type: access.AccessProviderOAuth2, Name: "oauth-short", Config: secretJSON("abcd")},
+		{SiteID: 1, Type: access.AccessProviderOIDC, Name: "oidc-empty", Config: secretJSON("")},
+		{SiteID: 1, Type: access.AccessProviderPassword, Name: "password-noconfig"},
+		{SiteID: 1, Type: access.AccessProviderOAuth2, Name: "oauth-badjson", Config: `{not-valid-json`},
 	}
 	for i := range seed {
 		if err := db.Create(&seed[i]).Error; err != nil {
@@ -274,17 +276,17 @@ func TestExportBackupMasksOAuthClientSecrets(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &data); err != nil {
 		t.Fatalf("decode export body: %v", err)
 	}
-	got := make(map[string]store.AccessProvider, len(data.AccessProviders))
+	got := make(map[string]access.AccessProvider, len(data.AccessProviders))
 	for _, p := range data.AccessProviders {
 		got[p.Name] = p
 	}
-	decode := func(name string) store.OAuthProviderConfig {
+	decode := func(name string) access.OAuthProviderConfig {
 		t.Helper()
 		p, ok := got[name]
 		if !ok {
 			t.Fatalf("provider %q not present in export", name)
 		}
-		var cfg store.OAuthProviderConfig
+		var cfg access.OAuthProviderConfig
 		if err := json.Unmarshal([]byte(p.Config), &cfg); err != nil {
 			t.Fatalf("decode provider %q config: %v", name, err)
 		}
@@ -317,7 +319,7 @@ func TestExportBackupMasksOAuthClientSecrets(t *testing.T) {
  */
 func TestExportBackupMaskedValueOverwritesOnImport(t *testing.T) {
 	src := newBackupDBForTest(t)
-	feed := store.ThreatIntelFeed{
+	feed := threatintel.ThreatIntelFeed{
 		Name: "feed", Kind: "blacklist", Action: "intercept",
 		AuthHeaderName: "X-Token", AuthHeaderValue: "Bearer original-secret",
 	}
@@ -339,7 +341,7 @@ func TestExportBackupMaskedValueOverwritesOnImport(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &data); err != nil {
 		t.Fatalf("decode export body: %v", err)
 	}
-	var exported store.ThreatIntelFeed
+	var exported threatintel.ThreatIntelFeed
 	for _, f := range data.ThreatIntelFeeds {
 		if f.Name == "feed" {
 			exported = f
@@ -353,7 +355,7 @@ func TestExportBackupMaskedValueOverwritesOnImport(t *testing.T) {
 	}
 
 	dst := newBackupDBForTest(t)
-	existing := store.ThreatIntelFeed{
+	existing := threatintel.ThreatIntelFeed{
 		ID: exported.ID, Name: "feed", Kind: "blacklist", Action: "intercept",
 		AuthHeaderName: "X-Token", AuthHeaderValue: "old-dst-secret",
 	}
@@ -363,7 +365,7 @@ func TestExportBackupMaskedValueOverwritesOnImport(t *testing.T) {
 	if err := store.ImportBackup(dst, &data, false); err != nil {
 		t.Fatalf("import masked backup: %v", err)
 	}
-	var got store.ThreatIntelFeed
+	var got threatintel.ThreatIntelFeed
 	if err := dst.Where("name = ?", "feed").First(&got).Error; err != nil {
 		t.Fatalf("load restored feed: %v", err)
 	}

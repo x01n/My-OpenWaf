@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/store/repository"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -23,10 +23,10 @@ func newAccessControlRepoForTest(t *testing.T) *repository.AccessControlRepo {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := db.AutoMigrate(
-		&store.SiteAccessConfig{},
-		&store.AccessUser{},
-		&store.AccessPathRule{},
-		&store.AccessProvider{},
+		&access.SiteAccessConfig{},
+		&access.AccessUser{},
+		&access.AccessPathRule{},
+		&access.AccessProvider{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -154,12 +154,12 @@ func TestCreatePathRuleDefaultsActionToRequireAuth(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
-	var rule store.AccessPathRule
+	var rule access.AccessPathRule
 	if err := json.Unmarshal(ctx.Response.Body(), &rule); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if rule.Action != store.AccessActionRequireAuth {
-		t.Fatalf("expected default action=%q, got %q", store.AccessActionRequireAuth, rule.Action)
+	if rule.Action != access.AccessActionRequireAuth {
+		t.Fatalf("expected default action=%q, got %q", access.AccessActionRequireAuth, rule.Action)
 	}
 }
 
@@ -204,7 +204,7 @@ func TestFindSiteUserPreventsCrossSiteAccess(t *testing.T) {
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("create user failed: %d", ctx.Response.StatusCode())
 	}
-	var created store.AccessUser
+	var created access.AccessUser
 	if err := json.Unmarshal(ctx.Response.Body(), &created); err != nil {
 		t.Fatalf("decode created user: %v", err)
 	}

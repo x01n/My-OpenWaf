@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"My-OpenWaf/internal/pkg/vmpasm"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 func TestChainSessionManagementUsesRealState(t *testing.T) {
@@ -186,7 +188,7 @@ func TestShieldPageUsesRuntimeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	powScript := GeneratePoWWASMScript(session.Difficulty, session.Nonce)
+	powScript := pow.GeneratePoWWASMScript(session.Difficulty, session.Nonce)
 	runtimeCfg := mgr.Config()
 	html := shieldPageHTMLWithConfig(session.ID, runtimeCfg, "h2", "", "", powScript)
 
@@ -300,7 +302,7 @@ func findShieldPoWSolution(t *testing.T, nonce string, difficulty int) (int64, s
 	t.Helper()
 	prefix := strings.Repeat("0", difficulty)
 	for counter := int64(0); counter < 1_000_000; counter++ {
-		hash := sha256Hex(fmt.Sprintf("%s%d", nonce, counter))
+		hash := pow.SHA256Hex(fmt.Sprintf("%s%d", nonce, counter))
 		if strings.HasPrefix(hash, prefix) {
 			return counter, hash
 		}
@@ -310,12 +312,12 @@ func findShieldPoWSolution(t *testing.T, nonce string, difficulty int) (int64, s
 }
 
 func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
-	script := GeneratePoWWASMScript(1, "nonce")
+	script := pow.GeneratePoWWASMScript(1, "nonce")
 	if !strings.Contains(script, "__owaf_pow_callback") {
-		t.Fatalf("GeneratePoWWASMScript() did not expose shield/chain callback: %s", script)
+		t.Fatalf("pow.GeneratePoWWASMScript() did not expose shield/chain callback: %s", script)
 	}
 	if !strings.Contains(script, "__onPoWComplete") {
-		t.Fatalf("GeneratePoWWASMScript() dropped legacy callback: %s", script)
+		t.Fatalf("pow.GeneratePoWWASMScript() dropped legacy callback: %s", script)
 	}
 	markers := []string{
 		"BigInt(self.__off)",
@@ -328,11 +330,11 @@ func TestPoWScriptUsesShieldAndChainCallback(t *testing.T) {
 	}
 	for _, marker := range markers {
 		if !strings.Contains(script, marker) {
-			t.Fatalf("GeneratePoWWASMScript() missing marker %q: %s", marker, script)
+			t.Fatalf("pow.GeneratePoWWASMScript() missing marker %q: %s", marker, script)
 		}
 	}
 	if strings.Contains(script, "var off=self.__off") || strings.Contains(script, "off+=self.__bs*self.__nc") {
-		t.Fatalf("GeneratePoWWASMScript() still uses numeric start_counter: %s", script)
+		t.Fatalf("pow.GeneratePoWWASMScript() still uses numeric start_counter: %s", script)
 	}
 }
 
@@ -365,7 +367,7 @@ func TestGeneratedPoWScriptEmbedsValidVMProgram(t *testing.T) {
 	// 这条同时锁住「不再有随机 NOP 填充」。
 	var first string
 	for i := 0; i < 20; i++ {
-		script := GeneratePoWWASMScript(1, "nonce")
+		script := pow.GeneratePoWWASMScript(1, "nonce")
 		start := strings.Index(script, programMarker)
 		if start < 0 {
 			t.Fatalf("generated script is missing %q: %s", programMarker, script)

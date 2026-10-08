@@ -12,7 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/auth"
-	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -23,7 +23,7 @@ func newSessionMgrForTest(t *testing.T) *auth.SessionManager {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.ActiveSession{}); err != nil {
+	if err := db.AutoMigrate(&authstore.ActiveSession{}); err != nil {
 		t.Fatalf("migrate active sessions: %v", err)
 	}
 	return auth.NewSessionManager(db)
@@ -197,7 +197,7 @@ func TestForceLogoutRevokesLinkedRefreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.ActiveSession{}, &store.RefreshToken{}); err != nil {
+	if err := db.AutoMigrate(&authstore.ActiveSession{}, &authstore.RefreshToken{}); err != nil {
 		t.Fatalf("migrate auth tables: %v", err)
 	}
 	sm := auth.NewSessionManager(db)
@@ -224,7 +224,7 @@ func TestForceLogoutRevokesRotatedRefreshFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.ActiveSession{}, &store.RefreshToken{}); err != nil {
+	if err := db.AutoMigrate(&authstore.ActiveSession{}, &authstore.RefreshToken{}); err != nil {
 		t.Fatalf("migrate auth tables: %v", err)
 	}
 	sm := auth.NewSessionManager(db)

@@ -11,7 +11,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	cvestore "My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/cve"
 )
@@ -22,7 +22,7 @@ func newCVERuleRepoForTest(t *testing.T) *repository.CVERuleRepo {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&cve.CVERuleModel{}, &store.CVERuleScopeOverride{}); err != nil {
+	if err := db.AutoMigrate(&cve.CVERuleModel{}, &cvestore.CVERuleScopeOverride{}); err != nil {
 		t.Fatalf("migrate cve rules: %v", err)
 	}
 	return repository.NewCVERuleRepo(db)
@@ -182,17 +182,17 @@ func TestSaveCVEScopeOverrideMergesPartialPatch(t *testing.T) {
 	action := "redirect"
 	statusCode := 302
 	redirectTo := "https://example.com/blocked"
-	scope := cveScopeContext{ScopeType: store.CVEScopeGlobal, ScopeID: 0}
-	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, store.CVERuleScopeOverride{Action: &action, StatusCode: &statusCode, RedirectTo: &redirectTo}); err != nil {
+	scope := cveScopeContext{ScopeType: cvestore.CVEScopeGlobal, ScopeID: 0}
+	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, cvestore.CVERuleScopeOverride{Action: &action, StatusCode: &statusCode, RedirectTo: &redirectTo}); err != nil {
 		t.Fatalf("save initial override: %v", err)
 	}
 	enabled := false
-	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, store.CVERuleScopeOverride{Enabled: &enabled}); err != nil {
+	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, cvestore.CVERuleScopeOverride{Enabled: &enabled}); err != nil {
 		t.Fatalf("save partial override: %v", err)
 	}
 
-	var got store.CVERuleScopeOverride
-	if err := repo.DB().Where("rule_id = ? AND scope_type = ? AND scope_id = ?", rule.ID, store.CVEScopeGlobal, 0).First(&got).Error; err != nil {
+	var got cvestore.CVERuleScopeOverride
+	if err := repo.DB().Where("rule_id = ? AND scope_type = ? AND scope_id = ?", rule.ID, cvestore.CVEScopeGlobal, 0).First(&got).Error; err != nil {
 		t.Fatalf("load override: %v", err)
 	}
 	if got.Enabled == nil || *got.Enabled {
@@ -221,19 +221,19 @@ func TestSaveCVEScopeOverrideRejectsPartialUpdateLeavingInvalidAction(t *testing
 	}
 	actionValue := "redirect"
 	redirectTo := "https://example.com/blocked"
-	scope := cveScopeContext{ScopeType: store.CVEScopeGlobal, ScopeID: 0}
-	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, store.CVERuleScopeOverride{
+	scope := cveScopeContext{ScopeType: cvestore.CVEScopeGlobal, ScopeID: 0}
+	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, cvestore.CVERuleScopeOverride{
 		Action: &actionValue, RedirectTo: &redirectTo,
 	}); err != nil {
 		t.Fatalf("save valid redirect override: %v", err)
 	}
-	if err := repo.DB().Model(&store.CVERuleScopeOverride{}).
-		Where("rule_id = ? AND scope_type = ? AND scope_id = ?", rule.ID, store.CVEScopeGlobal, 0).
+	if err := repo.DB().Model(&cvestore.CVERuleScopeOverride{}).
+		Where("rule_id = ? AND scope_type = ? AND scope_id = ?", rule.ID, cvestore.CVEScopeGlobal, 0).
 		Update("redirect_to", "").Error; err != nil {
 		t.Fatalf("seed invalid persisted override: %v", err)
 	}
 	enabled := false
-	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, store.CVERuleScopeOverride{Enabled: &enabled}); err == nil {
+	if err := saveCVEScopeOverride(repo.DB(), rule.ID, scope, cvestore.CVERuleScopeOverride{Enabled: &enabled}); err == nil {
 		t.Fatal("partial update accepted redirect action without redirect target")
 	}
 }
@@ -272,7 +272,7 @@ func TestCVERuleStatsUseEffectiveScopeOverrides(t *testing.T) {
 		}
 	}
 	overrideEnabled := true
-	if err := repo.DB().Create(&store.CVERuleScopeOverride{RuleID: rules[1].ID, ScopeType: store.CVEScopeGlobal, ScopeID: 0, Enabled: &overrideEnabled}).Error; err != nil {
+	if err := repo.DB().Create(&cvestore.CVERuleScopeOverride{RuleID: rules[1].ID, ScopeType: cvestore.CVEScopeGlobal, ScopeID: 0, Enabled: &overrideEnabled}).Error; err != nil {
 		t.Fatalf("seed override: %v", err)
 	}
 
@@ -327,7 +327,7 @@ func TestListCVERulesFiltersByEffectiveEnabled(t *testing.T) {
 		}
 	}
 	overrideEnabled := true
-	if err := repo.DB().Create(&store.CVERuleScopeOverride{RuleID: rules[1].ID, ScopeType: store.CVEScopeGlobal, ScopeID: 0, Enabled: &overrideEnabled}).Error; err != nil {
+	if err := repo.DB().Create(&cvestore.CVERuleScopeOverride{RuleID: rules[1].ID, ScopeType: cvestore.CVEScopeGlobal, ScopeID: 0, Enabled: &overrideEnabled}).Error; err != nil {
 		t.Fatalf("seed override: %v", err)
 	}
 

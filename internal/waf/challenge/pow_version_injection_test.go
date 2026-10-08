@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"My-OpenWaf/internal/waf/challenge/pow"
 	"My-OpenWaf/internal/waf/challenge/powdata"
 )
 
@@ -61,7 +62,7 @@ func TestPowShardBootstrapInjectsPerAssetVersions(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	_, bootstrap, err := GeneratePoWShardedEnvelope(ChallengeProofDifficulty, "ver-nonce", key)
+	_, bootstrap, err := GeneratePoWShardedEnvelope(pow.ChallengeProofDifficulty, "ver-nonce", key)
 	if err != nil || bootstrap == "" {
 		t.Fatalf("GeneratePoWShardedEnvelope: %v", err)
 	}

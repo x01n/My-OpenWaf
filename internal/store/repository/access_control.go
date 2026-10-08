@@ -1,7 +1,7 @@
 package repository
 
 import (
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 
 	"gorm.io/gorm"
 )
@@ -15,8 +15,8 @@ func NewAccessControlRepo(db *gorm.DB) *AccessControlRepo {
 }
 
 // GetSiteAccessConfig 读取指定站点的访问控制配置，不存在时返回 gorm.ErrRecordNotFound。
-func (r *AccessControlRepo) GetSiteAccessConfig(siteID uint) (*store.SiteAccessConfig, error) {
-	var cfg store.SiteAccessConfig
+func (r *AccessControlRepo) GetSiteAccessConfig(siteID uint) (*access.SiteAccessConfig, error) {
+	var cfg access.SiteAccessConfig
 	if err := r.db.Where("site_id = ?", siteID).First(&cfg).Error; err != nil {
 		return nil, err
 	}
@@ -24,20 +24,20 @@ func (r *AccessControlRepo) GetSiteAccessConfig(siteID uint) (*store.SiteAccessC
 }
 
 // SaveSiteAccessConfig 创建或更新站点访问控制配置。
-func (r *AccessControlRepo) SaveSiteAccessConfig(config *store.SiteAccessConfig) error {
+func (r *AccessControlRepo) SaveSiteAccessConfig(config *access.SiteAccessConfig) error {
 	return r.db.Save(config).Error
 }
 
 // ListAccessProviders 按优先级列出站点的所有认证提供方。
-func (r *AccessControlRepo) ListAccessProviders(siteID uint) ([]store.AccessProvider, error) {
-	var list []store.AccessProvider
+func (r *AccessControlRepo) ListAccessProviders(siteID uint) ([]access.AccessProvider, error) {
+	var list []access.AccessProvider
 	return list, r.db.Where("site_id = ?", siteID).Order("priority ASC, id ASC").Find(&list).Error
 }
 
 // CreateAccessProvider 创建认证提供方。
 // Enabled 字段带 gorm default:true，插入 false 会被 GORM 当作零值改用默认值，
 // 因此显式禁用时需要在插入后回写该列。
-func (r *AccessControlRepo) CreateAccessProvider(provider *store.AccessProvider) error {
+func (r *AccessControlRepo) CreateAccessProvider(provider *access.AccessProvider) error {
 	enabled := provider.Enabled
 	if err := r.db.Create(provider).Error; err != nil {
 		return err
@@ -52,24 +52,24 @@ func (r *AccessControlRepo) CreateAccessProvider(provider *store.AccessProvider)
 }
 
 // UpdateAccessProvider 更新认证提供方。
-func (r *AccessControlRepo) UpdateAccessProvider(provider *store.AccessProvider) error {
+func (r *AccessControlRepo) UpdateAccessProvider(provider *access.AccessProvider) error {
 	return r.db.Save(provider).Error
 }
 
 // DeleteAccessProvider 删除认证提供方。
 func (r *AccessControlRepo) DeleteAccessProvider(id uint) error {
-	return r.db.Delete(&store.AccessProvider{}, id).Error
+	return r.db.Delete(&access.AccessProvider{}, id).Error
 }
 
 // ListAccessUsers 列出站点的所有本地用户。
-func (r *AccessControlRepo) ListAccessUsers(siteID uint) ([]store.AccessUser, error) {
-	var list []store.AccessUser
+func (r *AccessControlRepo) ListAccessUsers(siteID uint) ([]access.AccessUser, error) {
+	var list []access.AccessUser
 	return list, r.db.Where("site_id = ?", siteID).Order("id ASC").Find(&list).Error
 }
 
 // GetAccessUserByName 按站点与用户名读取本地用户，不存在时返回 gorm.ErrRecordNotFound。
-func (r *AccessControlRepo) GetAccessUserByName(siteID uint, username string) (*store.AccessUser, error) {
-	var user store.AccessUser
+func (r *AccessControlRepo) GetAccessUserByName(siteID uint, username string) (*access.AccessUser, error) {
+	var user access.AccessUser
 	if err := r.db.Where("site_id = ? AND username = ?", siteID, username).First(&user).Error; err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func (r *AccessControlRepo) GetAccessUserByName(siteID uint, username string) (*
 // CreateAccessUser 创建本地用户。
 // Enabled 字段带 gorm default:true，插入 false 会被 GORM 当作零值改用默认值，
 // 因此显式禁用时需要在插入后回写该列。
-func (r *AccessControlRepo) CreateAccessUser(user *store.AccessUser) error {
+func (r *AccessControlRepo) CreateAccessUser(user *access.AccessUser) error {
 	enabled := user.Enabled
 	if err := r.db.Create(user).Error; err != nil {
 		return err
@@ -94,25 +94,25 @@ func (r *AccessControlRepo) CreateAccessUser(user *store.AccessUser) error {
 }
 
 // UpdateAccessUser 更新本地用户。
-func (r *AccessControlRepo) UpdateAccessUser(user *store.AccessUser) error {
+func (r *AccessControlRepo) UpdateAccessUser(user *access.AccessUser) error {
 	return r.db.Save(user).Error
 }
 
 // DeleteAccessUser 删除本地用户。
 func (r *AccessControlRepo) DeleteAccessUser(id uint) error {
-	return r.db.Delete(&store.AccessUser{}, id).Error
+	return r.db.Delete(&access.AccessUser{}, id).Error
 }
 
 // ListAccessPathRules 按优先级列出站点的路径访问控制规则。
-func (r *AccessControlRepo) ListAccessPathRules(siteID uint) ([]store.AccessPathRule, error) {
-	var list []store.AccessPathRule
+func (r *AccessControlRepo) ListAccessPathRules(siteID uint) ([]access.AccessPathRule, error) {
+	var list []access.AccessPathRule
 	return list, r.db.Where("site_id = ?", siteID).Order("priority ASC, id ASC").Find(&list).Error
 }
 
 // CreateAccessPathRule 创建路径访问控制规则。
 // Enabled 字段带 gorm default:true，插入 false 会被 GORM 当作零值改用默认值，
 // 因此显式禁用时需要在插入后回写该列。
-func (r *AccessControlRepo) CreateAccessPathRule(rule *store.AccessPathRule) error {
+func (r *AccessControlRepo) CreateAccessPathRule(rule *access.AccessPathRule) error {
 	enabled := rule.Enabled
 	if err := r.db.Create(rule).Error; err != nil {
 		return err
@@ -127,11 +127,11 @@ func (r *AccessControlRepo) CreateAccessPathRule(rule *store.AccessPathRule) err
 }
 
 // UpdateAccessPathRule 更新路径访问控制规则。
-func (r *AccessControlRepo) UpdateAccessPathRule(rule *store.AccessPathRule) error {
+func (r *AccessControlRepo) UpdateAccessPathRule(rule *access.AccessPathRule) error {
 	return r.db.Save(rule).Error
 }
 
 // DeleteAccessPathRule 删除路径访问控制规则。
 func (r *AccessControlRepo) DeleteAccessPathRule(id uint) error {
-	return r.db.Delete(&store.AccessPathRule{}, id).Error
+	return r.db.Delete(&access.AccessPathRule{}, id).Error
 }

@@ -1,7 +1,6 @@
 package dataplane
 
 import (
-	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -9,6 +8,11 @@ import (
 	"net"
 	"reflect"
 	"testing"
+	"time"
+
+	dptlsfp "My-OpenWaf/internal/dataplane/tlsfp"
+	"My-OpenWaf/internal/dataplane/tlsfp/tlsfptest"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 )
 
 /**
@@ -17,14 +21,14 @@ import (
  * http/1.1，而 ALPNRaw 之后仍必须报告 h2。
  */
 func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
-	record := clientHelloRecordForDataplaneTest(t, &tls.Config{
+	record := tlsfptest.BuildClientHelloRecord(t, &tls.Config{
 		ServerName: "example.com",
 		NextProtos: []string{"h2", "http/1.1"},
 	})
 
-	conn := &bytesConnForBenchmark{}
+	conn := &bytesConnForBenchmarkForTest{}
 	conn.Reset(record)
-	wrapped := newTLSFingerprintConn(conn)
+	wrapped := dptlsfp.NewPrefixReadingConn(conn)
 
 	buf := make([]byte, len(record))
 	if _, err := io.ReadFull(wrapped, buf); err != nil {
@@ -43,7 +47,7 @@ func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
 	}
 
 	// 服务端协商出 http/1.1（例如最高 TLS 版本低于 1.2 会剥掉 h2）。
-	setTLSHandshakeInfoOnConn(wrapped, "TLS13", "example.com", "http/1.1")
+	dptlsfp.SetTLSHandshakeInfoOnConn(wrapped, "TLS13", "example.com", "http/1.1")
 
 	after, ok := tlsfp.TLSFingerprintFromConn(wrapped)
 	if !ok {
@@ -68,7 +72,7 @@ func TestPeekConnALPNRawSurvivesNegotiatedH1(t *testing.T) {
  * 豁免包装器：SetTLSHandshakeInfo 仍不得破坏已存在的声明列表。
  */
 func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
-	inner := &bytesConnForBenchmark{}
+	inner := &bytesConnForBenchmarkForTest{}
 	conn := NewFixURIConn(inner).(*FixURIConn)
 	conn.fingerprint = tlsfp.TLSClientFingerprint{
 		TLSVersion: "TLS12",
@@ -77,7 +81,7 @@ func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
 		ALPNRaw:    []string{"h2", "http/1.1"},
 	}
 
-	setTLSHandshakeInfoOnConn(conn, "TLS13", "example.com", "http/1.1")
+	dptlsfp.SetTLSHandshakeInfoOnConn(conn, "TLS13", "example.com", "http/1.1")
 
 	fp, ok := tlsfp.TLSFingerprintFromConn(conn)
 	if !ok {
@@ -99,11 +103,11 @@ func TestFixURIConnALPNRawSurvivesNegotiation(t *testing.T) {
  * 解析之前，只有协商值已知；此时覆写必须把它保留进 ALPNRaw，而不是丢弃。
  */
 func TestFixURIConnALPNRawBackfilledWhenAbsent(t *testing.T) {
-	inner := &bytesConnForBenchmark{}
+	inner := &bytesConnForBenchmarkForTest{}
 	conn := NewFixURIConn(inner).(*FixURIConn)
 	conn.fingerprint = tlsfp.TLSClientFingerprint{TLSVersion: "TLS12", ALPN: []string{"h2"}}
 
-	setTLSHandshakeInfoOnConn(conn, "", "", "h2")
+	dptlsfp.SetTLSHandshakeInfoOnConn(conn, "", "", "h2")
 
 	fp, _ := tlsfp.TLSFingerprintFromConn(conn)
 	if want := []string{"h2"}; !reflect.DeepEqual(fp.ALPNRaw, want) {
@@ -142,4 +146,21 @@ func TestContextWithTLSHandshakeInfoKeepsALPNRaw(t *testing.T) {
 }
 
 // fakeBytesConnForALPNTest 让辅助声明保持可读。
-var _ net.Conn = (*bytesConnForBenchmark)(nil)
+var _ net.Conn = (*bytesConnForBenchmarkForTest)(nil)
+
+// bytesConnForBenchmarkForTest 是可重置的内存 net.Conn，供本文件回放 ClientHello 记录。
+type bytesConnForBenchmarkForTest struct {
+	bytes.Reader
+}
+
+func (c *bytesConnForBenchmarkForTest) Write(p []byte) (int, error) { return len(p), nil }
+func (c *bytesConnForBenchmarkForTest) Close() error                { return nil }
+func (c *bytesConnForBenchmarkForTest) LocalAddr() net.Addr         { return nil }
+func (c *bytesConnForBenchmarkForTest) RemoteAddr() net.Addr        { return nil }
+func (c *bytesConnForBenchmarkForTest) SetDeadline(time.Time) error { return nil }
+func (c *bytesConnForBenchmarkForTest) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (c *bytesConnForBenchmarkForTest) SetWriteDeadline(time.Time) error {
+	return nil
+}

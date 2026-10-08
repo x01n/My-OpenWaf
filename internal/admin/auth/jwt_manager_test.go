@@ -12,7 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/auth"
 )
 
 /**
@@ -26,7 +26,7 @@ func newAuthTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.TokenBlacklist{}, &store.ActiveSession{}); err != nil {
+	if err := db.AutoMigrate(&auth.TokenBlacklist{}, &auth.ActiveSession{}); err != nil {
 		t.Fatalf("migrate auth tables: %v", err)
 	}
 	return db
@@ -389,7 +389,7 @@ func TestBlacklistTokenPersistsToDB(t *testing.T) {
 	exp := time.Now().Add(time.Hour)
 	tm.BlacklistToken("persisted-jti", exp, "manual-revoke")
 
-	var row store.TokenBlacklist
+	var row auth.TokenBlacklist
 	if err := db.Where("jti = ?", "persisted-jti").First(&row).Error; err != nil {
 		t.Fatalf("黑名单应持久化到数据库: %v", err)
 	}
@@ -417,13 +417,13 @@ func TestBlacklistTokenCheckedIsIdempotent(t *testing.T) {
 	}
 
 	var rows int64
-	if err := db.Model(&store.TokenBlacklist{}).Where("jti = ?", "repeat-jti").Count(&rows).Error; err != nil {
+	if err := db.Model(&auth.TokenBlacklist{}).Where("jti = ?", "repeat-jti").Count(&rows).Error; err != nil {
 		t.Fatalf("count blacklist rows: %v", err)
 	}
 	if rows != 1 {
 		t.Fatalf("blacklist rows = %d, want 1", rows)
 	}
-	var row store.TokenBlacklist
+	var row auth.TokenBlacklist
 	if err := db.Where("jti = ?", "repeat-jti").First(&row).Error; err != nil {
 		t.Fatalf("load repeated blacklist row: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestTokenManagerRetriesBlacklistLoadAfterStoreRecovery(t *testing.T) {
 	if _, err := tm.VerifyAccessToken(token); !errors.Is(err, ErrTokenBlacklistUnavailable) {
 		t.Fatalf("initial VerifyAccessToken error = %v, want unavailable", err)
 	}
-	if err := db.AutoMigrate(&store.TokenBlacklist{}); err != nil {
+	if err := db.AutoMigrate(&auth.TokenBlacklist{}); err != nil {
 		t.Fatalf("recover blacklist table: %v", err)
 	}
 	tm.blacklistRetryAt.Store(0)
@@ -504,7 +504,7 @@ func TestTokenManagerCloseIsIdempotent(t *testing.T) {
 // TestNewTokenManagerLoadsBlacklistFromDB 重启场景：未过期条目应恢复，过期条目不应恢复。
 func TestNewTokenManagerLoadsBlacklistFromDB(t *testing.T) {
 	db := newAuthTestDB(t)
-	if err := db.Create(&store.TokenBlacklist{
+	if err := db.Create(&auth.TokenBlacklist{
 		JTI:       "live-jti",
 		ExpiresAt: time.Now().Add(time.Hour),
 		Reason:    "revoked",
@@ -512,7 +512,7 @@ func TestNewTokenManagerLoadsBlacklistFromDB(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("seed live blacklist row: %v", err)
 	}
-	if err := db.Create(&store.TokenBlacklist{
+	if err := db.Create(&auth.TokenBlacklist{
 		JTI:       "dead-jti",
 		ExpiresAt: time.Now().Add(-time.Hour),
 		Reason:    "revoked",

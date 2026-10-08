@@ -1,7 +1,7 @@
 package repository
 
 import (
-	"My-OpenWaf/internal/store"
+	cvestore "My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/waf/cve"
 	"strings"
 	"sync"
@@ -20,7 +20,7 @@ const (
 // 调用方拿到的是深拷贝，可以安全修改。
 type CVERuleCanonicalSnapshot struct {
 	Rules           []cve.CVERuleModel
-	OverridesByRule map[uint][]store.CVERuleScopeOverride
+	OverridesByRule map[uint][]cvestore.CVERuleScopeOverride
 }
 
 type cveCanonicalSnapshotEntry struct {
@@ -137,7 +137,7 @@ func (r *CVERuleRepo) loadCanonicalSnapshot() (CVERuleCanonicalSnapshot, error) 
 		return CVERuleCanonicalSnapshot{}, err
 	}
 
-	overridesByRule := make(map[uint][]store.CVERuleScopeOverride)
+	overridesByRule := make(map[uint][]cvestore.CVERuleScopeOverride)
 	if len(rules) == 0 {
 		return CVERuleCanonicalSnapshot{Rules: rules, OverridesByRule: overridesByRule}, nil
 	}
@@ -145,7 +145,7 @@ func (r *CVERuleRepo) loadCanonicalSnapshot() (CVERuleCanonicalSnapshot, error) 
 	for i := range rules {
 		ruleIDs = append(ruleIDs, rules[i].ID)
 	}
-	var overrides []store.CVERuleScopeOverride
+	var overrides []cvestore.CVERuleScopeOverride
 	if err := r.db.Where("rule_id IN ?", ruleIDs).Find(&overrides).Error; err != nil {
 		return CVERuleCanonicalSnapshot{}, err
 	}
@@ -159,10 +159,10 @@ func (r *CVERuleRepo) loadCanonicalSnapshot() (CVERuleCanonicalSnapshot, error) 
 func cloneCVERuleCanonicalSnapshot(source CVERuleCanonicalSnapshot) CVERuleCanonicalSnapshot {
 	cloned := CVERuleCanonicalSnapshot{
 		Rules:           append([]cve.CVERuleModel(nil), source.Rules...),
-		OverridesByRule: make(map[uint][]store.CVERuleScopeOverride, len(source.OverridesByRule)),
+		OverridesByRule: make(map[uint][]cvestore.CVERuleScopeOverride, len(source.OverridesByRule)),
 	}
 	for ruleID, overrides := range source.OverridesByRule {
-		items := make([]store.CVERuleScopeOverride, len(overrides))
+		items := make([]cvestore.CVERuleScopeOverride, len(overrides))
 		for i := range overrides {
 			items[i] = cloneCVERuleScopeOverride(overrides[i])
 		}
@@ -171,7 +171,7 @@ func cloneCVERuleCanonicalSnapshot(source CVERuleCanonicalSnapshot) CVERuleCanon
 	return cloned
 }
 
-func cloneCVERuleScopeOverride(source store.CVERuleScopeOverride) store.CVERuleScopeOverride {
+func cloneCVERuleScopeOverride(source cvestore.CVERuleScopeOverride) cvestore.CVERuleScopeOverride {
 	cloned := source
 	if source.Enabled != nil {
 		value := *source.Enabled
@@ -265,7 +265,7 @@ func (r *CVERuleRepo) Delete(id uint) error {
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		// 作用域覆盖没有数据库级外键约束；删除自定义规则时必须在同一事务
 		// 中清理覆盖，否则重建同一规则会继续携带已删除规则的旧配置。
-		if err := tx.Where("rule_id = ?", id).Delete(&store.CVERuleScopeOverride{}).Error; err != nil {
+		if err := tx.Where("rule_id = ?", id).Delete(&cvestore.CVERuleScopeOverride{}).Error; err != nil {
 			return err
 		}
 		return tx.Delete(&cve.CVERuleModel{}, id).Error
@@ -300,12 +300,12 @@ func NewCVESyncLogRepo(db *gorm.DB) *CVESyncLogRepo {
 	return &CVESyncLogRepo{db: db}
 }
 
-func (r *CVESyncLogRepo) Create(item *store.CVESyncLog) error {
+func (r *CVESyncLogRepo) Create(item *cvestore.CVESyncLog) error {
 	return r.db.Create(item).Error
 }
 
-func (r *CVESyncLogRepo) Latest(limit int) ([]store.CVESyncLog, error) {
-	var items []store.CVESyncLog
+func (r *CVESyncLogRepo) Latest(limit int) ([]cvestore.CVESyncLog, error) {
+	var items []cvestore.CVESyncLog
 	err := r.db.Order("id DESC").Limit(limit).Find(&items).Error
 	return items, err
 }

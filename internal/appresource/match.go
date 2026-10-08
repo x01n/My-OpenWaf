@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 )
 
 // Match 用编译好的规则对目标串求值。
@@ -15,21 +15,21 @@ func Match(cr CompiledRule, subject string) bool {
 
 func applyOp(op, pattern, value string, re interface{ MatchString(string) bool }) bool {
 	switch op {
-	case store.AppRouteOpEq:
+	case approute.AppRouteOpEq:
 		return value == pattern
-	case store.AppRouteOpNe:
+	case approute.AppRouteOpNe:
 		return value != pattern
-	case store.AppRouteOpContains:
+	case approute.AppRouteOpContains:
 		return strings.Contains(value, pattern)
-	case store.AppRouteOpNotContains:
+	case approute.AppRouteOpNotContains:
 		return !strings.Contains(value, pattern)
-	case store.AppRouteOpPrefix:
+	case approute.AppRouteOpPrefix:
 		return strings.HasPrefix(value, pattern)
-	case store.AppRouteOpSuffix:
+	case approute.AppRouteOpSuffix:
 		return strings.HasSuffix(value, pattern)
-	case store.AppRouteOpFuzzy:
+	case approute.AppRouteOpFuzzy:
 		return strings.Contains(strings.ToLower(value), strings.ToLower(pattern))
-	case store.AppRouteOpRegex:
+	case approute.AppRouteOpRegex:
 		if re == nil {
 			return false
 		}
@@ -45,7 +45,7 @@ func Subject(cr CompiledRule, m *Material, reqHeader func(string) string) string
 		return ""
 	}
 	switch cr.Target {
-	case store.AppRouteTargetRequestHeader:
+	case approute.AppRouteTargetRequestHeader:
 		if cr.HeaderKeyLower != "" {
 			return reqHeader(cr.HeaderKeyLower)
 		}
@@ -53,27 +53,27 @@ func Subject(cr CompiledRule, m *Material, reqHeader func(string) string) string
 			return reqHeader(cr.HeaderKey)
 		}
 		return ""
-	case store.AppRouteTargetRequestBody:
+	case approute.AppRouteTargetRequestBody:
 		return m.RequestBody
-	case store.AppRouteTargetResponseBody:
+	case approute.AppRouteTargetResponseBody:
 		return m.ResponseBody
-	case store.AppRouteTargetRequestHeadersFull:
+	case approute.AppRouteTargetRequestHeadersFull:
 		return m.RequestHeadersFull
-	case store.AppRouteTargetResponseHeadersFull:
+	case approute.AppRouteTargetResponseHeadersFull:
 		return m.ResponseHeadersFull
-	case store.AppRouteTargetFullHTTPRequest:
+	case approute.AppRouteTargetFullHTTPRequest:
 		if m.FullHTTPRequest == "" {
 			m.FullHTTPRequest = m.Method + " " + m.Path + "\n" + m.RequestHeadersFull + "\n\n" + m.RequestBody
 		}
 		return m.FullHTTPRequest
-	case store.AppRouteTargetFullHTTPResponse:
+	case approute.AppRouteTargetFullHTTPResponse:
 		if m.FullHTTPResponse == "" {
 			m.FullHTTPResponse = strconv.Itoa(m.StatusCode) + " " + http.StatusText(m.StatusCode) + "\n" + m.ResponseHeadersFull + "\n\n" + m.ResponseBody
 		}
 		return m.FullHTTPResponse
-	case store.AppRouteTargetRequestMethod:
+	case approute.AppRouteTargetRequestMethod:
 		return m.Method
-	case store.AppRouteTargetFingerprint:
+	case approute.AppRouteTargetFingerprint:
 		if m.Fingerprint == "" && (m.JA3Hash != "" || m.UserAgent != "") {
 			var fp strings.Builder
 			fp.WriteString(m.JA3Hash)

@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"My-OpenWaf/internal/waf/challenge/gm"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // powShardJSVarCount 是装配器脚本中随机变量名的数量：
@@ -60,13 +62,13 @@ type PowShardScript struct {
 // 每片以随机单字节密钥 XOR 并 hex 编码，交给随机变量名的装配器脚本在
 // 客户端拼回、校验后 eval。拼装产物与 GeneratePoWWASMScript 的输出逐字节等价。
 func GeneratePoWShardedScript(difficulty int, nonce string) PowShardScript {
-	body := generatePoWScriptBody(difficulty, nonce)
+	body := pow.GeneratePoWScriptBody(difficulty, nonce)
 	pieces := SplitPowShardBody(body)
 
 	encoded := make([]string, 0, len(pieces))
 	keys := make([]byte, 0, len(pieces))
 	for _, piece := range pieces {
-		key := byte(1 + randIntN(255))
+		key := byte(1 + pow.RandIntN(255))
 		buf := []byte(piece)
 		for i := range buf {
 			buf[i] ^= key
@@ -75,7 +77,7 @@ func GeneratePoWShardedScript(difficulty int, nonce string) PowShardScript {
 		keys = append(keys, key)
 	}
 
-	names := randomVarNames(powShardJSVarCount)
+	names := pow.RandomVarNames(powShardJSVarCount)
 	checksum := fnv1a32(body)
 
 	return PowShardScript{
@@ -92,7 +94,7 @@ func GeneratePoWShardedScript(difficulty int, nonce string) PowShardScript {
 // 因此任意切点均安全，不存在引号或转义问题。拼接结果与输入严格恒等。
 func SplitPowShardBody(body string) []string {
 	length := len(body)
-	k := powShardMinParts + randIntN(powShardMaxParts-powShardMinParts+1)
+	k := powShardMinParts + pow.RandIntN(powShardMaxParts-powShardMinParts+1)
 	if k > length {
 		k = length
 	}
@@ -103,7 +105,7 @@ func SplitPowShardBody(body string) []string {
 	cuts := make([]int, 0, k-1)
 	cutSet := make(map[int]struct{}, k-1)
 	for len(cutSet) < k-1 {
-		pos := 1 + randIntN(length-1)
+		pos := 1 + pow.RandIntN(length-1)
 		// 校正到 rune 边界：多字节 rune 的延续字节位特征为 10xxxxxx，
 		// 向前回退直到 rune 首字节；ASCII 正文内此步不改变 pos。
 		for pos > 0 && pos < length && body[pos]&0xC0 == 0x80 {
@@ -280,13 +282,13 @@ func GeneratePoWShardedEnvelope(difficulty int, nonce string, key []byte) (envel
 	if len(key) != envSessionKeySize {
 		return "", "", fmt.Errorf("owaf: invalid session key length %d", len(key))
 	}
-	body := generatePoWScriptBody(difficulty, nonce)
+	body := pow.GeneratePoWScriptBody(difficulty, nonce)
 	pieces := SplitPowShardBody(body)
 
 	checksum := fnv1a32(body)
 	items := make([]powShardEnvelopeItem, 0, len(pieces))
 	for _, piece := range pieces {
-		xorKey := byte(1 + randIntN(255))
+		xorKey := byte(1 + pow.RandIntN(255))
 		buf := []byte(piece)
 		for i := range buf {
 			buf[i] ^= xorKey
@@ -310,14 +312,14 @@ func GeneratePoWShardedEnvelope(difficulty int, nonce string, key []byte) (envel
 		return "", "", fmt.Errorf("owaf: seal pow shard envelope: %w", err)
 	}
 
-	names := randomVarNames(powShardVMBootstrapVarCount)
+	names := pow.RandomVarNames(powShardVMBootstrapVarCount)
 	bootstrap := fmt.Sprintf(
 		powShardVMBootstrapTemplate,
 		names[0], names[1], names[0], names[2], names[0], names[3],
 		// 槽位 7/8 是引导壳里的两个资产 URL：先 glue、后 wasm，
 		// 顺序与模板出现顺序一致。用内容派生版本串（powdata），
 		// 与 /__owaf/* 的 immutable 缓存配对（见 pow.go 的 ServePoWWASM）。
-		PowGlueURL(), PowWasmURL(),
+		pow.PowGlueURL(), pow.PowWasmURL(),
 		names[4], names[4],
 		names[1], names[2], names[3], names[1], names[2],
 	)

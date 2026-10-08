@@ -1579,10 +1579,11 @@
   },
   "apiKeys": {
     "title": "API Key Management",
-    "description": "Manage keys for accessing the admin API",
+    "description": "Manage API keys, each owned by an administrator account",
     "create": "Create Key",
     "name": "Name",
     "namePlaceholder": "Enter key name",
+    "owner": "Owner",
     "key": "Key",
     "hidden": "Shown only once",
     "createdAt": "Created",
@@ -1594,7 +1595,7 @@
     "deleteConfirm": "Are you sure you want to delete this API key? Programs using this key will lose access.",
     "copyWarning": "Copy this key now. You won't be able to see it again after closing this dialog.",
     "copied": "Copied to clipboard",
-    "adminOnlyHint": "Only administrators can create or delete API keys.",
+    "adminOnlyHint": "Each key belongs to the account that created it; deleting the account revokes its keys immediately.",
     "refreshFailed": "The operation completed, but the key list could not be refreshed. Refresh it manually later."
   },
   "adminUsers": {

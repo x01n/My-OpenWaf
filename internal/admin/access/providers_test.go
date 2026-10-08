@@ -11,7 +11,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/route/param"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 )
 
 // testJWTSecret 用于 provider 测试的 JWT 主密钥。
@@ -76,7 +76,7 @@ func TestListProvidersInvalidSiteIDReturns400(t *testing.T) {
 func TestCreateProviderPasswordType(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
 	body, _ := json.Marshal(map[string]any{
-		"type": store.AccessProviderPassword,
+		"type": access.AccessProviderPassword,
 		"name": "local password",
 	})
 	ctx := invokeProviderHandler(t, CreateProvider(repo, func() error { return nil }, testJWTSecret),
@@ -88,7 +88,7 @@ func TestCreateProviderPasswordType(t *testing.T) {
 	if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Type != store.AccessProviderPassword || !resp.Enabled {
+	if resp.Type != access.AccessProviderPassword || !resp.Enabled {
 		t.Fatalf("unexpected provider: %+v", resp)
 	}
 	if resp.Config != nil {
@@ -108,7 +108,7 @@ func TestCreateProviderRejectsInvalidType(t *testing.T) {
 
 func TestCreateProviderRejectsEmptyName(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
-	body, _ := json.Marshal(map[string]any{"type": store.AccessProviderPassword, "name": "   "})
+	body, _ := json.Marshal(map[string]any{"type": access.AccessProviderPassword, "name": "   "})
 	ctx := invokeProviderHandler(t, CreateProvider(repo, func() error { return nil }, testJWTSecret),
 		"POST", "1", "", body)
 	if ctx.Response.StatusCode() != 400 {
@@ -118,7 +118,7 @@ func TestCreateProviderRejectsEmptyName(t *testing.T) {
 
 func TestCreateProviderOAuth2RequiresConfig(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
-	body, _ := json.Marshal(map[string]any{"type": store.AccessProviderOAuth2, "name": "github"})
+	body, _ := json.Marshal(map[string]any{"type": access.AccessProviderOAuth2, "name": "github"})
 	ctx := invokeProviderHandler(t, CreateProvider(repo, func() error { return nil }, testJWTSecret),
 		"POST", "1", "", body)
 	if ctx.Response.StatusCode() != 400 {
@@ -129,7 +129,7 @@ func TestCreateProviderOAuth2RequiresConfig(t *testing.T) {
 func TestCreateProviderOAuth2RequiresClientID(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
 	body, _ := json.Marshal(map[string]any{
-		"type":   store.AccessProviderOAuth2,
+		"type":   access.AccessProviderOAuth2,
 		"name":   "github",
 		"config": map[string]any{"client_secret": "s3cr3t"},
 	})
@@ -143,7 +143,7 @@ func TestCreateProviderOAuth2RequiresClientID(t *testing.T) {
 func TestCreateProviderOAuth2EncryptsAndMasksSecret(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
 	body, _ := json.Marshal(map[string]any{
-		"type": store.AccessProviderOAuth2,
+		"type": access.AccessProviderOAuth2,
 		"name": "github",
 		"config": map[string]any{
 			"client_id":     "gh-client-id",
@@ -185,7 +185,7 @@ func TestCreateProviderOAuth2EncryptsAndMasksSecret(t *testing.T) {
 	if err != nil || len(providers) != 1 {
 		t.Fatalf("list providers: err=%v len=%d", err, len(providers))
 	}
-	var stored store.OAuthProviderConfig
+	var stored access.OAuthProviderConfig
 	if err := json.Unmarshal([]byte(providers[0].Config), &stored); err != nil {
 		t.Fatalf("decode stored config: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestCreateProviderOAuth2EncryptsAndMasksSecret(t *testing.T) {
 func TestCreateProviderHonorsExplicitDisabled(t *testing.T) {
 	repo := newAccessControlRepoForTest(t)
 	body, _ := json.Marshal(map[string]any{
-		"type":    store.AccessProviderPassword,
+		"type":    access.AccessProviderPassword,
 		"name":    "disabled provider",
 		"enabled": false,
 	})
@@ -235,21 +235,21 @@ func TestCreateProviderHonorsExplicitDisabled(t *testing.T) {
 
 // seedOAuthProvider 创建一条 oauth2 提供方并返回其 ID 字符串。
 func seedOAuthProvider(t *testing.T, repo interface {
-	CreateAccessProvider(*store.AccessProvider) error
+	CreateAccessProvider(*access.AccessProvider) error
 }, siteID uint, secret string) string {
 	t.Helper()
 	enc, err := encryptClientSecret(testJWTSecret, secret)
 	if err != nil {
 		t.Fatalf("encrypt seed secret: %v", err)
 	}
-	cfg, _ := json.Marshal(store.OAuthProviderConfig{
+	cfg, _ := json.Marshal(access.OAuthProviderConfig{
 		ClientID:     "seed-client-id",
 		ClientSecret: enc,
 		AuthURL:      "https://example.com/authorize",
 	})
-	p := &store.AccessProvider{
+	p := &access.AccessProvider{
 		SiteID:   siteID,
-		Type:     store.AccessProviderOAuth2,
+		Type:     access.AccessProviderOAuth2,
 		Name:     "seeded",
 		Priority: 1,
 		Enabled:  true,
@@ -330,7 +330,7 @@ func TestUpdateProviderEmptyClientSecretPreservesStoredSecret(t *testing.T) {
 	if err != nil || len(providers) != 1 {
 		t.Fatalf("list providers: err=%v len=%d", err, len(providers))
 	}
-	var stored store.OAuthProviderConfig
+	var stored access.OAuthProviderConfig
 	if err := json.Unmarshal([]byte(providers[0].Config), &stored); err != nil {
 		t.Fatalf("decode stored config: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestUpdateProviderNewClientSecretReplacesStored(t *testing.T) {
 	}
 
 	providers, _ := repo.ListAccessProviders(1)
-	var stored store.OAuthProviderConfig
+	var stored access.OAuthProviderConfig
 	if err := json.Unmarshal([]byte(providers[0].Config), &stored); err != nil {
 		t.Fatalf("decode stored config: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestPreviousClientSecret(t *testing.T) {
 	if got := previousClientSecret("not-json"); got != "" {
 		t.Errorf("malformed json: got %q, want empty", got)
 	}
-	cfg, _ := json.Marshal(store.OAuthProviderConfig{ClientID: "id", ClientSecret: "cipher-text"})
+	cfg, _ := json.Marshal(access.OAuthProviderConfig{ClientID: "id", ClientSecret: "cipher-text"})
 	if got := previousClientSecret(string(cfg)); got != "cipher-text" {
 		t.Errorf("valid json: got %q, want cipher-text", got)
 	}

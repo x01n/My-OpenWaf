@@ -9,16 +9,16 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/utils"
 )
 
 // validProviderTypes 认证提供方允许的类型集合。
 var validProviderTypes = map[string]bool{
-	store.AccessProviderPassword: true,
-	store.AccessProviderOAuth2:   true,
-	store.AccessProviderOIDC:     true,
+	access.AccessProviderPassword: true,
+	access.AccessProviderOAuth2:   true,
+	access.AccessProviderOIDC:     true,
 }
 
 // CreateProviderReq 创建认证提供方的请求体。
@@ -73,7 +73,7 @@ type maskedOAuthResp struct {
  * @param jwtSecret JWT 主密钥，用于解密后再遮蔽 client_secret。
  * @return 脱敏后的响应体。
  */
-func newProviderResp(p *store.AccessProvider, jwtSecret []byte) providerResp {
+func newProviderResp(p *access.AccessProvider, jwtSecret []byte) providerResp {
 	resp := providerResp{
 		ID:        p.ID,
 		SiteID:    p.SiteID,
@@ -87,7 +87,7 @@ func newProviderResp(p *store.AccessProvider, jwtSecret []byte) providerResp {
 	if p.Config == "" {
 		return resp
 	}
-	var cfg store.OAuthProviderConfig
+	var cfg access.OAuthProviderConfig
 	if json.Unmarshal([]byte(p.Config), &cfg) != nil {
 		return resp
 	}
@@ -117,7 +117,7 @@ func newProviderResp(p *store.AccessProvider, jwtSecret []byte) providerResp {
  * @return 加密后的配置 JSON。
  */
 func encodeProviderConfig(raw json.RawMessage, jwtSecret []byte, prevJSON string) (string, error) {
-	var cfg store.OAuthProviderConfig
+	var cfg access.OAuthProviderConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return "", errors.New("invalid oauth config")
 	}
@@ -153,7 +153,7 @@ func previousClientSecret(prevJSON string) string {
 	if prevJSON == "" {
 		return ""
 	}
-	var prev store.OAuthProviderConfig
+	var prev access.OAuthProviderConfig
 	if json.Unmarshal([]byte(prevJSON), &prev) != nil {
 		return ""
 	}
@@ -216,7 +216,7 @@ func CreateProvider(repo *repository.AccessControlRepo, reload func() error, jwt
 			c.JSON(400, map[string]string{"error": "name is required"})
 			return
 		}
-		provider := &store.AccessProvider{
+		provider := &access.AccessProvider{
 			SiteID:   siteID,
 			Type:     req.Type,
 			Name:     req.Name,
@@ -226,7 +226,7 @@ func CreateProvider(repo *repository.AccessControlRepo, reload func() error, jwt
 		if req.Enabled != nil {
 			provider.Enabled = *req.Enabled
 		}
-		if req.Type != store.AccessProviderPassword {
+		if req.Type != access.AccessProviderPassword {
 			if len(req.Config) == 0 {
 				c.JSON(400, map[string]string{"error": "config is required for oauth/oidc provider"})
 				return
@@ -294,7 +294,7 @@ func UpdateProvider(repo *repository.AccessControlRepo, reload func() error, jwt
 		if req.Enabled != nil {
 			provider.Enabled = *req.Enabled
 		}
-		if len(req.Config) > 0 && provider.Type != store.AccessProviderPassword {
+		if len(req.Config) > 0 && provider.Type != access.AccessProviderPassword {
 			cfgJSON, cerr := encodeProviderConfig(req.Config, jwtSecret, provider.Config)
 			if cerr != nil {
 				c.JSON(400, map[string]string{"error": cerr.Error()})
@@ -357,7 +357,7 @@ func DeleteProvider(repo *repository.AccessControlRepo, reload func() error) app
  * @param providerID 提供方 ID。
  * @return 命中的提供方；未找到或不属于该站点时返回错误。
  */
-func findSiteProvider(repo *repository.AccessControlRepo, siteID, providerID uint) (*store.AccessProvider, error) {
+func findSiteProvider(repo *repository.AccessControlRepo, siteID, providerID uint) (*access.AccessProvider, error) {
 	providers, err := repo.ListAccessProviders(siteID)
 	if err != nil {
 		return nil, err

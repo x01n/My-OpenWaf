@@ -17,8 +17,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/iplist"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/store/threatintel"
 )
 
 const (
@@ -73,7 +74,7 @@ func NewManager(db *gorm.DB, log *slog.Logger, reload func() error) *Manager {
 
 // Start 完成建表并启动后台轮询循环。非阻塞。
 func (m *Manager) Start() {
-	if err := m.db.AutoMigrate(&store.ThreatIntelFeed{}); err != nil {
+	if err := m.db.AutoMigrate(&threatintel.ThreatIntelFeed{}); err != nil {
 		m.log.Error("threatintel: 迁移 threat_intel_feeds 表失败", slog.String("error", err.Error()))
 		return
 	}
@@ -132,7 +133,7 @@ func (m *Manager) syncDueFeeds() {
 }
 
 // isDue 判断某订阅源是否已到达下次同步时间。
-func (m *Manager) isDue(f store.ThreatIntelFeed, now time.Time) bool {
+func (m *Manager) isDue(f threatintel.ThreatIntelFeed, now time.Time) bool {
 	interval := time.Duration(f.SyncInterval) * time.Second
 	if interval <= 0 {
 		interval = time.Hour
@@ -203,12 +204,12 @@ func (m *Manager) syncFeedInternal(feedID uint, trigger string) error {
 }
 
 // writeSyncLog 写入一条同步历史记录（失败不阻塞主流程，仅记警告日志）。
-func (m *Manager) writeSyncLog(feed *store.ThreatIntelFeed, trigger string, started time.Time, entries int, success bool, errMsg string) {
+func (m *Manager) writeSyncLog(feed *threatintel.ThreatIntelFeed, trigger string, started time.Time, entries int, success bool, errMsg string) {
 	if m.logRepo == nil {
 		return
 	}
 	finished := time.Now()
-	rec := &store.ThreatIntelSyncLog{
+	rec := &threatintel.ThreatIntelSyncLog{
 		FeedID:       feed.ID,
 		FeedName:     feed.Name,
 		StartedAt:    started,
@@ -225,7 +226,7 @@ func (m *Manager) writeSyncLog(feed *store.ThreatIntelFeed, trigger string, star
 }
 
 // fetchAndParse 拉取订阅源响应并解析为 IP 条目。
-func (m *Manager) fetchAndParse(feed *store.ThreatIntelFeed) ([]store.IPListEntry, error) {
+func (m *Manager) fetchAndParse(feed *threatintel.ThreatIntelFeed) ([]iplist.IPListEntry, error) {
 	req, err := http.NewRequest(http.MethodGet, feed.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("构建请求: %w", err)
@@ -323,7 +324,7 @@ func decompressBody(data []byte, encoding string) ([]byte, error) {
 }
 
 // recordResult 回写单次同步结果（时间、条目数、错误信息）。
-func (m *Manager) recordResult(feed *store.ThreatIntelFeed, count int, errMsg string) {
+func (m *Manager) recordResult(feed *threatintel.ThreatIntelFeed, count int, errMsg string) {
 	now := time.Now()
 	feed.LastSyncAt = &now
 	feed.LastError = truncate(errMsg, 500)
@@ -342,10 +343,10 @@ func (m *Manager) recordResult(feed *store.ThreatIntelFeed, count int, errMsg st
  * 每个合法条目继承 feed 的 Kind/Action/SiteID，并标记 FeedID 与来源备注。
  * 同一正文内的重复值会被去重。
  */
-func parseEntries(body []byte, feed *store.ThreatIntelFeed) []store.IPListEntry {
+func parseEntries(body []byte, feed *threatintel.ThreatIntelFeed) []iplist.IPListEntry {
 	note := "来自订阅: " + feed.Name
 	seen := make(map[string]struct{})
-	var entries []store.IPListEntry
+	var entries []iplist.IPListEntry
 
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -375,8 +376,8 @@ func parseEntries(body []byte, feed *store.ThreatIntelFeed) []store.IPListEntry 
 		seen[line] = struct{}{}
 
 		fid := feed.ID
-		entries = append(entries, store.IPListEntry{
-			Kind:    store.IPListKind(feed.Kind),
+		entries = append(entries, iplist.IPListEntry{
+			Kind:    iplist.IPListKind(feed.Kind),
 			Value:   line,
 			Note:    note,
 			Enabled: true,

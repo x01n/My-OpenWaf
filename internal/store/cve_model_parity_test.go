@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	cvestore "My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/waf/cve"
 )
 
@@ -20,7 +21,7 @@ import (
 //
 // 因此两个结构体的字段集必须逐名一致；本测试是这条约束的可执行载体。
 func TestCVERuleModelsShareColumnSet(t *testing.T) {
-	recordFields := structFieldNames(reflect.TypeOf(CVERuleRecord{}))
+	recordFields := structFieldNames(reflect.TypeOf(cvestore.CVERuleRecord{}))
 	modelFields := structFieldNames(reflect.TypeOf(cve.CVERuleModel{}))
 
 	for name := range modelFields {
@@ -36,7 +37,7 @@ func TestCVERuleModelsShareColumnSet(t *testing.T) {
 		}
 	}
 
-	if got := (CVERuleRecord{}).TableName(); got != (cve.CVERuleModel{}).TableName() {
+	if got := (cvestore.CVERuleRecord{}).TableName(); got != (cve.CVERuleModel{}).TableName() {
 		t.Fatalf("两模型的表名不一致：CVERuleRecord=%q CVERuleModel=%q", got, (cve.CVERuleModel{}).TableName())
 	}
 }

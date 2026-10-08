@@ -9,7 +9,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	luapluginstore "My-OpenWaf/internal/store/luaplugin"
 	"My-OpenWaf/internal/waf/luaplugin"
 )
 
@@ -79,7 +79,7 @@ func (k *luaSnapshotValidationKV) IncrContext(_ context.Context, key string, ttl
 	return k.Incr(key, ttl)
 }
 
-func validateLuaSnapshotScript(ctx context.Context, script *luaplugin.Script, row *store.LuaPlugin) error {
+func validateLuaSnapshotScript(ctx context.Context, script *luaplugin.Script, row *luapluginstore.LuaPlugin) error {
 	if script == nil || row == nil {
 		return nil
 	}
@@ -117,10 +117,10 @@ func validateLuaSnapshotScript(ctx context.Context, script *luaplugin.Script, ro
  * @return 已编译脚本、按脚本名索引的编译错误、数据库查询错误。单个脚本编译错误仍记录在 errors 映射中。
  */
 func loadLuaPlugins(db *gorm.DB) ([]*luaplugin.Script, map[string]string, error) {
-	if !db.Migrator().HasTable(&store.LuaPlugin{}) {
+	if !db.Migrator().HasTable(&luapluginstore.LuaPlugin{}) {
 		return nil, nil, nil
 	}
-	var rows []store.LuaPlugin
+	var rows []luapluginstore.LuaPlugin
 	// 排序决定同阶段内的执行顺序，priority 相同时按 id 兜底以保证稳定。
 	if err := db.Where("enabled = ?", true).
 		Order("stage ASC, priority ASC, id ASC").

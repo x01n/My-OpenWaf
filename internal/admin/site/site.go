@@ -14,6 +14,7 @@ import (
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/repository"
+	"My-OpenWaf/internal/store/upstream"
 	"My-OpenWaf/internal/tlsmeta"
 	"My-OpenWaf/internal/utils"
 	dynamicpkg "My-OpenWaf/internal/waf/dynamic"
@@ -46,10 +47,10 @@ func validateSiteUpstreamMTLS(item *store.Site) error {
 	if item.UpstreamTLSClientKeyPEM != nil {
 		keyPEM = *item.UpstreamTLSClientKeyPEM
 	}
-	if _, _, _, _, _, exceeded, err := store.NormalizeSiteUpstreamMTLS(certPEM, keyPEM); exceeded {
+	if _, _, _, _, _, exceeded, err := upstream.NormalizeSiteUpstreamMTLS(certPEM, keyPEM); exceeded {
 		return errors.New("upstream_tls_client_cert_pem/upstream_tls_client_key_pem exceeds the 256 KiB limit")
 	} else if err != nil {
-		if errors.Is(err, store.ErrSiteUpstreamMTLSUnpaired) {
+		if errors.Is(err, upstream.ErrSiteUpstreamMTLSUnpaired) {
 			return errInvalidSiteUpstreamCert
 		}
 		return errors.New("invalid upstream_tls_client_cert_pem/upstream_tls_client_key_pem pair: " + err.Error())

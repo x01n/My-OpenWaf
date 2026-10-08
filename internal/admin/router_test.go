@@ -206,7 +206,7 @@ func TestRouterReadonlyConvergenceGroupGates(t *testing.T) {
 		`readGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))`,
 		`readGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))`,
 		`readGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))`,
-		`readGroup.POST("/certificates/parse", system.ParseCertificate(r.Site))`,
+		`readGroup.POST("/certificates/parse", certificate.ParseCertificate(r.Site))`,
 	} {
 		if !bytes.Contains(readBlock, []byte(line)) {
 			t.Errorf("readGroup 缺少注册: %s", line)

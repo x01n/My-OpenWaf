@@ -16,6 +16,10 @@ import (
 
 	"My-OpenWaf/internal/acme"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
+	"My-OpenWaf/internal/store/iplist"
+	"My-OpenWaf/internal/store/luaplugin"
+	"My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/dynamic"
 )
@@ -981,12 +985,12 @@ func TestLoadLuaPluginsKeepsCompileErrorsNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.LuaPlugin{}); err != nil {
+	if err := db.AutoMigrate(&luaplugin.LuaPlugin{}); err != nil {
 		t.Fatalf("migrate lua plugins: %v", err)
 	}
-	if err := db.Create(&store.LuaPlugin{
+	if err := db.Create(&luaplugin.LuaPlugin{
 		Name:    "broken",
-		Stage:   store.LuaStagePre,
+		Stage:   luaplugin.LuaStagePre,
 		Source:  "function handle(ctx) local",
 		Enabled: true,
 	}).Error; err != nil {
@@ -1006,12 +1010,12 @@ func TestLoadLuaPluginsRejectsRuntimeContractErrorsBeforePublishing(t *testing.T
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.LuaPlugin{}); err != nil {
+	if err := db.AutoMigrate(&luaplugin.LuaPlugin{}); err != nil {
 		t.Fatalf("migrate lua plugins: %v", err)
 	}
-	if err := db.Create(&store.LuaPlugin{
+	if err := db.Create(&luaplugin.LuaPlugin{
 		Name:    "invalid-kv-ttl",
-		Stage:   store.LuaStagePre,
+		Stage:   luaplugin.LuaStagePre,
 		Source:  `function handle(ctx) ctx.kv.incr("validation", 600000000) end`,
 		Enabled: true,
 	}).Error; err != nil {
@@ -1082,12 +1086,12 @@ func TestLoadPolicyOWASPConfigsReportsInvalidWhitelistDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.PolicyOWASPRuleConfig{}); err != nil {
+	if err := db.AutoMigrate(&owasp.PolicyOWASPRuleConfig{}); err != nil {
 		t.Fatalf("migrate OWASP config: %v", err)
 	}
 	badWhitelist := `["/safe",`
 	goodWhitelist := `["/admin"]`
-	if err := db.Create([]store.PolicyOWASPRuleConfig{
+	if err := db.Create([]owasp.PolicyOWASPRuleConfig{
 		{PolicyID: 1, RuleID: "owasp:test:invalid", Whitelist: &badWhitelist},
 		{PolicyID: 1, RuleID: "owasp:test:valid", Whitelist: &goodWhitelist},
 	}).Error; err != nil {
@@ -1122,17 +1126,17 @@ func TestLoadSiteIPListsReportsInvalidEntryDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.IPListEntry{}); err != nil {
+	if err := db.AutoMigrate(&iplist.IPListEntry{}); err != nil {
 		t.Fatalf("migrate IP list: %v", err)
 	}
 	siteID := uint(7)
-	entries := []store.IPListEntry{
-		{Kind: store.IPListBlack, Value: "   ", Note: "empty-global-secret-note", Enabled: true, Action: "intercept"},
-		{Kind: store.IPListBlack, Value: "global-sensitive-invalid-value", Note: "invalid-global-secret-note", Enabled: true, Action: "intercept"},
-		{Kind: store.IPListWhite, Value: "192.0.2.10", Note: "valid-global", Enabled: true, Action: "intercept"},
-		{Kind: store.IPListBlack, Value: "\t", Note: "empty-site-secret-note", Enabled: true, Action: "intercept", SiteID: &siteID},
-		{Kind: store.IPListBlack, Value: "site-sensitive-invalid-value", Note: "invalid-site-secret-note", Enabled: true, Action: "intercept", SiteID: &siteID},
-		{Kind: store.IPListWhite, Value: "198.51.100.0/24", Note: "valid-site", Enabled: true, Action: "intercept", SiteID: &siteID},
+	entries := []iplist.IPListEntry{
+		{Kind: iplist.IPListBlack, Value: "   ", Note: "empty-global-secret-note", Enabled: true, Action: "intercept"},
+		{Kind: iplist.IPListBlack, Value: "global-sensitive-invalid-value", Note: "invalid-global-secret-note", Enabled: true, Action: "intercept"},
+		{Kind: iplist.IPListWhite, Value: "192.0.2.10", Note: "valid-global", Enabled: true, Action: "intercept"},
+		{Kind: iplist.IPListBlack, Value: "\t", Note: "empty-site-secret-note", Enabled: true, Action: "intercept", SiteID: &siteID},
+		{Kind: iplist.IPListBlack, Value: "site-sensitive-invalid-value", Note: "invalid-site-secret-note", Enabled: true, Action: "intercept", SiteID: &siteID},
+		{Kind: iplist.IPListWhite, Value: "198.51.100.0/24", Note: "valid-site", Enabled: true, Action: "intercept", SiteID: &siteID},
 	}
 	if err := db.Create(&entries).Error; err != nil {
 		t.Fatalf("seed IP list: %v", err)
@@ -1449,20 +1453,20 @@ func TestBuildCopiesSiteChallengePolicyOverrides(t *testing.T) {
 
 func TestBuildPublishesConfigDiagnostics(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
-	if err := db.AutoMigrate(&store.PolicyOWASPRuleConfig{}, &store.IPListEntry{}); err != nil {
+	if err := db.AutoMigrate(&owasp.PolicyOWASPRuleConfig{}, &iplist.IPListEntry{}); err != nil {
 		t.Fatalf("migrate diagnostic tables: %v", err)
 	}
 	badWhitelist := `["/sensitive",`
 	invalidIP := "build-sensitive-invalid-value"
-	if err := db.Create(&store.PolicyOWASPRuleConfig{
+	if err := db.Create(&owasp.PolicyOWASPRuleConfig{
 		PolicyID:  1,
 		RuleID:    "owasp:test:build",
 		Whitelist: &badWhitelist,
 	}).Error; err != nil {
 		t.Fatalf("seed OWASP config: %v", err)
 	}
-	if err := db.Create(&store.IPListEntry{
-		Kind:    store.IPListBlack,
+	if err := db.Create(&iplist.IPListEntry{
+		Kind:    iplist.IPListBlack,
 		Value:   invalidIP,
 		Enabled: true,
 		Action:  "intercept",
@@ -1500,7 +1504,7 @@ func newSnapshotBuildDBForTest(t *testing.T) (*gorm.DB, *repository.ApplicationR
 		&store.Certificate{},
 		&store.Policy{},
 		&store.Rule{},
-		&store.ApplicationRouteRule{},
+		&approute.ApplicationRouteRule{},
 		&store.SystemSettings{},
 	); err != nil {
 		t.Fatalf("migrate snapshot build tables: %v", err)
@@ -1677,25 +1681,25 @@ func TestBuildExcludesDisabledApplicationRouteRules(t *testing.T) {
 		t.Fatalf("seed site: %v", err)
 	}
 
-	enabledRule := &store.ApplicationRouteRule{
+	enabledRule := &approute.ApplicationRouteRule{
 		SiteID:   site.ID,
 		Name:     "enabled get",
 		Enabled:  true,
 		Priority: 10,
-		Target:   store.AppRouteTargetRequestMethod,
-		Op:       store.AppRouteOpEq,
+		Target:   approute.AppRouteTargetRequestMethod,
+		Op:       approute.AppRouteOpEq,
 		Pattern:  "GET",
 	}
 	if err := appRouteRepo.Create(enabledRule); err != nil {
 		t.Fatalf("seed enabled rule: %v", err)
 	}
-	disabledRule := &store.ApplicationRouteRule{
+	disabledRule := &approute.ApplicationRouteRule{
 		SiteID:   site.ID,
 		Name:     "disabled post",
 		Enabled:  false,
 		Priority: 20,
-		Target:   store.AppRouteTargetRequestMethod,
-		Op:       store.AppRouteOpEq,
+		Target:   approute.AppRouteTargetRequestMethod,
+		Op:       approute.AppRouteOpEq,
 		Pattern:  "POST",
 	}
 	if err := appRouteRepo.Create(disabledRule); err != nil {
@@ -2008,13 +2012,23 @@ func TestBuildDefaultsResponseCompressionSettingsWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
-	// 设置行缺失时 loadBoolSetting 返回 false，
-	// 因此没有显式 DB 行时两个压缩开关都默认 false。
-	if sn.ResponseCompressionEnabled {
-		t.Fatalf("snapshot ResponseCompressionEnabled = %v, want false (loadBoolSetting default)", sn.ResponseCompressionEnabled)
+	// 行为的有意变更：设置行缺失时 settingBoolDefault 回退到「开」，
+	// 因此没有显式 DB 行时四个编码开关（含 brotli）都是 true。
+	// 用户裁定「支持全部都开启」，显式写 "false" 仍可关闭（见上一个用例）。
+	if !sn.ResponseCompressionEnabled {
+		t.Fatalf("snapshot ResponseCompressionEnabled = %v, want true (settingBoolDefault)", sn.ResponseCompressionEnabled)
 	}
-	if sn.ResponseCompressionGzipEnabled {
-		t.Fatalf("snapshot ResponseCompressionGzipEnabled = %v, want false (loadBoolSetting default)", sn.ResponseCompressionGzipEnabled)
+	if !sn.ResponseCompressionGzipEnabled {
+		t.Fatalf("snapshot ResponseCompressionGzipEnabled = %v, want true (settingBoolDefault)", sn.ResponseCompressionGzipEnabled)
+	}
+	if !sn.ResponseCompressionDeflateEnabled {
+		t.Fatalf("snapshot ResponseCompressionDeflateEnabled = %v, want true (settingBoolDefault)", sn.ResponseCompressionDeflateEnabled)
+	}
+	if !sn.ResponseCompressionZstdEnabled {
+		t.Fatalf("snapshot ResponseCompressionZstdEnabled = %v, want true (settingBoolDefault)", sn.ResponseCompressionZstdEnabled)
+	}
+	if !sn.BrotliEnabled {
+		t.Fatalf("snapshot BrotliEnabled = %v, want true (settingBoolDefault)", sn.BrotliEnabled)
 	}
 	if sn.ResponseCompressionMinBytes != DefaultResponseCompressionMinBytes {
 		t.Fatalf("snapshot ResponseCompressionMinBytes = %d, want %d", sn.ResponseCompressionMinBytes, DefaultResponseCompressionMinBytes)
@@ -2084,15 +2098,17 @@ func TestBuildDefaultsHTTP2ConfigWhenSettingMissing(t *testing.T) {
 	}
 }
 
-func TestBuildDefaultsBrotliDisabledWhenSettingMissing(t *testing.T) {
+func TestBuildDefaultsBrotliEnabledWhenSettingMissing(t *testing.T) {
 	db, _ := newSnapshotBuildDBForTest(t)
 
 	sn, err := Build(db, 1, testDynamicKeyBase)
 	if err != nil {
 		t.Fatalf("build snapshot: %v", err)
 	}
-	if sn.BrotliEnabled {
-		t.Fatal("snapshot BrotliEnabled should default to false when setting is missing")
+	// 行为的有意变更：brotli_enabled 缺行时按「开」装载，
+	// 与 TestBuildLoadsBrotliEnabledFromSystemSettings 里的显式 "false" 关闭互为对照。
+	if !sn.BrotliEnabled {
+		t.Fatal("snapshot BrotliEnabled should default to true when setting is missing")
 	}
 }
 

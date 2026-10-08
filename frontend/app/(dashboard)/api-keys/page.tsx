@@ -107,6 +107,15 @@ export default function ApiKeysPage() {
       ),
     },
     {
+      key: "owner",
+      title: t("apiKeys.owner"),
+      render: (row: AdminAPIKey) => (
+        <span className="text-sm text-muted-foreground">
+          {row.username || "-"}
+        </span>
+      ),
+    },
+    {
       key: "key_preview",
       title: t("apiKeys.key"),
       render: () => (

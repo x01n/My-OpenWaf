@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"My-OpenWaf/internal/store/approute"
+
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
@@ -246,24 +248,24 @@ func TestAutoMigrateExpandsRecordedResourceKeyWithQueryString(t *testing.T) {
 		t.Fatalf("auto migrate: %v", err)
 	}
 
-	if !db.Migrator().HasColumn(&RecordedResource{}, "QueryString") {
+	if !db.Migrator().HasColumn(&approute.RecordedResource{}, "QueryString") {
 		t.Fatal("recorded_resources.query_string column should exist after migration")
 	}
-	if !db.Migrator().HasColumn(&RecordedResource{}, "TLSVersion") {
+	if !db.Migrator().HasColumn(&approute.RecordedResource{}, "TLSVersion") {
 		t.Fatal("recorded_resources.tls_version column should exist after migration")
 	}
-	if !db.Migrator().HasColumn(&RecordedResource{}, "TLSSNI") {
+	if !db.Migrator().HasColumn(&approute.RecordedResource{}, "TLSSNI") {
 		t.Fatal("recorded_resources.tls_sni column should exist after migration")
 	}
-	if !db.Migrator().HasColumn(&RecordedResource{}, "TLSALPN") {
+	if !db.Migrator().HasColumn(&approute.RecordedResource{}, "TLSALPN") {
 		t.Fatal("recorded_resources.tls_alpn column should exist after migration")
 	}
-	if !db.Migrator().HasColumn(&RecordedResource{}, "JA4") {
+	if !db.Migrator().HasColumn(&approute.RecordedResource{}, "JA4") {
 		t.Fatal("recorded_resources.ja4 column should exist after migration")
 	}
 
 	now := time.Now().UTC()
-	rows := []RecordedResource{
+	rows := []approute.RecordedResource{
 		{
 			SiteID:      1,
 			Method:      "GET",
@@ -300,7 +302,7 @@ func TestAutoMigrateExpandsRecordedResourceKeyWithQueryString(t *testing.T) {
 	}
 
 	var total int64
-	if err := db.Model(&RecordedResource{}).Count(&total).Error; err != nil {
+	if err := db.Model(&approute.RecordedResource{}).Count(&total).Error; err != nil {
 		t.Fatalf("count recorded resources: %v", err)
 	}
 	if total != 2 {

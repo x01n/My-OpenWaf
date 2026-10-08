@@ -3,7 +3,16 @@ package store
 import (
 	"fmt"
 
+	"My-OpenWaf/internal/store/access"
+	"My-OpenWaf/internal/store/approute"
+	"My-OpenWaf/internal/store/auth"
+	"My-OpenWaf/internal/store/cve"
+	"My-OpenWaf/internal/store/falsepositive"
+	"My-OpenWaf/internal/store/iplist"
+	"My-OpenWaf/internal/store/luaplugin"
 	"My-OpenWaf/internal/store/migrations"
+	"My-OpenWaf/internal/store/owasp"
+	"My-OpenWaf/internal/store/threatintel"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -47,35 +56,35 @@ func AutoMigrate(db *gorm.DB) error {
 		&Site{},
 		&SiteListener{},
 		&SystemSettings{},
-		&AdminAPIKey{},
+		&auth.AdminAPIKey{},
 		&ConfigRevision{},
-		&AdminAccount{},
-		&RefreshToken{},
+		&auth.AdminAccount{},
+		&auth.RefreshToken{},
 
-		&IPListEntry{},
-		&TokenBlacklist{},
-		&LoginAttempt{},
-		&ActiveSession{},
+		&iplist.IPListEntry{},
+		&auth.TokenBlacklist{},
+		&auth.LoginAttempt{},
+		&auth.ActiveSession{},
 
-		&OWASPRuleCatalog{},
-		&PolicyOWASPRuleConfig{},
-		&CVERuleRecord{},
-		&CVERuleScopeOverride{},
-		&CVESyncLog{},
-		&ApplicationRouteRule{},
-		&RecordedResource{},
+		&owasp.OWASPRuleCatalog{},
+		&owasp.PolicyOWASPRuleConfig{},
+		&cve.CVERuleRecord{},
+		&cve.CVERuleScopeOverride{},
+		&cve.CVESyncLog{},
+		&approute.ApplicationRouteRule{},
+		&approute.RecordedResource{},
 
-		&SiteAccessConfig{},
-		&AccessProvider{},
-		&AccessUser{},
-		&AccessPathRule{},
-		&AccessSession{},
+		&access.SiteAccessConfig{},
+		&access.AccessProvider{},
+		&access.AccessUser{},
+		&access.AccessPathRule{},
+		&access.AccessSession{},
 
-		&ThreatIntelFeed{},
-		&ThreatIntelSyncLog{},
-		&FalsePositiveReport{},
+		&threatintel.ThreatIntelFeed{},
+		&threatintel.ThreatIntelSyncLog{},
+		&falsepositive.FalsePositiveReport{},
 
-		&LuaPlugin{},
+		&luaplugin.LuaPlugin{},
 		&JSPlugin{},
 	); err != nil {
 		return err
@@ -98,6 +107,9 @@ func AutoMigrate(db *gorm.DB) error {
 
 	// 规则级频次/验证码有效期三列：AutoMigrate 已经覆盖，这里补一次幂等
 	// 修复，保证按历史顺序执行或跳过 AutoMigrate 步骤的库也能拿到列。
+	if err := migrations.V15MigrateAPIKeyOwner(db); err != nil {
+		return err
+	}
 	if err := migrations.V14MigrateRuleExecutionParams(db); err != nil {
 		return err
 	}

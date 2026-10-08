@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"My-OpenWaf/internal/store/owasp"
+
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
@@ -13,10 +15,10 @@ func TestAutoMigrateCreatesOWASPListIndexesAndAvoidsTemporarySort(t *testing.T) 
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&OWASPRuleCatalog{}); err != nil {
+	if err := db.AutoMigrate(&owasp.OWASPRuleCatalog{}); err != nil {
 		t.Fatalf("migrate OWASP catalog: %v", err)
 	}
-	items := []OWASPRuleCatalog{
+	items := []owasp.OWASPRuleCatalog{
 		{RuleID: "owasp:a:002", Category: "a", Name: "a2", Active: true},
 		{RuleID: "owasp:a:001", Category: "a", Name: "a1", Active: true},
 		{RuleID: "owasp:b:001", Category: "b", Name: "b1", Active: true},

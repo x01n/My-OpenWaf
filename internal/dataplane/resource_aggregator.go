@@ -10,7 +10,7 @@ import (
 
 	"My-OpenWaf/internal/appresource"
 	"My-OpenWaf/internal/cache"
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -58,7 +58,7 @@ type recordedResourceAggregator struct {
 	sinkToken string
 
 	mu      sync.Mutex
-	pending map[string]*store.RecordedResource
+	pending map[string]*approute.RecordedResource
 
 	flushInterval time.Duration
 	maxKeys       int
@@ -80,7 +80,7 @@ func NewRecordedResourceAggregator(repo *repository.RecordedResourceRepo, log *s
 		repo:          repo,
 		log:           log,
 		sinkToken:     newSinkToken(),
-		pending:       make(map[string]*store.RecordedResource),
+		pending:       make(map[string]*approute.RecordedResource),
 		flushInterval: aggregatorFlushInterval,
 		maxKeys:       aggregatorMaxKeys,
 		stopCh:        make(chan struct{}),
@@ -108,7 +108,7 @@ func newSinkToken() string {
 }
 
 // aggregatorKey 拼出资源唯一键，字段间用不可见分隔符防止歧义拼接。
-func aggregatorKey(rec *store.RecordedResource) string {
+func aggregatorKey(rec *approute.RecordedResource) string {
 	var b strings.Builder
 	b.Grow(len(rec.Method) + len(rec.Host) + len(rec.Path) + len(rec.QueryString) + 24)
 	b.WriteString(strconv.FormatUint(uint64(rec.SiteID), 10))
@@ -161,7 +161,7 @@ func (a *recordedResourceAggregator) Record(siteID uint, ids []uint, m *appresou
  * mergeRecordedMetadata 用最新一次命中的元数据覆盖累积条目，使落库行反映最近状态。
  * hit_count 已在调用处累加，此处只刷新可变元数据字段。
  */
-func mergeRecordedMetadata(dst, src *store.RecordedResource) {
+func mergeRecordedMetadata(dst, src *approute.RecordedResource) {
 	dst.ClientIP = src.ClientIP
 	dst.StatusCode = src.StatusCode
 	dst.ContentType = src.ContentType
@@ -209,7 +209,7 @@ func (a *recordedResourceAggregator) flush() {
 		return
 	}
 	batch := a.pending
-	a.pending = make(map[string]*store.RecordedResource)
+	a.pending = make(map[string]*approute.RecordedResource)
 	a.mu.Unlock()
 
 	if a.redis.Available() {
@@ -229,7 +229,7 @@ func (a *recordedResourceAggregator) flush() {
  * flushToRedis 把本批聚合送入 Redis：计数走 HINCRBY 跨节点累加，元数据以资源
  * 唯一键为 field 存 JSON。成功返回 true。field 名直接复用内存聚合键。
  */
-func (a *recordedResourceAggregator) flushToRedis(batch map[string]*store.RecordedResource) bool {
+func (a *recordedResourceAggregator) flushToRedis(batch map[string]*approute.RecordedResource) bool {
 	counts := make(map[string]int64, len(batch))
 	metas := make(map[string][]byte, len(batch))
 	for key, rec := range batch {
@@ -303,7 +303,7 @@ func (a *recordedResourceAggregator) sinkOnce() {
 		if !ok {
 			continue
 		}
-		var rec store.RecordedResource
+		var rec approute.RecordedResource
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			if a.log != nil {
 				a.log.Warn("recorded resource unmarshal failed", "err", err)

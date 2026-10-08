@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/threatintel"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -16,7 +16,7 @@ func newTISyncLogRepoForTest(t *testing.T) *ThreatIntelSyncLogRepo {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.ThreatIntelSyncLog{}); err != nil {
+	if err := db.AutoMigrate(&threatintel.ThreatIntelSyncLog{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return NewThreatIntelSyncLogRepo(db)
@@ -27,7 +27,7 @@ func TestThreatIntelSyncLogCreateAndList(t *testing.T) {
 	now := time.Now()
 
 	// 追加 3 条：2 成功 1 失败，混合 feedID 与 trigger。
-	entries := []*store.ThreatIntelSyncLog{
+	entries := []*threatintel.ThreatIntelSyncLog{
 		{FeedID: 1, FeedName: "A", StartedAt: now.Add(-3 * time.Minute), FinishedAt: now.Add(-3 * time.Minute).Add(500 * time.Millisecond), DurationMs: 500, Success: true, EntriesAdded: 120, Trigger: "auto"},
 		{FeedID: 1, FeedName: "A", StartedAt: now.Add(-2 * time.Minute), FinishedAt: now.Add(-2 * time.Minute).Add(300 * time.Millisecond), DurationMs: 300, Success: false, Trigger: "manual", Error: "拉取失败: connection refused"},
 		{FeedID: 2, FeedName: "B", StartedAt: now.Add(-1 * time.Minute), FinishedAt: now.Add(-1 * time.Minute).Add(700 * time.Millisecond), DurationMs: 700, Success: true, EntriesAdded: 50, Trigger: "auto"},
@@ -77,8 +77,8 @@ func TestThreatIntelSyncLogDeleteOlderThan(t *testing.T) {
 	now := time.Now()
 
 	// 一条 10 天前，一条今天。
-	old := &store.ThreatIntelSyncLog{FeedID: 1, StartedAt: now.Add(-10 * 24 * time.Hour), Success: true}
-	recent := &store.ThreatIntelSyncLog{FeedID: 1, StartedAt: now, Success: true}
+	old := &threatintel.ThreatIntelSyncLog{FeedID: 1, StartedAt: now.Add(-10 * 24 * time.Hour), Success: true}
+	recent := &threatintel.ThreatIntelSyncLog{FeedID: 1, StartedAt: now, Success: true}
 	if err := repo.Create(old); err != nil {
 		t.Fatal(err)
 	}

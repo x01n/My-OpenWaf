@@ -31,14 +31,17 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
+	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/approute"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/antireplay"
 	"My-OpenWaf/internal/waf/bot/tlsfp"
 	"My-OpenWaf/internal/waf/challenge"
 	"My-OpenWaf/internal/waf/challenge/gm"
+	challengepow "My-OpenWaf/internal/waf/challenge/pow"
 	"My-OpenWaf/internal/waf/challenge/powdata"
 	"My-OpenWaf/internal/waf/iprep"
 	"My-OpenWaf/internal/waf/luaplugin"
@@ -810,7 +813,7 @@ func TestChallengeSubmissionValuesOnlyAcceptsURLEncodedForm(t *testing.T) {
  */
 func solveChallengePoW(t *testing.T, token string) (counter, hash string) {
 	t.Helper()
-	prefix := strings.Repeat("0", challenge.ChallengeProofDifficulty)
+	prefix := strings.Repeat("0", challengepow.ChallengeProofDifficulty)
 	for i := int64(0); i < 5_000_000; i++ {
 		sum := sha256.Sum256([]byte(token + strconv.FormatInt(i, 10)))
 		h := hex.EncodeToString(sum[:])
@@ -818,7 +821,7 @@ func solveChallengePoW(t *testing.T, token string) (counter, hash string) {
 			return strconv.FormatInt(i, 10), h
 		}
 	}
-	t.Fatalf("未能求出难度 %d 的解", challenge.ChallengeProofDifficulty)
+	t.Fatalf("未能求出难度 %d 的解", challengepow.ChallengeProofDifficulty)
 	return "", ""
 }
 
@@ -1543,7 +1546,7 @@ func TestHandlerErrorRateLimitObserveProxiesAndRecordsObserve(t *testing.T) {
 
 	errorLimiter := ratelimit.NewRateLimiter(protection.ErrorRateLimitWindow, protection.ErrorRateLimitMax, true)
 	defer errorLimiter.Close()
-	metrics := NewMetrics()
+	metrics := dpmetrics.NewMetrics()
 	handler := Handler(Options{
 		Holder:                holder,
 		Engine:                engine.New(holder, nil, errorLimiter, nil),
@@ -2118,7 +2121,7 @@ func TestHandlerSiteCCCaptchaActionRendersCaptchaPage(t *testing.T) {
 		&store.Certificate{},
 		&store.Policy{},
 		&store.Rule{},
-		&store.ApplicationRouteRule{},
+		&approute.ApplicationRouteRule{},
 		&store.SystemSettings{},
 	); err != nil {
 		t.Fatalf("migrate snapshot build tables: %v", err)
@@ -2750,7 +2753,7 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 		t.Fatalf("open sql db: %v", err)
 	}
 	defer sqlDB.Close()
-	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resources: %v", err)
 	}
 	recordedRepo := repository.NewRecordedResourceRepo(db)
@@ -2779,9 +2782,9 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 		UpstreamURLs:        []string{upstream.URL},
 		EffectiveProtection: &protection,
 		AppRouteRules: []appresource.CompiledRule{
-			{ID: 11, Target: store.AppRouteTargetRequestBody, Op: store.AppRouteOpContains, Pattern: `"password":"secret"`},
-			{ID: 12, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: `"token":"resp-secret"`},
-			{ID: 13, Target: store.AppRouteTargetFingerprint, Op: store.AppRouteOpContains, Pattern: "ja3-match-value"},
+			{ID: 11, Target: approute.AppRouteTargetRequestBody, Op: approute.AppRouteOpContains, Pattern: `"password":"secret"`},
+			{ID: 12, Target: approute.AppRouteTargetResponseBody, Op: approute.AppRouteOpContains, Pattern: `"token":"resp-secret"`},
+			{ID: 13, Target: approute.AppRouteTargetFingerprint, Op: approute.AppRouteOpContains, Pattern: "ja3-match-value"},
 		},
 	}
 	sn := &snapshot.Snapshot{
@@ -2827,7 +2830,7 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 		t.Fatalf("status = %d, want %d", got, http.StatusCreated)
 	}
 
-	var rec store.RecordedResource
+	var rec approute.RecordedResource
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		err = db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "POST", "app.example.com", "/submit").First(&rec).Error
@@ -2838,7 +2841,7 @@ func TestHandlerRecordedResourcesKeepMatchFieldsRawButStoreRedactedAudits(t *tes
 			t.Fatalf("load recorded resource: %v", err)
 		}
 		if time.Now().After(deadline) {
-			var rows []store.RecordedResource
+			var rows []approute.RecordedResource
 			if listErr := db.Order("id ASC").Find(&rows).Error; listErr != nil {
 				t.Fatalf("timed out waiting for recorded resource row; list rows failed: %v", listErr)
 			}
@@ -2884,7 +2887,7 @@ func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 		t.Fatalf("open sql db: %v", err)
 	}
 	defer sqlDB.Close()
-	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resources: %v", err)
 	}
 	recordedRepo := repository.NewRecordedResourceRepo(db)
@@ -2910,7 +2913,7 @@ func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 		UpstreamURLs:        []string{upstream.URL},
 		EffectiveProtection: &protection,
 		AppRouteRules: []appresource.CompiledRule{
-			{ID: 21, Target: store.AppRouteTargetRequestMethod, Op: store.AppRouteOpEq, Pattern: "GET"},
+			{ID: 21, Target: approute.AppRouteTargetRequestMethod, Op: approute.AppRouteOpEq, Pattern: "GET"},
 		},
 	}
 	sn := &snapshot.Snapshot{
@@ -2969,7 +2972,7 @@ func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 		t.Fatalf("status = %d, want %d", got, http.StatusOK)
 	}
 
-	var rec store.RecordedResource
+	var rec approute.RecordedResource
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		err = db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "GET", "h3-resource.example.com", "/assets/app.js").First(&rec).Error
@@ -2980,7 +2983,7 @@ func TestHandlerRecordedResourcesUseInternalHTTP3TLSMetadata(t *testing.T) {
 			t.Fatalf("load recorded resource: %v", err)
 		}
 		if time.Now().After(deadline) {
-			var rows []store.RecordedResource
+			var rows []approute.RecordedResource
 			if listErr := db.Order("id ASC").Find(&rows).Error; listErr != nil {
 				t.Fatalf("timed out waiting for recorded resource row; list rows failed: %v", listErr)
 			}
@@ -3011,7 +3014,7 @@ func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalB
 		t.Fatalf("open sql db: %v", err)
 	}
 	defer sqlDB.Close()
-	if err := db.AutoMigrate(&store.RecordedResource{}); err != nil {
+	if err := db.AutoMigrate(&approute.RecordedResource{}); err != nil {
 		t.Fatalf("migrate recorded resources: %v", err)
 	}
 	recordedRepo := repository.NewRecordedResourceRepo(db)
@@ -3039,8 +3042,8 @@ func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalB
 		},
 		EffectiveProtection: &protection,
 		AppRouteRules: []appresource.CompiledRule{
-			{ID: 71, Target: store.AppRouteTargetRequestMethod, Op: store.AppRouteOpEq, Pattern: "POST"},
-			{ID: 72, Target: store.AppRouteTargetResponseBody, Op: store.AppRouteOpContains, Pattern: "访问被拒绝"},
+			{ID: 71, Target: approute.AppRouteTargetRequestMethod, Op: approute.AppRouteOpEq, Pattern: "POST"},
+			{ID: 72, Target: approute.AppRouteTargetResponseBody, Op: approute.AppRouteOpContains, Pattern: "访问被拒绝"},
 		},
 	}
 	sn := &snapshot.Snapshot{
@@ -3085,7 +3088,7 @@ func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalB
 		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
 	}
 
-	var rec store.RecordedResource
+	var rec approute.RecordedResource
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		err = db.Where("site_id = ? AND method = ? AND host = ? AND path = ?", 1, "POST", "blocked.example.com", "/blocked").First(&rec).Error
@@ -3096,7 +3099,7 @@ func TestHandlerRecordedResourcesIncludeInterceptedRequestsWithoutTreatingLocalB
 			t.Fatalf("load recorded resource: %v", err)
 		}
 		if time.Now().After(deadline) {
-			var rows []store.RecordedResource
+			var rows []approute.RecordedResource
 			if listErr := db.Order("id ASC").Find(&rows).Error; listErr != nil {
 				t.Fatalf("timed out waiting for recorded resource row; list rows failed: %v", listErr)
 			}

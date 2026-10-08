@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	quickjs "github.com/buke/quickjs-go"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // shardCaptureFn 是在引擎内注册的全局捕获函数标识符；shardCaptureProp
@@ -111,9 +113,9 @@ func TestPowShardPageScriptAssemblesInJS(t *testing.T) {
 	const rounds = 24
 	for i := 0; i < rounds; i++ {
 		nonce := randNonceForTest(t, false)
-		difficulty := 1 + randIntN(7)
+		difficulty := 1 + pow.RandIntN(7)
 		replayRandFromStart(t)
-		body := generatePoWScriptBody(difficulty, nonce)
+		body := pow.GeneratePoWScriptBody(difficulty, nonce)
 		replayRandFromStart(t)
 		sharded := GeneratePoWShardedScript(difficulty, nonce)
 

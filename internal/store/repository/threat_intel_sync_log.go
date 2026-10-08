@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/threatintel"
 )
 
 /**
@@ -21,14 +21,14 @@ func NewThreatIntelSyncLogRepo(db *gorm.DB) *ThreatIntelSyncLogRepo {
 }
 
 // Create 追加一条同步日志。
-func (r *ThreatIntelSyncLogRepo) Create(rec *store.ThreatIntelSyncLog) error {
+func (r *ThreatIntelSyncLogRepo) Create(rec *threatintel.ThreatIntelSyncLog) error {
 	return r.db.Create(rec).Error
 }
 
 // List 分页列出同步日志（按 created_at DESC）。
 // feedID > 0 时只返回该 feed 的日志；successOnly 为 "success" 或 "failed" 可过滤成功/失败。
-func (r *ThreatIntelSyncLogRepo) List(offset, limit int, feedID uint, status string) ([]store.ThreatIntelSyncLog, int64, error) {
-	q := r.db.Model(&store.ThreatIntelSyncLog{})
+func (r *ThreatIntelSyncLogRepo) List(offset, limit int, feedID uint, status string) ([]threatintel.ThreatIntelSyncLog, int64, error) {
+	q := r.db.Model(&threatintel.ThreatIntelSyncLog{})
 	if feedID > 0 {
 		q = q.Where("feed_id = ?", feedID)
 	}
@@ -42,7 +42,7 @@ func (r *ThreatIntelSyncLogRepo) List(offset, limit int, feedID uint, status str
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	var items []store.ThreatIntelSyncLog
+	var items []threatintel.ThreatIntelSyncLog
 	if err := q.Order("created_at DESC").Offset(offset).Limit(limit).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
@@ -52,6 +52,6 @@ func (r *ThreatIntelSyncLogRepo) List(offset, limit int, feedID uint, status str
 // DeleteOlderThan 删除超过指定时间的日志（用于保留策略）。
 // 返回删除的行数。
 func (r *ThreatIntelSyncLogRepo) DeleteOlderThan(before time.Time) (int64, error) {
-	tx := r.db.Where("created_at < ?", before).Delete(&store.ThreatIntelSyncLog{})
+	tx := r.db.Where("created_at < ?", before).Delete(&threatintel.ThreatIntelSyncLog{})
 	return tx.RowsAffected, tx.Error
 }

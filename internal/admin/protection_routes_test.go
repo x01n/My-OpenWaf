@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -21,9 +22,11 @@ import (
 	"My-OpenWaf/internal/admin/protect/drop"
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/admin/system"
+	adminrealtime "My-OpenWaf/internal/admin/system/realtime"
 	"My-OpenWaf/internal/core"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
+	authstore "My-OpenWaf/internal/store/auth"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/waf/challenge/powdata"
 
@@ -71,7 +74,14 @@ func newAdminRouteTestServerWithRuntimeState(t *testing.T, runtimeCfg core.Confi
 	}
 
 	repos := repository.New(db)
-	token, _, err := repos.AdminAPIKey.Create("route-test")
+	if _, err := authstore.SeedDefaults(db, ":0", slog.Default()); err != nil {
+		t.Fatalf("seed admin account: %v", err)
+	}
+	routeTestAdmin, err := repos.AdminAccount.GetByUsername("admin")
+	if err != nil {
+		t.Fatalf("load admin account: %v", err)
+	}
+	token, _, err := repos.AdminAPIKey.Create(routeTestAdmin.ID, "route-test")
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
@@ -84,7 +94,7 @@ func newAdminRouteTestServerWithRuntimeState(t *testing.T, runtimeCfg core.Confi
 		runtimeCfg:         runtimeCfg,
 		runtimeRedisEnable: runtimeRedisEnabled,
 	}
-	realtime := system.NewRealtimeHub(nil, nil, nil, nil, nil)
+	realtime := adminrealtime.NewRealtimeHub(nil, nil, nil, nil, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

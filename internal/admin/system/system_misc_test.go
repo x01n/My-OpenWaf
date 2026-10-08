@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/route/param"
 
+	policyhandler "My-OpenWaf/internal/admin/system/policy"
 	"My-OpenWaf/internal/store"
 )
 
@@ -234,90 +235,25 @@ func TestGetACMEConfigReturnsDefaultsAndStoredValues(t *testing.T) {
 	}
 }
 
-func TestRealtimeTicketHandlerIssuesUniqueTickets(t *testing.T) {
-	hub := NewRealtimeHub(nil, nil, nil, nil, nil)
-
-	seen := make(map[string]struct{}, 3)
-	for i := 0; i < 3; i++ {
-		ctx := invokeSystemConfigHandler(t, hub.TicketHandler(), "POST", "/api/v1/realtime/ticket", nil)
-		if ctx.Response.StatusCode() != 200 {
-			t.Fatalf("ticket status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
-		}
-		var resp struct {
-			Ticket    string `json:"ticket"`
-			ExpiresAt string `json:"expires_at"`
-		}
-		if err := json.Unmarshal(ctx.Response.Body(), &resp); err != nil {
-			t.Fatalf("decode ticket response: %v", err)
-		}
-		if len(resp.Ticket) != 64 {
-			t.Fatalf("ticket length = %d, want 64 hex chars", len(resp.Ticket))
-		}
-		if resp.ExpiresAt == "" {
-			t.Fatalf("ticket response must carry an expiry")
-		}
-		if _, dup := seen[resp.Ticket]; dup {
-			t.Fatalf("ticket %q was issued twice", resp.Ticket)
-		}
-		seen[resp.Ticket] = struct{}{}
-	}
-
-	// 签发的票据必须可被一次性消费。
-	for ticket := range seen {
-		if !hub.consumeTicket(ticket) {
-			t.Fatalf("issued ticket %q could not be consumed", ticket)
-		}
-		if hub.consumeTicket(ticket) {
-			t.Fatalf("ticket %q must not be consumable twice", ticket)
-		}
-	}
-}
-
-func TestRandomTicketProducesDistinctHexStrings(t *testing.T) {
-	seen := make(map[string]struct{}, 16)
-	for i := 0; i < 16; i++ {
-		ticket := randomTicket()
-		if len(ticket) != 64 {
-			t.Fatalf("ticket length = %d, want 64", len(ticket))
-		}
-		if strings.Trim(ticket, "0123456789abcdef") != "" {
-			t.Fatalf("ticket %q is not lowercase hex", ticket)
-		}
-		if _, dup := seen[ticket]; dup {
-			t.Fatalf("randomTicket produced a duplicate: %q", ticket)
-		}
-		seen[ticket] = struct{}{}
-	}
-}
-
-func TestRealtimeHubHasSubscribersWithoutClients(t *testing.T) {
-	hub := NewRealtimeHub(nil, nil, nil, nil, nil)
-	for _, topic := range []string{"dashboard", "access_logs", "security_events"} {
-		if hub.hasSubscribers(topic) {
-			t.Fatalf("topic %q reports subscribers on a fresh hub", topic)
-		}
-	}
-}
-
 func TestGetPolicyAndCreatePolicyErrorPaths(t *testing.T) {
 	repo := newPolicyRepoForTest(t)
 
-	badID := invokePolicyHandler(t, GetPolicy(repo), "GET", "/api/v1/policies/nan", param.Params{{Key: "id", Value: "nan"}}, nil)
+	badID := invokePolicyHandler(t, policyhandler.GetPolicy(repo), "GET", "/api/v1/policies/nan", param.Params{{Key: "id", Value: "nan"}}, nil)
 	if badID.Response.StatusCode() != 400 {
 		t.Fatalf("invalid id status = %d, want 400", badID.Response.StatusCode())
 	}
 
-	missing := invokePolicyHandler(t, GetPolicy(repo), "GET", "/api/v1/policies/9090", param.Params{{Key: "id", Value: "9090"}}, nil)
+	missing := invokePolicyHandler(t, policyhandler.GetPolicy(repo), "GET", "/api/v1/policies/9090", param.Params{{Key: "id", Value: "9090"}}, nil)
 	if missing.Response.StatusCode() != 404 {
 		t.Fatalf("missing policy status = %d, want 404", missing.Response.StatusCode())
 	}
 
-	malformed := invokePolicyHandler(t, CreatePolicy(repo, func() error { return nil }), "POST", "/api/v1/policies", nil, []byte(`{"name":`))
+	malformed := invokePolicyHandler(t, policyhandler.CreatePolicy(repo, func() error { return nil }), "POST", "/api/v1/policies", nil, []byte(`{"name":`))
 	if malformed.Response.StatusCode() != 400 {
 		t.Fatalf("malformed body status = %d, want 400", malformed.Response.StatusCode())
 	}
 
-	reloadFailure := invokePolicyHandler(t, CreatePolicy(repo, func() error { return errors.New("reload boom") }),
+	reloadFailure := invokePolicyHandler(t, policyhandler.CreatePolicy(repo, func() error { return errors.New("reload boom") }),
 		"POST", "/api/v1/policies", nil, []byte(`{"name":"reload-fail"}`))
 	if reloadFailure.Response.StatusCode() != 500 {
 		t.Fatalf("reload failure status = %d, want 500", reloadFailure.Response.StatusCode())
@@ -335,25 +271,25 @@ func TestUpdatePolicyErrorPaths(t *testing.T) {
 	}
 	idParams := param.Params{{Key: "id", Value: "1"}}
 
-	badID := invokePolicyHandler(t, UpdatePolicy(repo, func() error { return nil }),
+	badID := invokePolicyHandler(t, policyhandler.UpdatePolicy(repo, func() error { return nil }),
 		"POST", "/api/v1/policies/nan/update", param.Params{{Key: "id", Value: "nan"}}, []byte(`{"name":"x"}`))
 	if badID.Response.StatusCode() != 400 {
 		t.Fatalf("invalid id status = %d, want 400", badID.Response.StatusCode())
 	}
 
-	missing := invokePolicyHandler(t, UpdatePolicy(repo, func() error { return nil }),
+	missing := invokePolicyHandler(t, policyhandler.UpdatePolicy(repo, func() error { return nil }),
 		"POST", "/api/v1/policies/9090/update", param.Params{{Key: "id", Value: "9090"}}, []byte(`{"name":"x"}`))
 	if missing.Response.StatusCode() != 404 {
 		t.Fatalf("missing policy status = %d, want 404", missing.Response.StatusCode())
 	}
 
-	malformed := invokePolicyHandler(t, UpdatePolicy(repo, func() error { return nil }),
+	malformed := invokePolicyHandler(t, policyhandler.UpdatePolicy(repo, func() error { return nil }),
 		"POST", "/api/v1/policies/1/update", idParams, []byte(`{"name":`))
 	if malformed.Response.StatusCode() != 400 {
 		t.Fatalf("malformed body status = %d, want 400", malformed.Response.StatusCode())
 	}
 
-	reloadFailure := invokePolicyHandler(t, UpdatePolicy(repo, func() error { return errors.New("reload boom") }),
+	reloadFailure := invokePolicyHandler(t, policyhandler.UpdatePolicy(repo, func() error { return errors.New("reload boom") }),
 		"POST", "/api/v1/policies/1/update", idParams, []byte(`{"name":"renamed"}`))
 	if reloadFailure.Response.StatusCode() != 500 {
 		t.Fatalf("reload failure status = %d, want 500", reloadFailure.Response.StatusCode())

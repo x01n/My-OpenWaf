@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/owasp"
 )
 
 func TestOWASPRuleOverridePersistsCaptchaTypeNoteAndWhitelist(t *testing.T) {
@@ -26,7 +26,7 @@ func TestOWASPRuleOverridePersistsCaptchaTypeNoteAndWhitelist(t *testing.T) {
 		t.Fatalf("status=%d body=%s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 
-	var config store.PolicyOWASPRuleConfig
+	var config owasp.PolicyOWASPRuleConfig
 	if err := repo.DB().Where("policy_id = ? AND rule_id = ?", 1, ruleID).First(&config).Error; err != nil {
 		t.Fatalf("load persisted override: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestOWASPRuleOverrideRejectsInvalidCaptchaWhitelistAndNote(t *testing.T) {
 		}
 	}
 	var count int64
-	if err := repo.DB().Model(&store.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil || count != 0 {
+	if err := repo.DB().Model(&owasp.PolicyOWASPRuleConfig{}).Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("rejected payloads changed database: count=%d err=%v", count, err)
 	}
 }

@@ -2345,26 +2345,35 @@ func TestParseAcceptEncodingOffersClampsQValues(t *testing.T) {
 
 func TestSelectClientResponseEncodingBytesMatchesStringSemantics(t *testing.T) {
 	tests := []struct {
-		name          string
-		raw           string
-		brotliEnabled bool
-		gzipEnabled   bool
+		name           string
+		raw            string
+		brotliEnabled  bool
+		gzipEnabled    bool
+		deflateEnabled bool
+		zstdEnabled    bool
 	}{
-		{name: "empty", raw: "", brotliEnabled: true, gzipEnabled: true},
-		{name: "browser default", raw: "gzip, deflate, br, zstd", brotliEnabled: true, gzipEnabled: true},
-		{name: "gzip q preferred", raw: "br;q=0.1, gzip;q=1", brotliEnabled: true, gzipEnabled: true},
-		{name: "explicit gzip zero over wildcard", raw: "gzip;q=0, *;q=0.8", brotliEnabled: false, gzipEnabled: true},
-		{name: "clamped q values", raw: "gzip;q=2, br;q=-0.5, deflate;q=0.75, zstd;q=bad", brotliEnabled: true, gzipEnabled: true},
-		{name: "duplicate exact takes max", raw: "gzip;q=0.5, gzip;q=0.9", brotliEnabled: true, gzipEnabled: true},
-		{name: "bad q keeps default", raw: "gzip;q=bad, br;q=0.5", brotliEnabled: true, gzipEnabled: true},
-		{name: "mixed case token and q key", raw: " GZip ; q = 0.4 , Br ; Q=0.9 ", brotliEnabled: true, gzipEnabled: true},
-		{name: "brotli disabled", raw: "br, gzip;q=0.7", brotliEnabled: false, gzipEnabled: true},
-		{name: "gzip disabled", raw: "gzip, deflate;q=0.4", brotliEnabled: false, gzipEnabled: false},
+		{name: "empty", raw: "", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: true},
+		{name: "browser default", raw: "gzip, deflate, br, zstd", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: true},
+		{name: "gzip q preferred", raw: "br;q=0.1, gzip;q=1", brotliEnabled: true, gzipEnabled: true, deflateEnabled: false, zstdEnabled: false},
+		{name: "explicit gzip zero over wildcard", raw: "gzip;q=0, *;q=0.8", brotliEnabled: false, gzipEnabled: true, deflateEnabled: true, zstdEnabled: false},
+		{name: "clamped q values", raw: "gzip;q=2, br;q=-0.5, deflate;q=0.75, zstd;q=bad", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: true},
+		{name: "duplicate exact takes max", raw: "gzip;q=0.5, gzip;q=0.9", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: true},
+		{name: "bad q keeps default", raw: "gzip;q=bad, br;q=0.5", brotliEnabled: true, gzipEnabled: true, deflateEnabled: false, zstdEnabled: false},
+		{name: "mixed case token and q key", raw: " GZip ; q = 0.4 , Br ; Q=0.9 ", brotliEnabled: true, gzipEnabled: true, deflateEnabled: false, zstdEnabled: false},
+		{name: "brotli disabled", raw: "br, gzip;q=0.7", brotliEnabled: false, gzipEnabled: true, deflateEnabled: false, zstdEnabled: false},
+		{name: "gzip disabled", raw: "gzip, deflate;q=0.4", brotliEnabled: false, gzipEnabled: false, deflateEnabled: true, zstdEnabled: false},
+		// 候选顺序 zstd → br → gzip → deflate 的锁定用例：q 相同时靠前胜出，
+		// q 更低时让位，被关闭时顺延到下一候选。
+		{name: "zstd wins tie in priority order", raw: "br, gzip, deflate, zstd", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: true},
+		{name: "br beats zstd on higher q", raw: "zstd;q=0.5, br;q=1", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: true},
+		{name: "zstd disabled falls back to br", raw: "br, zstd", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: false},
+		{name: "wildcard covers zstd first", raw: "*;q=0.9", brotliEnabled: true, gzipEnabled: true, deflateEnabled: true, zstdEnabled: true},
+		{name: "only deflate enabled", raw: "gzip, deflate, br, zstd", brotliEnabled: false, gzipEnabled: false, deflateEnabled: true, zstdEnabled: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			want := selectClientResponseEncoding(tt.raw, tt.brotliEnabled, tt.gzipEnabled)
-			got := selectClientResponseEncodingBytes([]byte(tt.raw), tt.brotliEnabled, tt.gzipEnabled)
+			want := selectClientResponseEncoding(tt.raw, tt.brotliEnabled, tt.gzipEnabled, tt.deflateEnabled, tt.zstdEnabled)
+			got := selectClientResponseEncodingBytes([]byte(tt.raw), tt.brotliEnabled, tt.gzipEnabled, tt.deflateEnabled, tt.zstdEnabled)
 			if got != want {
 				t.Fatalf("selectClientResponseEncodingBytes(%q) = %q, want %q", tt.raw, got, want)
 			}
@@ -2407,7 +2416,7 @@ func BenchmarkSelectClientResponseEncodingBytesBrowser(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		benchmarkProxyEncodingSink = selectClientResponseEncodingBytes(raw, true, true)
+		benchmarkProxyEncodingSink = selectClientResponseEncodingBytes(raw, true, true, true, true)
 	}
 }
 
@@ -2416,7 +2425,7 @@ func BenchmarkSelectClientResponseEncodingStringBrowser(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		benchmarkProxyEncodingSink = selectClientResponseEncoding(raw, true, true)
+		benchmarkProxyEncodingSink = selectClientResponseEncoding(raw, true, true, true, true)
 	}
 }
 
@@ -2425,7 +2434,7 @@ func BenchmarkSelectClientResponseEncodingBytesQValues(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		benchmarkProxyEncodingSink = selectClientResponseEncodingBytes(raw, true, true)
+		benchmarkProxyEncodingSink = selectClientResponseEncodingBytes(raw, true, true, true, true)
 	}
 }
 
@@ -2434,7 +2443,7 @@ func BenchmarkSelectClientResponseEncodingStringQValues(b *testing.B) {
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		benchmarkProxyEncodingSink = selectClientResponseEncoding(raw, true, true)
+		benchmarkProxyEncodingSink = selectClientResponseEncoding(raw, true, true, true, true)
 	}
 }
 
@@ -4017,15 +4026,56 @@ func TestBuildUpstreamRequestDecodesCompressedRequestBody(t *testing.T) {
 	}
 }
 
-func TestBuildUpstreamRequestRejectsInvalidCompressedRequestBody(t *testing.T) {
+/**
+ * TestBuildUpstreamRequestDegradesInvalidCompressedRequestBody 锁定畸形压缩体的
+ * 新处置：不再返回错误（原先是 502 的来源），而是记录事件后按原始字节放行。
+ *
+ * 行为的有意变更（用户裁定「畸形压缩体：记录事件后放行，不再 502」）：解压
+ * 失败只意味着 WAF 放弃解压这段内容，不意味着请求必须失败——上游自己有解码
+ * 能力，把决策权交回上游比由 WAF 单方面掐断更保守。
+ */
+func TestBuildUpstreamRequestDegradesInvalidCompressedRequestBody(t *testing.T) {
+	rawBody := []byte("not-a-valid-gzip-stream")
+
 	ctx := app.NewContext(0)
 	ctx.Request.SetMethod("POST")
 	ctx.Request.SetRequestURI("/resource?x=1")
 	ctx.Request.Header.Set("Content-Encoding", "gzip")
-	ctx.Request.SetBody([]byte("not-a-valid-gzip-stream"))
+	ctx.Request.SetBody(rawBody)
 
-	if _, err := buildUpstreamRequest(context.Background(), ctx, "http://127.0.0.1:8800", nil, "example.test", false); err == nil {
-		t.Fatalf("expected invalid compressed body error")
+	var observed []CompressionEvent
+	ContextWithCompressionEventObserver(ctx, func(ev CompressionEvent) { observed = append(observed, ev) })
+
+	req, err := buildUpstreamRequest(context.Background(), ctx, "http://127.0.0.1:8800", nil, "example.test", false)
+	if err != nil {
+		t.Fatalf("malformed compressed body must not fail the upstream request, got error: %v", err)
+	}
+	if req == nil {
+		t.Fatal("expected upstream request")
+	}
+	// 不解压：Content-Encoding 原样保留，字节也原样转发，由上游自行解码。
+	if got := req.Header.Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("upstream Content-Encoding = %q, want %q (undecoded passthrough)", got, "gzip")
+	}
+	if req.ContentLength != int64(len(rawBody)) {
+		t.Fatalf("upstream Content-Length = %d, want %d", req.ContentLength, len(rawBody))
+	}
+	got, readErr := io.ReadAll(req.Body)
+	if readErr != nil {
+		t.Fatalf("read upstream body: %v", readErr)
+	}
+	if !bytes.Equal(got, rawBody) {
+		t.Fatalf("upstream body = %q, want original raw bytes %q", got, rawBody)
+	}
+	// 降级必须留痕，否则「没解压」在审计上是隐形的。
+	if len(observed) != 1 {
+		t.Fatalf("compression events = %d, want 1", len(observed))
+	}
+	if observed[0].Kind != CompressionEventKindMalformed {
+		t.Fatalf("compression event kind = %q, want %q", observed[0].Kind, CompressionEventKindMalformed)
+	}
+	if observed[0].Encoding != "gzip" {
+		t.Fatalf("compression event encoding = %q, want %q", observed[0].Encoding, "gzip")
 	}
 }
 

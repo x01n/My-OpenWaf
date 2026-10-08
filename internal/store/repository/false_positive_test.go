@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/falsepositive"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -18,7 +18,7 @@ func newFalsePositiveRepoForTest(t *testing.T) *FalsePositiveRepo {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.FalsePositiveReport{}); err != nil {
+	if err := db.AutoMigrate(&falsepositive.FalsePositiveReport{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return NewFalsePositiveRepo(db)
@@ -27,7 +27,7 @@ func newFalsePositiveRepoForTest(t *testing.T) *FalsePositiveRepo {
 func TestFalsePositiveCreateListGetUpdate(t *testing.T) {
 	repo := newFalsePositiveRepoForTest(t)
 
-	rec := &store.FalsePositiveReport{
+	rec := &falsepositive.FalsePositiveReport{
 		SecurityEventID: 42,
 		RequestID:       "req-abc",
 		RuleIDStr:       "owasp:sqli:1001",
@@ -99,8 +99,8 @@ func TestFalsePositiveCreateListGetUpdate(t *testing.T) {
 /**
  * newFalsePositiveReportForTest 构造一条带指定去重键的反馈记录。
  */
-func newFalsePositiveReportForTest(sourceEventKey string) *store.FalsePositiveReport {
-	rec := &store.FalsePositiveReport{
+func newFalsePositiveReportForTest(sourceEventKey string) *falsepositive.FalsePositiveReport {
+	rec := &falsepositive.FalsePositiveReport{
 		SecurityEventID: 7,
 		RequestID:       "req-dedupe",
 		RuleIDStr:       "owasp:xss:2002",
@@ -248,7 +248,7 @@ func TestFalsePositiveCreateOrGetBySourceEventConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&store.FalsePositiveReport{}); err != nil {
+	if err := db.AutoMigrate(&falsepositive.FalsePositiveReport{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	sqlDB, err := db.DB()

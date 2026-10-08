@@ -20,6 +20,8 @@ import (
 	rueidis "github.com/redis/rueidis"
 
 	"My-OpenWaf/internal/waf/challenge/gm"
+
+	"My-OpenWaf/internal/waf/challenge/pow"
 )
 
 // CaptchaType 定义要生成的验证码类型。
@@ -426,9 +428,9 @@ const (
 // 与答案均匀区间冲突），故题库为加减除三种；乘号字模保留在
 // getCharPattern 中以备渲染其他题面字符集时使用。
 func randomMathProblem() (expr string, answer int) {
-	answer = mathAnswerMin + randIntN(mathAnswerMax-mathAnswerMin+1)
-	operand := mathOperandMin + randIntN(mathOperandMax-mathOperandMin+1)
-	switch op := randIntN(3); op {
+	answer = mathAnswerMin + pow.RandIntN(mathAnswerMax-mathAnswerMin+1)
+	operand := mathOperandMin + pow.RandIntN(mathOperandMax-mathOperandMin+1)
+	switch op := pow.RandIntN(3); op {
 	case 0:
 		// answer = a + operand（a 为第一操作数，题面即 a + operand = ?）
 		return fmt.Sprintf("%d + %d = ?", answer-operand, operand), answer
@@ -439,7 +441,7 @@ func randomMathProblem() (expr string, answer int) {
 		// answer = dividend / divisor；先抽商（2..10），保证整除且除数不为零。
 		// 商上限取 10：answer≤999 时被除数≤9990，稳定在四位数以内，
 		// 「9990 ÷ 10 = ?」仍可放进 200px 画布。
-		quotient := 2 + randIntN(9)
+		quotient := 2 + pow.RandIntN(9)
 		return fmt.Sprintf("%d ÷ %d = ?", answer*quotient, quotient), answer
 	}
 }

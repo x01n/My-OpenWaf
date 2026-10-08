@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"testing"
 
-	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/store/cve"
 	"My-OpenWaf/internal/store/repository"
 )
 
@@ -17,7 +17,7 @@ func TestCVERuleScopeOverridePersistsAndResolvesCaptchaType(t *testing.T) {
 		t.Fatalf("status=%d body=%s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
 
-	views, err := listEffectiveCVERules(repo, cveScopeContext{ScopeType: store.CVEScopeGlobal}, repository.CVERuleFilter{Query: rule.CVEID})
+	views, err := listEffectiveCVERules(repo, cveScopeContext{ScopeType: cve.CVEScopeGlobal}, repository.CVERuleFilter{Query: rule.CVEID})
 	if err != nil {
 		t.Fatalf("list effective rules: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestCVERuleScopeOverridePersistsAndResolvesCaptchaType(t *testing.T) {
 func TestRuleOverridesRejectCaptchaTypeForNonCaptchaAction(t *testing.T) {
 	actionValue := "intercept"
 	captchaValue := "slide"
-	if err := validateCVEScopePatch(&store.CVERuleScopeOverride{Action: &actionValue, CaptchaType: &captchaValue}); err == nil {
+	if err := validateCVEScopePatch(&cve.CVERuleScopeOverride{Action: &actionValue, CaptchaType: &captchaValue}); err == nil {
 		t.Fatal("CVE scope override accepted captcha_type with intercept action")
 	}
 }
