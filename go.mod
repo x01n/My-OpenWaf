@@ -20,7 +20,7 @@ require (
 	github.com/quic-go/quic-go v0.63.0
 	github.com/redis/rueidis v1.0.78
 	github.com/refraction-networking/utls v1.8.2
-	github.com/tdewolff/parse/v2 v2.8.16
+	github.com/tdewolff/parse/v2 v2.8.17
 	github.com/wenlng/go-captcha-assets v1.0.7
 	github.com/wenlng/go-captcha/v2 v2.0.5
 	github.com/wu238121-a11y/go-ja4 v1.0.0
