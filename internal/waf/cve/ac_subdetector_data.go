@@ -52,7 +52,22 @@ var subDetectorNeedleEntries = []subDetectorNeedleEntry{
 	{"CVE-2025-47916", "all", []string{"themeeditor", "customcss", "expression="}},
 	{"CVE-2025-31161", "all", []string{"webinterface/function", "aws4-hmac-sha256", "crushftp"}},
 	{"CVE-2025-32756", "all", []string{"hostcheck_validate", "authhash"}},
-	{"CVE-2024-SENSFILE", "url", []string{"/.env", "/.git/config", "/.htaccess", "/wp-config.php", "/web.config", "/etc/passwd"}},
+	// CVE-2024-SENSFILE 的判据是 reSensitiveFile（general.go），needle 必须
+	// 与该正则各分支的必现字面前缀一一对应：gate 只在「正则可能命中」时放行，
+	// 少了任一条都会让对应分支的载荷被剪掉（原表只有 6 条，覆盖不到
+	// /.gitignore、/etc/shadow、/database.yml、/settings.py、/info.php、
+	// /server-status、/backup.sql 等 30 个分支）。
+	{"CVE-2024-SENSFILE", "url", []string{
+		"/.env", "/.git/", "/.gitignore", "/.htaccess", "/.htpasswd",
+		"/wp-config.php", "/web.config", "/database.yml", "/settings.py",
+		"/application.", "/etc/", "/.ds_store", "/.svn/entries", "/.svn/wc.db",
+		"/.idea/workspace.xml", "/.vscode/settings.json", "/composer.",
+		"/package.json", "/gemfile", "/requirements.txt", "/dockerfile",
+		"/docker-compose.y", "/.aws/credentials", "/.ssh/", "/.bash_history",
+		"/.mysql_history", "/phpinfo.php", "/adminer.php", "/info.php",
+		"/server-status", "/server-info", "/.well-known/security.txt",
+		"/backup.", "/dump.sql", "/web-inf/web.xml", "/meta-inf/manifest.mf",
+	}},
 	{"CVE-2017-8046", "all", []string{"json-patch", "application/patch+json", "spel", "#{", "t("}},
 	{"CVE-2023-1454", "all", []string{"jeecg", "sys/", "select", "union", "updatexml", "extractvalue", "sleep("}},
 	{"CVE-2021-21351", "all", []string{"<java", "<sorted-set", "<dynamic-proxy", "xstream", "processbuilder", "runtime"}},
@@ -61,4 +76,11 @@ var subDetectorNeedleEntries = []subDetectorNeedleEntry{
 	{"CVE-2024-XXEUTF7", "all", []string{"utf-7", "+adw-", "+adi-", "+afw-"}},
 	{"CVE-2024-LDAPI", "all", []string{"objectclass=", ")(|", ")(uid=", "*)(", "ldap"}},
 	{"CVE-2024-LOWCMD", "all", []string{";", "|", "`", "$(", "whoami", "uname", "ifconfig", "ipconfig"}},
+	// 以下 3 条此前只被 shouldScanGeneralRule 的 switch 列出、却缺 AC 数据，
+	// 导致 subDetectorACGate 走「mask 不存在 → return true」，case 空转、
+	// 规则实际无门。needle 取各自正则的必要字面，补齐后 case 才真正生效。
+	{"CVE-2024-27198", "url", []string{"/hax?"}},
+	{"CVE-2024-27198", "all", []string{"/app/rest/users"}},
+	{"CVE-2024-23897", "url", []string{"/jnlpjars/"}},
+	{"CVE-2022-33891", "url", []string{"doas=`"}},
 }

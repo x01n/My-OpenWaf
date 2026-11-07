@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -42,7 +43,78 @@ type ccRateState struct {
 	blockedTill int64
 }
 
+const ccRateStateMaxEntries = 2048
+
 var ccRateStates sync.Map
+
+// ccRateStateEntries 是 ccRateStates 的条目计数（与注册表同步维护），
+// 让上限判断变成一次原子读而不是全表 Range。
+var ccRateStateEntries atomic.Int64
+
+// ccRateStateEvictions 是「达上限整体换表」的累计次数。恒为 0 说明上限从未
+// 生效；持续增长说明上限低于真实工作集，跨编译的状态共享已经退化。它是这条
+// 路径唯一的退化信号，当前只在包内（含测试）读取，未接 /metrics。
+var ccRateStateEvictions atomic.Uint64
+
+// ccRateStateResetting 是换表的门闩：并发触顶时只允许一个 goroutine 执行
+// 清空，其余直接复用触顶时的实例，避免多个 Range 空转叠加。
+var ccRateStateResetting atomic.Bool
+
+/**
+ * storeCCRateState 取回或注册某个 cc_rate 条件的共享状态。
+ *
+ * 命中已有条目时行为与直接 LoadOrStore 完全一致：同一条件的多次编译共享同一
+ * 计数窗口，这正是 cc_rate 在配置重载后不丢计数的前提（见
+ * TestCCRateStateSharingSurvivesCompileWithoutEviction）。
+ *
+ * 未命中而条目已达上限时整体换表再插入。上限语义是**尽力封顶**而非严格保证：
+ * LoadOrStore、计数自增、清零三者没有原子关联，并发插入与换表交错时，表峰值
+ * 可以短暂越过 ccRateStateMaxEntries（单个换表窗口内的错位插入数），但每轮换表
+ * 都会把计数归零，误差不跨轮累积，内存代价 KB~MB 量级。这条路径只在编译期
+ * （规则保存、快照重建、/rules/test 试跑）进入，出现高并发编译的概率很低。
+ *
+ * 换表只从注册表移除条目，不从任何 ccRateMatcher 的 state 字段移除：已构建的
+ * 匹配器继续复用各自持有的实例，因而对运行中的规则无影响；代价只是触顶后同一
+ * 条件的下一次编译会拿到新实例，该条件的计数窗口从零重新开始（概率性、一次性，
+ * 不改变阈值语义）。注意触顶瞬间并发插入者可能与换表交错，返回的是自己刚插入、
+ * 且可能已被换表移除的实例——该实例由调用方持有，计数照常，只是脱离注册表、
+ * 后续编译不与它共享窗口。
+ *
+ * @param key   ccRateStateKey 生成的条件键。
+ * @param state 未命中时插入的新状态。
+ * @return 注册表中该键对应的状态。
+ */
+func storeCCRateState(key string, state *ccRateSharedState) *ccRateSharedState {
+	actual, loaded := ccRateStates.LoadOrStore(key, state)
+	if loaded {
+		return actual.(*ccRateSharedState)
+	}
+	if ccRateStateEntries.Add(1) > ccRateStateMaxEntries {
+		evictCCRateStates()
+	}
+	return state
+}
+
+/**
+ * evictCCRateStates 整体清空注册表。
+ *
+ * 采用整体换表而非逐条 LRU：注册表只影响「同一条件的多次编译是否共享窗口」，
+ * 不影响规则匹配，逐条淘汰需要额外顺序结构与每次插入的判定成本，而这条路径
+ * 只在编译期（规则保存、快照重建、/rules/test 试跑）进入，不值得。
+ */
+func evictCCRateStates() {
+	if !ccRateStateResetting.CompareAndSwap(false, true) {
+		return
+	}
+	defer ccRateStateResetting.Store(false)
+
+	ccRateStates.Range(func(key, _ any) bool {
+		ccRateStates.Delete(key)
+		return true
+	})
+	ccRateStateEntries.Store(0)
+	ccRateStateEvictions.Add(1)
+}
 
 func (m *ccRateMatcher) Match(ctx MatchCtx) bool {
 	if m.child == nil || !m.child.Match(ctx) {
@@ -94,12 +166,18 @@ func newCCRateSharedState() *ccRateSharedState {
 	return &ccRateSharedState{clients: make(map[string]*ccRateState)}
 }
 
+/**
+ * ccRateKey 拼出 cc_rate 规则频次限制的计数键。
+ *
+ * 与请求限流、bot 行为窗口同源（见 RateLimitKey）：频次限制的语义是
+ * 「同一站点、同一来访 IP 在窗口内的命中次数」，只按 Host 建键会让同一
+ * bind 下的 "*" 兜底站点与显式 host 站点互相挤占配额。
+ *
+ * @param ctx 匹配上下文。
+ * @return 稳定的计数键。
+ */
 func ccRateKey(ctx MatchCtx) string {
-	client := ""
-	if ctx.ClientIP != nil {
-		client = ctx.ClientIP.String()
-	}
-	return client + "|" + hostValue(ctx)
+	return RateLimitKey(ctx.Bind, ctx.SiteID, hostValue(ctx), ctx.ClientIP)
 }
 
 func headerValue(ctx MatchCtx, name string) string {
@@ -1776,12 +1854,14 @@ func splitHeaderArg(arg string) (string, string) {
 	return arg, ""
 }
 
+const regexCacheMaxEntries = 4096
+
 var regexCache = struct {
-	mu    sync.RWMutex
-	cache map[string]*regexp.Regexp
+	mu        sync.RWMutex
+	cache     map[string]*regexp.Regexp
+	evictions atomic.Uint64
 }{cache: make(map[string]*regexp.Regexp)}
 
-// cachedCompile 返回编译好的 regexp，命中缓存时直接复用已有实例。
 func cachedCompile(pattern string) (*regexp.Regexp, error) {
 	regexCache.mu.RLock()
 	if re, ok := regexCache.cache[pattern]; ok {
@@ -1796,8 +1876,15 @@ func cachedCompile(pattern string) (*regexp.Regexp, error) {
 	}
 
 	regexCache.mu.Lock()
+	defer regexCache.mu.Unlock()
+	if existing, ok := regexCache.cache[pattern]; ok {
+		return existing, nil
+	}
+	if len(regexCache.cache) >= regexCacheMaxEntries {
+		regexCache.cache = make(map[string]*regexp.Regexp, regexCacheMaxEntries)
+		regexCache.evictions.Add(1)
+	}
 	regexCache.cache[pattern] = re
-	regexCache.mu.Unlock()
 	return re, nil
 }
 
@@ -1903,13 +1990,13 @@ func buildCompound(cond compoundCondition) Matcher {
 			return &neverMatcher{}
 		}
 		stateKey := ccRateStateKey(cond)
-		state, _ := ccRateStates.LoadOrStore(stateKey, newCCRateSharedState())
+		state := storeCCRateState(stateKey, newCCRateSharedState())
 		return &ccRateMatcher{
 			child:     buildCompound(cond.Children[0]),
 			window:    cond.Window,
 			threshold: cond.Threshold,
 			duration:  ccRateDurationSeconds(cond),
-			state:     state.(*ccRateSharedState),
+			state:     state,
 		}
 	case "":
 		if cond.Kind != "" {

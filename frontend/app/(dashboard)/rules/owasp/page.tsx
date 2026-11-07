@@ -994,6 +994,7 @@ function OWASPRulesPageContent() {
             statusCode: editingRule.status_code,
             redirectTo: editingRule.redirect_to,
             captchaType: editingRule.captcha_type || "",
+            ciscoASAMode: editingRule.cisco_asa_mode || "",
             whitelist: editingRule.whitelist,
             note: editingRule.note,
           }}

@@ -11,8 +11,12 @@ import type {
   ChainConfig,
   ChainSessionsResponse,
   DefaultErrorPagesResponse,
+  EnvOverridesResponse,
+  EnvOverridesUpdate,
   ErrorPagePreviewRequest,
   ErrorPagePreviewResponse,
+  ImageTransformConfig,
+  ImageTransformConfigUpdate,
   RealtimeTicketResponse,
   RuleExportPayload,
   RuleImportResponse,
@@ -1068,6 +1072,9 @@ export const settingsApi = {
   updateNetwork: (data: any) => post("/network-config", data),
   getHTTP2: () => get("/http2-config"),
   updateHTTP2: (data: any) => post("/http2-config", data),
+  getImageTransform: () => get<ImageTransformConfig>("/image-transform"),
+  updateImageTransform: (data: ImageTransformConfigUpdate) =>
+    post<ImageTransformConfig>("/image-transform", data),
   getLog: () => get("/log-config"),
   updateLog: (data: any) => post("/log-config", data),
   getTLS: () => get("/tls-config"),
@@ -1090,6 +1097,12 @@ export const upstreamApi = {
  */
 export const runtimeApi = {
   getConfig: () => get<RuntimeConfig>("/runtime-config"),
+  /** 读取全量环境变量覆盖状态；响应含 source/overridden 供 UI 打标识。 */
+  getEnvOverrides: () =>
+    get<EnvOverridesResponse>("/runtime-config/env-overrides"),
+  /** 写入覆盖与清除；响应为写后回读的同形状快照。 */
+  updateEnvOverrides: (data: EnvOverridesUpdate) =>
+    post<EnvOverridesResponse>("/runtime-config/env-overrides", data),
 }
 
 /**

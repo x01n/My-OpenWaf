@@ -15,7 +15,7 @@ import (
 func newSecurityEventAggregateRepoForTest(t *testing.T) (*SecurityEventRepo, *countingSQLLogger) {
 	t.Helper()
 	log := newCountingSQLLogger()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: log})
+	db, err := gorm.Open(sqlite.Open(":memory:?_time_format=sqlite"), &gorm.Config{Logger: log})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

@@ -73,6 +73,10 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		closeRuntimeDB(db)
 		return nil, fmt.Errorf("redis config: %w", err)
 	}
+	cfg, overrideWarns := ApplyStoredConfigOverrides(db, cfg)
+	for _, w := range overrideWarns {
+		log.Warn(w)
+	}
 	warnings, err = cfg.Validate()
 	if err != nil {
 		closeRuntimeDB(db)

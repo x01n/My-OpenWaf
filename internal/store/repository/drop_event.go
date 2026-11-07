@@ -169,7 +169,8 @@ func (r *DropEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 	const batchSize = 5000
 
 	for {
-		tx := r.db.Where("id IN (?)",
+		// derived table 包一层以兼容 MySQL 8.0（见 SecurityEventRepo.DeleteOlderThan 的说明）。
+		tx := r.db.Where("id IN (SELECT id FROM (?) AS archive_batch)",
 			r.db.Model(&store.DropEvent{}).Select("id").Where("created_at < ?", before).Limit(batchSize),
 		).Delete(&store.DropEvent{})
 		if tx.Error != nil {

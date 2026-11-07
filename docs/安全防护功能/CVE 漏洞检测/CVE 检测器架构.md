@@ -3,403 +3,352 @@
 # CVE 检测器架构
 
 <cite>
-**本文引用的文件**
+**本文档引用的文件**
 - [detector.go](file://internal/waf/cve/detector.go)
 - [general.go](file://internal/waf/cve/general.go)
 - [java.go](file://internal/waf/cve/java.go)
 - [node.go](file://internal/waf/cve/node.go)
 - [php.go](file://internal/waf/cve/php.go)
 - [feed.go](file://internal/waf/cve/feed.go)
-- [cve.go](file://internal/admin/detect/cve.go)
-- [cve_rules.go](file://internal/admin/detect/cve_rules.go)
-- [cve_rule.go](file://internal/store/repository/cve_rule.go)
-- [cve.go](file://internal/store/cve.go)
-- [detector_test.go](file://internal/waf/cve/detector_test.go)
+- [ac.go](file://internal/ac/ac.go)
+- [ac_registry.go](file://internal/waf/cve/ac_registry.go)
+- [ac_subdetector.go](file://internal/waf/cve/ac_subdetector.go)
+- [snippet.go](file://internal/pkg/snippet/snippet.go)
+- [phases.go](file://internal/core/rules/phases.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
-7. [性能考量](#性能考量)
+7. [性能考虑](#性能考虑)
 8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件面向 CVE 检测器架构，系统性阐述 CVEDetector 协调器的设计原理、多语言检测器的组织结构与工作流程；深入解析 CVERuleRegistry 注册表的线程安全机制与规则管理策略；说明检测器初始化、规则注册与执行顺序；解释 CVEMatch 结构体的设计目的与字段语义；给出性能优化策略（早退机制、预过滤器、检测器选择逻辑）以及如何通过 categorySensitivity 参数实现按类别的敏感度控制。
+
+本文聚焦 CVE 检测的**架构与并发模型**：`CVEDetector` 如何编排四类子检测器、`CVERuleRegistry` 的读写锁与原子指针分工、`CVERequest`/`CVEMatch` 的字段语义、`Detect` 的执行顺序与按类别敏感度跳过、以及 Aho-Corasick 必要字面门在热路径上的裁剪作用。规则条数、动作映射与数据源同步的完整口径分别在《CVE 漏洞检测》《CVE 数据源同步》给出，本文不重复。
 
 ## 项目结构
-CVE 检测相关代码主要位于 internal/waf/cve 目录，管理与展示在 internal/admin/detect 与 internal/store 下，形成“检测引擎 + 规则仓库 + 后台管理”的完整闭环。
+
+CVE 检测引擎位于 `internal/waf/cve`，与 `internal/ac`（匹配件）、`internal/pkg/snippet`（片段抽取）协作，运行期入口在 `internal/core/rules/phases.go` 的 `cvePhase`。
+
+| 结构 | 定位 | 关键行号 |
+|---|---|---|
+| `CVEDetector` | 协调器，持有四子检测器 + 自定义规则 | detector.go:22-30 |
+| `CVERuleRegistry` | 全局注册表，`CheckFunc` 型规则 | detector.go:113-117 |
+| 四子检测器 | `general`/`php`/`java`/`node` | New*CVEDetector |
+| `CVERequest` | 归一化请求与多目标视图 | detector.go:768-787 |
+| `CVEMatch` | 命中结果 | detector.go:45-62 |
+| AC 门 | 注册表门 + 子检测器门 | ac_registry.go / ac_subdetector.go |
 
 ```mermaid
 graph TB
-subgraph "检测引擎"
-D["CVEDetector<br/>协调器"]
-G["GeneralCVEDetector<br/>通用规则"]
-J["JavaCVEDetector<br/>Java 规则"]
-N["NodeCVEDetector<br/>Node/React 规则"]
-P["PHPCVEDetector<br/>PHP 规则"]
-R["CVERuleRegistry<br/>注册表"]
+subgraph "协调层"
+CD["CVEDetector"]
+REG["CVERuleRegistry"]
+CUSTOM["compiledCustom<br/>atomic.Pointer"]
 end
-subgraph "规则来源"
-F["CVEFeedManager<br/>外部同步"]
-DB["数据库规则<br/>cve_rules 表"]
+subgraph "执行层"
+G["GeneralCVEDetector"]
+P["PHPCVEDetector"]
+J["JavaCVEDetector"]
+N["NodeCVEDetector"]
 end
-subgraph "管理与展示"
-A["后台管理 API"]
-V["前端规则页面"]
+subgraph "支撑层"
+REQ["CVERequest"]
+ACG["subDetectorHits / registryACGate"]
+SN["snippet.Extract"]
 end
-D --> G
-D --> J
-D --> N
-D --> P
-D --> R
-F --> DB
-DB --> D
-A --> F
-A --> DB
-V --> A
+CD --> G
+CD --> P
+CD --> J
+CD --> N
+CD --> CUSTOM
+CD --> REG
+CD --> REQ
+G --> ACG
+P --> ACG
+J --> ACG
+N --> ACG
+CUSTOM --> SN
 ```
 
-图表来源
-- [detector.go:14-22](file://internal/waf/cve/detector.go#L14-L22)
-- [general.go:733-745](file://internal/waf/cve/general.go#L733-L745)
-- [java.go:72-83](file://internal/waf/cve/java.go#L72-L83)
-- [node.go:59-70](file://internal/waf/cve/node.go#L59-L70)
-- [php.go:57-68](file://internal/waf/cve/php.go#L57-L68)
-- [feed.go:16-30](file://internal/waf/cve/feed.go#L16-L30)
-- [cve.go:16-39](file://internal/admin/detect/cve.go#L16-L39)
+**图表来源**
+- [detector.go:22-30](file://internal/waf/cve/detector.go#L22-L30)
+- [detector.go:113-117](file://internal/waf/cve/detector.go#L113-L117)
+- [detector.go:768-787](file://internal/waf/cve/detector.go#L768-L787)
 
-章节来源
-- [detector.go:1-549](file://internal/waf/cve/detector.go#L1-L549)
-- [general.go:1-1180](file://internal/waf/cve/general.go#L1-L1180)
-- [java.go:1-227](file://internal/waf/cve/java.go#L1-L227)
-- [node.go:1-240](file://internal/waf/cve/node.go#L1-L240)
-- [php.go:1-267](file://internal/waf/cve/php.go#L1-L267)
-- [feed.go:1-549](file://internal/waf/cve/feed.go#L1-L549)
-- [cve.go:1-252](file://internal/admin/detect/cve.go#L1-L252)
-- [cve_rules.go:1-196](file://internal/admin/detect/cve_rules.go#L1-L196)
-- [cve_rule.go:1-96](file://internal/store/repository/cve_rule.go#L1-L96)
-- [cve.go:1-41](file://internal/store/cve.go#L1-L41)
+**章节来源**
+- [detector.go:22-30](file://internal/waf/cve/detector.go#L22-L30)
+- [detector.go:790-797](file://internal/waf/cve/detector.go#L790-L797)
 
 ## 核心组件
-- CVEDetector 协调器：聚合 PHP、Java、Node.js、通用四类子检测器，统一执行检测、自定义规则与注册表规则，并提供早退与敏感度控制。
-- 四类子检测器：各自维护目标域内的规则集，采用预编译正则与目标选择策略进行高效匹配。
-- CVERuleRegistry 注册表：全局线程安全的规则注册与执行容器，支持注册、覆盖与批量执行。
-- CVEFeedManager 外部同步：从 NVD/GitHub Advisory 拉取最新 CVE 信息，映射为规则写入数据库并热加载到检测器。
-- 管理与展示：后台 API 提供规则增删改查、同步触发与状态查询；前端页面提供规则列表与统计。
 
-章节来源
-- [detector.go:12-22](file://internal/waf/cve/detector.go#L12-L22)
-- [general.go:733-745](file://internal/waf/cve/general.go#L733-L745)
-- [java.go:72-83](file://internal/waf/cve/java.go#L72-L83)
-- [node.go:59-70](file://internal/waf/cve/node.go#L59-L70)
-- [php.go:57-68](file://internal/waf/cve/php.go#L57-L68)
-- [feed.go:16-30](file://internal/waf/cve/feed.go#L16-L30)
+| 组件 | 职责 | 并发原语 |
+|---|---|---|
+| `CVEDetector` | 编排检测、维护自定义规则 | `sync.RWMutex` + `atomic.Pointer[[]compiledCustomRule]` |
+| `CVERuleRegistry` | 注册/覆盖/执行 `CheckFunc` 规则 | `sync.RWMutex` |
+| `*CVEDetector` 四类 | 各生态正则规则集 | 只读 `rules` 切片（构造后不变） |
+| `subDetectorHits` | 一次计算六视图 AC mask | 值类型，单次请求内共享 |
+| `cvePhase` | 命中→动作 | 编译期缓存 overrides |
+
+`NewCVEDetector` 仅创建四个子检测器（detector.go:790-797）；自定义规则读写分离：读侧 `compiledCustomRules()` 原子 Load 一次即返回共享只读切片（detector.go:38-43），写侧在持有 `mu` 时构建新切片并 `Store`（detector.go:2251-2265），热路径不参与读写锁竞争。
+
+**章节来源**
+- [detector.go:38-43](file://internal/waf/cve/detector.go#L38-L43)
+- [detector.go:2251-2265](file://internal/waf/cve/detector.go#L2251-L2265)
 
 ## 架构总览
-CVEDetector 的执行路径遵循“早退 + 顺序执行 + 多来源合并”的策略：先通过 hasCVESuspiciousContent 快速判断是否需要扫描；若需扫描，则依次执行通用检测器、各语言检测器、自定义规则、注册表规则；最后汇总返回所有匹配项。
+
+`cvePhase.Execute` 是运行期入口：先用 `HasRawCVESuspiciousContent` 对原始字节早退（phases.go:754），再 `BuildCVERequestInto` 归一化，然后 `Detect` 汇总所有匹配，最后逐条按覆盖判定禁用并选定首个命中。`Detect` 内部先 `hasCVESuspiciousContent` 二次早退，再一次性计算 `computeSubDetectorHits`，串行执行四类子检测器、自定义规则、注册表规则。
 
 ```mermaid
 sequenceDiagram
-participant Client as "客户端"
-participant Detector as "CVEDetector"
-participant General as "GeneralCVEDetector"
-participant PHP as "PHPCVEDetector"
-participant Java as "JavaCVEDetector"
-participant Node as "NodeCVEDetector"
-participant Registry as "CVERuleRegistry"
-Client->>Detector : "请求 + 可选敏感度映射"
-Detector->>Detector : "hasCVESuspiciousContent()"
-alt 需要扫描
-Detector->>General : "Detect()"
-General-->>Detector : "匹配结果"
-Detector->>PHP : "Detect()"
-PHP-->>Detector : "匹配结果"
-Detector->>Java : "Detect()"
-Java-->>Detector : "匹配结果"
-Detector->>Node : "Detect()"
-Node-->>Detector : "匹配结果"
-Detector->>Detector : "自定义规则匹配"
-Detector->>Registry : "DetectAll()"
-Registry-->>Detector : "匹配结果"
-Detector-->>Client : "合并后的 CVEMatch 列表"
-else 不需要扫描
-Detector-->>Client : "空结果"
-end
+participant PH as "cvePhase.Execute"
+participant CD as "CVEDetector.Detect"
+participant H as "computeSubDetectorHits"
+participant SUB as "四子检测器"
+participant CU as "compiledCustomRules"
+participant REG as "Registry.DetectAll"
+PH->>CD : "Detect(req, catSens)"
+CD->>CD : "hasCVESuspiciousContent 早退"
+CD->>H : "一次性计算六视图 mask"
+H-->>CD : "subDetectorHits"
+CD->>SUB : "general→php→java→node（按敏感度门控）"
+SUB-->>CD : "matches"
+CD->>CU : "pickTarget + 正则"
+CU-->>CD : "matches（含 snippet）"
+CD->>REG : "DetectAll(uri, body, ua, headers)"
+REG-->>CD : "matches"
+CD-->>PH : "全部 matches"
+PH->>PH : "覆盖禁用 / 动作解析"
 ```
 
-图表来源
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
-- [general.go:733-745](file://internal/waf/cve/general.go#L733-L745)
-- [php.go:194-222](file://internal/waf/cve/php.go#L194-L222)
-- [java.go:199-226](file://internal/waf/cve/java.go#L199-L226)
-- [node.go:211-239](file://internal/waf/cve/node.go#L211-L239)
-- [detector.go:123-137](file://internal/waf/cve/detector.go#L123-L137)
+**图表来源**
+- [detector.go:1793-1863](file://internal/waf/cve/detector.go#L1793-L1863)
+- [ac_subdetector.go:120-135](file://internal/waf/cve/ac_subdetector.go#L120-L135)
+- [phases.go:744-871](file://internal/core/rules/phases.go#L744-L871)
+
+**章节来源**
+- [detector.go:1793-1863](file://internal/waf/cve/detector.go#L1793-L1863)
 
 ## 详细组件分析
 
-### CVEDetector 协调器与执行流程
-- 初始化：构造函数创建四个子检测器实例。
-- 请求归一化：BuildCVERequest 将原始请求解码为多套变体，构建 CVERequest 并预处理大小写。
-- 早退与敏感度：hasCVESuspiciousContent 快速过滤低风险请求；Detect 接受可选 categorySensitivity 映射，按类别开关子检测器。
-- 执行顺序：通用检测器优先，随后按类别顺序执行 PHP/Java/Node；自定义规则与注册表规则在最后统一汇总。
-- 线程安全：自定义规则热加载使用互斥锁保护；注册表读取使用读写锁。
+### CVEDetector 与执行顺序
 
-```mermaid
-flowchart TD
-Start(["进入 Detect(req, categorySensitivity)"]) --> Early["hasCVESuspiciousContent(req)"]
-Early --> |否| ReturnEmpty["返回空结果"]
-Early --> |是| SensCheck["解析 categorySensitivity 映射"]
-SensCheck --> Gen["执行通用检测器"]
-Gen --> Php["执行 PHP 检测器"]
-Php --> Java["执行 Java 检测器"]
-Java --> Node["执行 Node 检测器"]
-Node --> Custom["匹配自定义规则"]
-Custom --> Registry["注册表规则 DetectAll()"]
-Registry --> Merge["合并所有匹配"]
-Merge --> End(["返回 CVEMatch 列表"])
-```
+`Detect` 的子检测器执行顺序固定为通用、PHP、Java、Node，通用覆盖面最广故排在首位（detector.go:1809-1838），随后遍历 `compiledCustomRules()`（1841-1851），最后调用 `globalCVERuleRegistry.DetectAll`（1854-1860）。类别敏感度映射 `categorySensitivity` 由 `isDetectorEnabled` 消费：当键 `cve_general`/`cve_php`/`cve_java`/`cve_node` 对应值为 `none` 或 `off` 时跳过该子检测器（detector.go:1811-1817）。
 
-图表来源
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
+| 执行步 | 载体 | 目标选取 | 片段抽取 |
+|:--:|---|---|---|
+| 1 | 子检测器（4 类） | `resolveTargets(req, target)` | `snippet.Extract`（detector/java/node/php 各自 Detect） |
+| 2 | 自定义规则 | `pickTarget(req, target)` | `snippet.Extract`（detector.go:1947） |
+| 3 | 注册表规则 | `CheckFunc(uri, body, ua, headers)` | 无（`registryRuleMatch` 不抽取片段） |
 
-章节来源
-- [detector.go:159-167](file://internal/waf/cve/detector.go#L159-L167)
-- [detector.go:169-212](file://internal/waf/cve/detector.go#L169-L212)
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
+**章节来源**
+- [detector.go:1809-1860](file://internal/waf/cve/detector.go#L1809-L1860)
+- [detector.go:1933-1949](file://internal/waf/cve/detector.go#L1933-L1949)
+- [php.go:279-326](file://internal/waf/cve/php.go#L279-L326)
 
-### CVERuleRegistry 注册表与线程安全
-- 结构：内部保存插入顺序的规则切片与 ID->规则索引映射。
-- 线程安全：注册、覆盖、批量执行均使用互斥锁；读取使用读写锁提升并发读性能。
-- 规则覆盖：支持 JSON 配置对启用状态与敏感度进行覆盖。
-- 全局实例：提供全局注册表句柄，供通用规则 init 时注册与外部读取。
+### CVERuleRegistry 与颗粒化规则
+
+`CVERule` 把检测逻辑封闭在 `CheckFunc(uri, body, ua, headers) *CVEMatch`（detector.go:90-100）。注册表以插入顺序切片 + `ID→规则` 索引存储（113-117），`Register` 去重（124-132），`ApplyOverrides` 支持 JSON 覆盖启用与敏感度（149-162）。`DetectAll`/`DetectFirst` 在遍历前先算一次 `registryCombinedLower` 与 AC mask，仅对通过 `shouldScanRegisteredCVERuleAC` 的规则执行 `CheckFunc`（176-214、726-760）。`registryRuleMatch` 为命中补齐 `Source=builtin` 与类别/严重度/描述缺省（222-236）。
 
 ```mermaid
 classDiagram
+class CVEDetector {
+-phpDetector
+-javaDetector
+-nodeDetector
+-generalDetector
+-customRules []CustomCVERule
+-compiledCustom atomic Pointer
+-mu RWMutex
++Detect(req, catSens) []CVEMatch
++ReloadCustomRules(rules)
++AddCustomRule(rule)
++RemoveCustomRule(id)
+}
 class CVERuleRegistry {
--mu : RWMutex
--rules : []*CVERule
--index : map[string]*CVERule
+-mu RWMutex
+-rules []*CVERule
+-index map
 +Register(rule)
++All() []CVERule
 +ApplyOverrides(overrides)
-+DetectAll(uri, body, ua, headers) []CVEMatch
++DetectAll() []CVEMatch
 }
 class CVERule {
 +string ID
-+string Name
-+string Description
 +string CVE
 +string Severity
 +string Category
 +bool Enabled
-+string Sensitivity
-+CheckFunc(uri, body, ua, headers) *CVEMatch
++CheckFunc() *CVEMatch
 }
+CVEDetector --> CVERuleRegistry : "调用 DetectAll"
 CVERuleRegistry --> CVERule : "管理"
 ```
 
-图表来源
-- [detector.go:74-83](file://internal/waf/cve/detector.go#L74-L83)
-- [detector.go:85-121](file://internal/waf/cve/detector.go#L85-L121)
-- [detector.go:123-142](file://internal/waf/cve/detector.go#L123-L142)
+**图表来源**
+- [detector.go:113-146](file://internal/waf/cve/detector.go#L113-L146)
+- [detector.go:176-214](file://internal/waf/cve/detector.go#L176-L214)
+- [detector.go:222-236](file://internal/waf/cve/detector.go#L222-L236)
 
-章节来源
-- [detector.go:74-142](file://internal/waf/cve/detector.go#L74-L142)
+**章节来源**
+- [detector.go:90-146](file://internal/waf/cve/detector.go#L90-L146)
+- [detector.go:726-760](file://internal/waf/cve/detector.go#L726-L760)
 
-### 四类子检测器设计与规则组织
-- 通用检测器 GeneralCVEDetector：覆盖最广的通用攻击模式，规则以正则集合与目标域组合形式组织，匹配后自动推断命中部分。
-- PHP 检测器 PHPCVEDetector：聚焦 PHP 生态常见漏洞，规则按目标域（url/body/header 等）组织，resolveTargets/guessMatchedPart 辅助定位。
-- Java 检测器 JavaCVEDetector：聚焦 Java 生态（Log4Shell、Spring4Shell、Fastjson、Struts 等），规则以目标域与多正则组合组织。
-- Node/React 检测器 NodeCVEDetector：聚焦 Node/Next.js/React 生态（原型污染、RSC Flight、中间件绕过等），规则以目标域与多正则组合组织。
+### CVERequest 归一化与目标视图
 
-```mermaid
-classDiagram
-class GeneralCVEDetector {
--rules : []generalCVERule
-+Detect(req) []CVEMatch
-}
-class PHPCVEDetector {
--rules : []phpCVERule
-+Detect(req) []CVEMatch
-}
-class JavaCVEDetector {
--rules : []javaCVERule
-+Detect(req) []CVEMatch
-}
-class NodeCVEDetector {
--rules : []nodeCVERule
-+Detect(req) []CVEMatch
-}
-class generalCVERule {
-+string cveID
-+string severity
-+string description
-+patterns : []*regexp.Regexp
-+string target
-+bool matchAll
-}
-class phpCVERule {
-+string cveID
-+string severity
-+string description
-+patterns : []*regexp.Regexp
-+string target
-}
-class javaCVERule {
-+string cveID
-+string severity
-+string description
-+patterns : []*regexp.Regexp
-+string target
-}
-class nodeCVERule {
-+string cveID
-+string severity
-+string description
-+patterns : []*regexp.Regexp
-+string target
-}
-GeneralCVEDetector --> generalCVERule
-PHPCVEDetector --> phpCVERule
-JavaCVEDetector --> javaCVERule
-NodeCVEDetector --> nodeCVERule
-```
+`BuildCVERequestInto`（detector.go:807 起）用 `multiDecode` 对 path/query/body 做「URL 解码→Base64 解码」多级解码（detector.go:2371 起），并区分原始与解码变体，构建 `URLTargets`/`BodyTargets`/`HeaderTargets`/`AllTargets` 及小写镜像。子检测器与自定义规则据此选择扫描范围。
 
-图表来源
-- [general.go:733-745](file://internal/waf/cve/general.go#L733-L745)
-- [php.go:57-68](file://internal/waf/cve/php.go#L57-L68)
-- [java.go:72-83](file://internal/waf/cve/java.go#L72-L83)
-- [node.go:59-70](file://internal/waf/cve/node.go#L59-L70)
+| 字段 | 含义 | 用途 |
+|---|---|---|
+| Path/RawQuery | 原始路径/查询 | url 视图 |
+| DecodedPath/Query/Body | 多级解码变体 | 编码绕过识别 |
+| URLTargets/BodyTargets/HeaderTargets | 分组目标集合 | 子检测器 `resolveTargets` |
+| URL/Body/HeaderTargetsLower | 小写镜像 | AC mask 计算 |
+| AllTargets/AllTargetsLower | 聚合全部目标 | `all` 视图与预过滤 |
 
-章节来源
-- [general.go:1-1180](file://internal/waf/cve/general.go#L1-L1180)
-- [php.go:1-267](file://internal/waf/cve/php.go#L1-L267)
-- [java.go:1-227](file://internal/waf/cve/java.go#L1-L227)
-- [node.go:1-240](file://internal/waf/cve/node.go#L1-L240)
+**章节来源**
+- [detector.go:768-787](file://internal/waf/cve/detector.go#L768-L787)
+- [detector.go:807-885](file://internal/waf/cve/detector.go#L807-L885)
+- [detector.go:2371-2392](file://internal/waf/cve/detector.go#L2371-L2392)
 
-### CVEMatch 结构体设计与字段语义
-- 字段含义：CVEID（规则归属）、Category（类别）、Severity（严重程度）、Description（描述）、MatchedPart（命中部位）、Pattern（匹配模式）、Action（处置动作）。
-- 设计目的：统一检测结果输出，便于上层策略引擎根据严重度与类别进行差异化处置。
+### CVEMatch 结构体与字段语义
 
-章节来源
-- [detector.go:24-32](file://internal/waf/cve/detector.go#L24-L32)
+`CVEMatch` 是统一命中载体，其字段一部分来自内置规则、一部分仅数据库规则行才有值。
 
-### 规则注册与管理流程
-- 注册：通用规则在 init 中通过 Register 加入全局注册表；也可通过 JSON 覆盖启用与敏感度。
-- 外部同步：CVEFeedManager 从 NVD/GitHub Advisory 拉取数据，映射为规则写入数据库，再热加载到检测器。
-- 管理 API：后台提供规则 CRUD、批量更新、同步触发与状态查询；前端提供规则统计与筛选。
+| 字段 | 来源 | 说明 |
+|---|---|---|
+| CVEID | 内置/DB | 命中归属的 CVE 编号 |
+| Category | 内置/DB | 语言子检测器输出短名（java/php/node），通用/注册表输出 `cve_*` |
+| Severity | 内置/DB | critical/high/medium/low |
+| MatchedPart | 内置 | url/body/header/cookie/all 或 `guessMatchedPart` 推断 |
+| Pattern | 内置/DB | 命中用正则字面或规则 ID |
+| Action | 内置/DB | drop/block/log 等，空则继承配置 |
+| CaptchaType | DB | 规则级验证码类型，空则继承全局 |
+| Source/CVSSScore/CWEType/References | DB 行 | 内置规则 `Source=builtin`，其余为空 |
+| Snippet | `snippet.Extract` | 命中片段（截断，见性能考虑） |
+
+**章节来源**
+- [detector.go:45-62](file://internal/waf/cve/detector.go#L45-L62)
+- [detector.go:1933-1949](file://internal/waf/cve/detector.go#L1933-L1949)
+
+### Aho-Corasick 必要字面门
+
+两套门都在构造期把 needle 编译为位图，运行期只做一次 mask 交集判断。子检测器门 `subDetectorNeedleEntries` 按六个视图分组，`computeSubDetectorHits` 对 `CVERequest` 一次算全部视图 mask，再传给四子检测器复用（ac_subdetector.go:120-135）；`subDetectorACGate` 对无门规则返回 `true` 不拦截（139-159）。注册表门 `registryNeedleGroups` 覆盖 23 组 CVE，其 needle 取对应正则的必要字面，命中正则必然包含该字面，故门只省调用不改判定（ac_registry.go:18-88）。匹配器 `Matcher` 用扁平转移表 + 终态位内联优化缓存访问（ac.go:27-32、133-184）。
 
 ```mermaid
-sequenceDiagram
-participant Manager as "CVEFeedManager"
-participant NVD as "NVD API"
-participant GH as "GitHub Advisory API"
-participant DB as "数据库"
-participant Detector as "CVEDetector"
-Manager->>NVD : "拉取最近 CVE"
-NVD-->>Manager : "返回 JSON"
-Manager->>Manager : "映射为规则"
-Manager->>DB : "写入规则"
-Manager->>GH : "拉取 Advisories"
-GH-->>Manager : "返回 JSON"
-Manager->>Manager : "映射为规则"
-Manager->>DB : "写入规则"
-Manager->>Detector : "ReloadCustomRules(已批准规则)"
+stateDiagram-v2
+[*] --> 待扫描规则
+待扫描规则 --> 门判定: shouldScan*
+门判定 --> 跳过: mask 不相交
+门判定 --> 执行CheckFunc或正则: 有门且相交 / 无门
+执行CheckFunc或正则 --> 命中: 正则匹配
+执行CheckFunc或正则 --> 未命中: 无匹配
+命中 --> [*]
+未命中 --> [*]
+跳过 --> [*]
 ```
 
-图表来源
-- [feed.go:145-212](file://internal/waf/cve/feed.go#L145-L212)
-- [feed.go:253-302](file://internal/waf/cve/feed.go#L253-L302)
-- [feed.go:381-459](file://internal/waf/cve/feed.go#L381-L459)
-- [feed.go:461-491](file://internal/waf/cve/feed.go#L461-L491)
+**图表来源**
+- [ac_subdetector.go:101-159](file://internal/waf/cve/ac_subdetector.go#L101-L159)
+- [ac_registry.go:82-88](file://internal/waf/cve/ac_registry.go#L82-L88)
 
-章节来源
-- [feed.go:1-549](file://internal/waf/cve/feed.go#L1-L549)
-- [cve.go:16-252](file://internal/admin/detect/cve.go#L16-L252)
-- [cve_rules.go:28-93](file://internal/admin/detect/cve_rules.go#L28-L93)
-- [cve_rule.go:16-77](file://internal/store/repository/cve_rule.go#L16-L77)
-- [cve.go:9-41](file://internal/store/cve.go#L9-L41)
+**章节来源**
+- [ac.go:27-32](file://internal/ac/ac.go#L27-L32)
+- [ac.go:133-184](file://internal/ac/ac.go#L133-L184)
 
-### 按类别敏感度控制（categorySensitivity）
-- 作用：允许运行时按类别调整敏感度，将某类别设为 "none"/"off" 时完全跳过该子检测器。
-- 实现：Detect 内部 isDetectorEnabled 读取映射，决定是否执行对应子检测器。
-- 使用场景：在高流量或特定站点上降低检测成本，或针对不同环境动态调整。
+### 自定义规则热重载
 
-章节来源
-- [detector.go:214-241](file://internal/waf/cve/detector.go#L214-L241)
-- [detector_test.go:106-115](file://internal/waf/cve/detector_test.go#L106-L115)
+`ReloadCustomRules` 逐条 `regexp.Compile("(?i)" + pattern)`，编译失败者跳过，成功后构建新切片并原子 Store（detector.go:2251-2265）。`AddCustomRule`/`RemoveCustomRule` 以写时复制维护同一 `compiledCustom` 指针（2268-2298）。`CVEFeedManager.loadRulesIntoDetector` 只注入 `approved=true AND source<>'catalog'` 的规则，故热重载与目录规则互不干扰（feed.go:201-228）。
+
+**章节来源**
+- [detector.go:2251-2298](file://internal/waf/cve/detector.go#L2251-L2298)
+- [feed.go:201-228](file://internal/waf/cve/feed.go#L201-L228)
 
 ## 依赖关系分析
-- 组件耦合：CVEDetector 依赖四个子检测器与注册表；子检测器仅依赖自身规则集；CVEFeedManager 依赖数据库与检测器。
-- 外部依赖：HTTP 客户端用于拉取 NVD/GitHub；GORM 用于规则持久化；正则表达式库用于模式匹配。
-- 循环依赖：未发现循环导入；模块边界清晰。
+
+- 协调层依赖执行层与支撑层；执行层子检测器互不依赖，仅共享 `resolveTargets`/`guessMatchedPart`（php.go:279-326）与 AC 门。
+- 支撑层 `internal/ac`、`pkg/snippet` 为无状态库，被检测层单向依赖。
+- 运行期入口 `cvePhase` 依赖 `CVEDetector` 与 `store.ProtectionConfig`，不反向依赖 waf 层内部结构。
 
 ```mermaid
 graph LR
-Detector["CVEDetector"] --> Gen["GeneralCVEDetector"]
-Detector --> Php["PHPCVEDetector"]
-Detector --> Java["JavaCVEDetector"]
-Detector --> Node["NodeCVEDetector"]
-Detector --> Reg["CVERuleRegistry"]
-Feed["CVEFeedManager"] --> DB["数据库"]
-Feed --> Detector
+REQ["CVERequest"] --> SUBS["4 子检测器"]
+SUBS --> RT["resolveTargets/guessMatchedPart"]
+SUBS --> SN["snippet.Extract"]
+CD["CVEDetector"] --> SUBS
+CD --> REG["CVERuleRegistry"]
+CD --> AC["internal/ac"]
+PH["cvePhase"] --> CD
 ```
 
-图表来源
-- [detector.go:14-22](file://internal/waf/cve/detector.go#L14-L22)
-- [feed.go:16-30](file://internal/waf/cve/feed.go#L16-L30)
+**图表来源**
+- [detector.go:238-253](file://internal/waf/cve/detector.go#L238-L253)
+- [php.go:279-326](file://internal/waf/cve/php.go#L279-L326)
 
-章节来源
-- [detector.go:1-549](file://internal/waf/cve/detector.go#L1-L549)
-- [feed.go:1-549](file://internal/waf/cve/feed.go#L1-L549)
+**章节来源**
+- [detector.go:238-253](file://internal/waf/cve/detector.go#L238-L253)
 
-## 性能考量
-- 早退机制：hasCVESuspiciousContent 在请求规模较小或无可疑特征时直接短路，避免昂贵的正则匹配。
-- 预过滤器：对常见攻击特征进行快速判定，减少后续检测压力。
-- 检测器选择逻辑：通用检测器优先，避免重复扫描；子检测器按类别顺序执行，减少 goroutine 开销。
-- 线程安全与并发：注册表读取使用读写锁；自定义规则热加载使用互斥锁；避免并发写导致的竞态。
-- 正则编译：子检测器规则在初始化时完成编译；自定义规则在热加载时编译，失败则跳过，保证稳定性。
+## 性能考虑
 
-章节来源
-- [detector.go:214-218](file://internal/waf/cve/detector.go#L214-L218)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
-- [detector.go:452-496](file://internal/waf/cve/detector.go#L452-L496)
-- [php.go:126-192](file://internal/waf/cve/php.go#L126-L192)
-- [java.go:132-197](file://internal/waf/cve/java.go#L132-L197)
-- [node.go:134-209](file://internal/waf/cve/node.go#L134-L209)
+- **无锁读 + 写时复制**：自定义规则读侧仅一次 `atomic.Load`，避免读写锁竞争（detector.go:38-43、2260-2264）。
+- **两级早退**：`HasRawCVESuspiciousContent`（detector.go:1108 起）与 `hasCVESuspiciousContent`（1983 起）分层拦截干净流量。
+- **AC 门一次算多复用**：`computeSubDetectorHits` 对每请求仅计算一次六视图 mask，供四子检测器共享（ac_subdetector.go:120-135）。
+- **单规则命中短路**：子检测器命中即 `goto nextRule`，每规则最多产出一条匹配（java.go:235、php.go:239、node.go:375）。
+- **片段有界**：`snippet.Extract` 对超长目标（>2*16384+1）直接返回空，命中区间两侧仅保留 48 字节、总长截断至 256（snippet.go:11-22、61-76）。
+
+**章节来源**
+- [detector.go:1108-1120](file://internal/waf/cve/detector.go#L1108-L1120)
+- [detector.go:1983-1990](file://internal/waf/cve/detector.go#L1983-L1990)
+- [snippet.go:8-76](file://internal/pkg/snippet/snippet.go#L8-L76)
 
 ## 故障排查指南
-- 无匹配但预期有：确认 categorySensitivity 是否将某类别设为 "none"/"off"；检查 hasCVESuspiciousContent 是否提前短路。
-- 自定义规则不生效：确认规则已写入数据库且 approved/enabled；检查正则是否有效；确认 CVEFeedManager 已触发热加载。
-- 外部同步失败：查看 CVEFeedManager 的同步状态与错误日志；检查 NVD/GitHub API Key 与网络连通性。
-- 性能异常：关注正则复杂度与匹配目标数量；评估是否需要增加早退规则或减少敏感度。
 
-章节来源
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
-- [feed.go:114-123](file://internal/waf/cve/feed.go#L114-L123)
-- [feed.go:145-188](file://internal/waf/cve/feed.go#L145-L188)
+| 症状 | 定位方向 | 参考 |
+|---|---|---|
+| 某类漏洞整体检不到 | 对应 `cve_*` 敏感度被设 `none/off` | detector.go:1811-1817 |
+| 自定义规则不生效 | 正则编译失败被静默跳过 | detector.go:2254-2257 |
+| 命中无 Snippet | 内置注册表规则不抽取片段 | detector.go:222-236 |
+| AC 门误拦 | 门为必要字面，若误拦说明 needle 覆盖不足 | ac_registry.go:36-60 |
+| 目标未覆盖编码变体 | `multiDecode` 未产生预期解码串 | detector.go:2371-2392 |
+
+**章节来源**
+- [detector.go:2251-2265](file://internal/waf/cve/detector.go#L2251-L2265)
+- [ac_registry.go:36-60](file://internal/waf/cve/ac_registry.go#L36-L60)
 
 ## 结论
-该 CVE 检测器架构以 CVEDetector 为核心，结合四类子检测器与全局注册表，实现了多语言、多来源的统一威胁检测。通过早退机制、预过滤器与顺序执行策略，在保证覆盖率的同时兼顾性能；通过线程安全的数据结构与热加载机制，确保规则的动态治理能力。配合后台管理与前端展示，形成从规则生成、审批、同步到可视化的完整闭环。
+
+`CVEDetector` 以「协调器 + 四类子检测器 + 全局注册表 + 原子指针自定义规则」实现关注点分离：读多写少的自定义规则用原子指针规避锁竞争，颗粒化 `CheckFunc` 规则集中在注册表并用 AC 必要字面门裁剪热路径，`CVERequest` 的多级解码与多目标视图为编码绕过提供统一扫描面，`CVEMatch` 则把内置与数据库规则收敛为同一输出契约。整体在覆盖率与性能之间取得平衡。
 
 ## 附录
-- 关键 API 与入口
-  - CVEDetector.Detect：主检测入口，支持敏感度控制与早退。
-  - CVERuleRegistry.Register/DetectAll：规则注册与批量执行。
-  - CVEFeedManager.Start/SyncNow：启动同步与手动同步。
-  - 管理 API：规则 CRUD、批量更新、同步触发、状态查询。
 
-章节来源
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
-- [detector.go:123-142](file://internal/waf/cve/detector.go#L123-L142)
-- [feed.go:83-123](file://internal/waf/cve/feed.go#L83-L123)
-- [cve.go:16-252](file://internal/admin/detect/cve.go#L16-L252)
-- [cve_rules.go:28-196](file://internal/admin/detect/cve_rules.go#L28-L196)
+### 关键接口速查
+
+| 接口 | 位置 | 作用 |
+|---|---|---|
+| `CVEDetector.Detect` | detector.go:1793 | 全量匹配入口 |
+| `CVEDetector.DetectFirst` | detector.go:1866 | 首个命中短路 |
+| `CVERuleRegistry.DetectAll` | detector.go:176 | 注册表批量执行 |
+| `computeSubDetectorHits` | ac_subdetector.go:120 | 六视图 AC mask |
+| `ReloadCustomRules` | detector.go:2251 | 自定义规则热重载 |
+
+### 术语
+
+| 术语 | 含义 |
+|---|---|
+| 子检测器规则 | `New*CVEDetector.rules` 中的多正则条目 |
+| 注册表规则 | `CVERuleRegistry` 中带 `CheckFunc` 的颗粒规则 |
+| 必要字面门 | AC needle 取正则的必要子串，只裁剪不改判定 |
+
+**章节来源**
+- [detector.go:1793-1866](file://internal/waf/cve/detector.go#L1793-L1866)
+- [ac_subdetector.go:120-135](file://internal/waf/cve/ac_subdetector.go#L120-L135)

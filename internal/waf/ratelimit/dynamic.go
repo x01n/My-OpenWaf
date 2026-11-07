@@ -67,6 +67,28 @@ func (d *DynamicRateLimiter) IsOverLimit(key string) bool {
 	return backend.IsOverLimit(key)
 }
 
+/**
+ * AllowWithQuota 把站点级配额透传给当前后端。
+ *
+ * 后端未实现 SiteQuotaLimiter（例如测试替身）时回退到 Allow，即沿用后端的
+ * 全局配额——与「站点未覆盖」的语义一致，不会因为缺少可选能力而放行全部请求。
+ *
+ * @param key       计数键。
+ * @param windowSec 窗口长度（秒）。
+ * @param maxReqs   窗口内允许的请求数。
+ * @return 未超限返回 true。
+ */
+func (d *DynamicRateLimiter) AllowWithQuota(key string, windowSec, maxReqs int) bool {
+	backend := d.current()
+	if backend == nil {
+		return true
+	}
+	if q, ok := backend.(SiteQuotaLimiter); ok {
+		return q.AllowWithQuota(key, windowSec, maxReqs)
+	}
+	return backend.Allow(key)
+}
+
 func (d *DynamicRateLimiter) Close() {
 	d.Swap(nil)
 }

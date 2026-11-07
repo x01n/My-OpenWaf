@@ -27,6 +27,7 @@ import { ActionBadge } from "@/components/action-badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DataTable } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
+import { tlsSniDisplayValue } from "@/lib/tls-sni-presence"
 import {
   IconClock,
   IconEye,
@@ -205,6 +206,13 @@ function RequestTraceContent() {
         securityEvent?.tls_version ||
         botScore?.tls_version,
       tlsSni: accessLog?.tls_sni || securityEvent?.tls_sni || botScore?.tls_sni,
+      // presence 与 SNI 名同源同优先级：先取到 SNI 名的那个来源，
+      // 其判定标记才对应这条请求，避免跨来源混用。
+      tlsSniPresence: accessLog
+        ? accessLog.tls_sni_presence
+        : securityEvent
+          ? securityEvent.tls_sni_presence
+          : botScore?.tls_sni_presence,
       tlsAlpn:
         accessLog?.tls_alpn || securityEvent?.tls_alpn || botScore?.tls_alpn,
       tlsJa3: accessLog?.tls_ja3 || securityEvent?.tls_ja3,
@@ -516,7 +524,13 @@ function RequestTraceContent() {
               {t("requestTrace.tlsVersion")}: {row.tls_version || "-"}
             </div>
             <div>
-              {t("requestTrace.tlsSni")}: {row.tls_sni || "-"}
+              {t("requestTrace.tlsSni")}:{" "}
+              {tlsSniDisplayValue(
+                row.tls_sni,
+                row.tls_sni_presence,
+                t("requestTrace.tlsSniAbsent"),
+                t("requestTrace.tlsSniUnknown")
+              )}
             </div>
             <div>
               {t("requestTrace.tlsAlpn")}: {row.tls_alpn || "-"}
@@ -685,7 +699,12 @@ function RequestTraceContent() {
             />
             <SummaryItem
               label={t("requestTrace.tlsSni")}
-              value={summary.tlsSni || "-"}
+              value={tlsSniDisplayValue(
+                summary.tlsSni,
+                summary.tlsSniPresence,
+                t("requestTrace.tlsSniAbsent"),
+                t("requestTrace.tlsSniUnknown")
+              )}
               mono
             />
             <SummaryItem

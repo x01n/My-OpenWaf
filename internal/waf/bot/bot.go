@@ -197,6 +197,7 @@ type BotRequest struct {
 	HasCookie      bool
 	ClientIP       net.IP
 	TLS            tlsfp.TLSClientFingerprint
+	HostHeader     string
 }
 
 func NewBotRequest(method, path string, headers map[string]string) BotRequest {
@@ -240,15 +241,15 @@ var goodBotUA = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)applebot|applebot-extended`),
 	regexp.MustCompile(`(?i)facebookexternalhit|facebookcatalog`),
 	regexp.MustCompile(`(?i)twitterbot|tweetmemebot`),
-	regexp.MustCompile(`(?i)linkedinbot|linkedin`),
+	regexp.MustCompile(`(?i)linkedinbot`),
 	regexp.MustCompile(`(?i)slackbot|slack-imgproxy`),
-	regexp.MustCompile(`(?i)discordbot|discord`),
+	regexp.MustCompile(`(?i)discordbot`),
 	regexp.MustCompile(`(?i)telegrambot`),
 	regexp.MustCompile(`(?i)whatsapp`),
 	regexp.MustCompile(`(?i)pinterestbot`),
 	regexp.MustCompile(`(?i)redditbot`),
 	regexp.MustCompile(`(?i)amazonbot`),
-	regexp.MustCompile(`(?i)semrushbot|ahrefs|mj12bot|dotbot`),
+	regexp.MustCompile(`(?i)semrushbot|ahrefsbot|ahrefssiteaudit|mj12bot|dotbot`),
 }
 
 type maliciousToolUAPattern struct {
@@ -288,6 +289,8 @@ type goodBotCacheEntry struct {
 	expiry   time.Time
 }
 
+// goodBotDNSPatterns 是「可校验」的良性爬虫：模式下标 → 其官方反向 DNS 后缀。
+// 表中没有下标的 UA 模式没有可用的校验手段，见 verifyGoodBotDNS。
 var goodBotDNSPatterns = map[int][]string{
 	0: {".googlebot.com.", ".google.com."},
 	1: {".search.msn.com."},
@@ -295,10 +298,17 @@ var goodBotDNSPatterns = map[int][]string{
 	5: {".apple.com.", ".applebot.apple.com."},
 }
 
+/**
+ * verifyGoodBotDNS 用反向 DNS 校验自称良性爬虫的来源 IP。
+ *
+ * @param ip 来源 IP。
+ * @param patternIdx goodBotUA 中的模式下标。
+ * @return 反向 DNS 校验通过时为 true。
+ */
 func verifyGoodBotDNS(ip net.IP, patternIdx int) bool {
-	suffixes, needsVerify := goodBotDNSPatterns[patternIdx]
-	if !needsVerify {
-		return true
+	suffixes, verifiable := goodBotDNSPatterns[patternIdx]
+	if !verifiable || ip == nil {
+		return false
 	}
 	ipStr := ip.String()
 	cacheKey := ipStr + ":" + string(rune(patternIdx+'0'))
@@ -338,6 +348,14 @@ func verifyGoodBotDNS(ip net.IP, patternIdx int) bool {
 	return verified
 }
 
+/**
+ * PreScreen 是两阶段评分的第一阶段：快速排除 + 可疑证据入口。
+ *
+ * @param r 请求特征。
+ * @param ipRepSvc IP 声誉服务，可为 nil。
+ * @param geo GeoIP 解析器，可为 nil。
+ * @return 命中任一条件时为 true。
+ */
 func PreScreen(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindResolver) bool {
 	ua := strings.TrimSpace(r.UserAgent)
 	if _, _, ok := matchMaliciousToolUA(ua); ok {
@@ -354,7 +372,7 @@ func PreScreen(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindRes
 			return true
 		}
 	}
-	return false
+	return dynamicPrescreenHit(r)
 }
 
 func matchMaliciousToolUA(ua string) (string, string, bool) {
@@ -717,10 +735,16 @@ func deepScore(r BotRequest, ipRepSvc *iprep.IPReputation, geo *geoip.MaxMindRes
 
 	fpScore, fpReasons := fingerprintScore(r)
 	hoScore, hoReasons := headerOrderScore(r.HeaderKeys)
-	raw.Fingerprint = fpScore + hoScore
+	dynTLS := evaluateDynamicTLS(r)
+	raw.Fingerprint = fpScore + hoScore + dynTLS.Score
 	fpReasons = append(fpReasons, hoReasons...)
+	fpReasons = append(fpReasons, dynTLS.Reasons...)
 	if len(fpReasons) > 0 {
 		bs.setDetail("fingerprint", strings.Join(fpReasons, ","))
+	}
+	if dynTLS.Dangerous {
+		bs.Dangerous = true
+		bs.DangerReasons = append(bs.DangerReasons, dynTLS.DangerReasons...)
 	}
 
 	if ipRepSvc != nil && r.ClientIP != nil {
@@ -937,7 +961,12 @@ func applyDangerFloor(tier BotTier, dangerous bool) BotTier {
 }
 
 /**
- * matchGoodBotUA 识别已知良性爬虫（并对其 IP 做反向 DNS 校验）。
+ * matchGoodBotUA 识别已知良性爬虫，并要求来源 IP 通过反向 DNS 校验。
+ *
+ * 校验是良性的**前提**而不是补充：UA 字面人人可写，只有「UA 自称 × 反向 DNS
+ * 指向官方域」两条同时成立才构成良性证据。因此 ClientIP 缺失（无从校验）或
+ * 该 UA 模式没有官方后缀表（verifyGoodBotDNS 的不可校验分支）都返回未命中，
+ * 请求转由加权评分处置，而不是被无条件信任。
  *
  * @param r 请求特征。
  * @return 爬虫名、规则 ID、是否命中。
@@ -948,7 +977,7 @@ func matchGoodBotUA(r BotRequest) (string, string, bool) {
 		if !re.MatchString(ua) {
 			continue
 		}
-		if r.ClientIP != nil && !verifyGoodBotDNS(r.ClientIP, i) {
+		if !verifyGoodBotDNS(r.ClientIP, i) {
 			return "", "", false
 		}
 		return "known good bot", "bot:good", true

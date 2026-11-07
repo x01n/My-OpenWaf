@@ -1,0 +1,107 @@
+package site
+
+import (
+	"My-OpenWaf/internal/store"
+
+	"gorm.io/gorm"
+)
+
+type SiteListenerRepo struct{ db *gorm.DB }
+
+func NewSiteListenerRepo(db *gorm.DB) *SiteListenerRepo { return &SiteListenerRepo{db: db} }
+
+// All 返回全部监听器（含已停用），按 site/bind 排序。
+func (r *SiteListenerRepo) All() ([]store.SiteListener, error) {
+	var items []store.SiteListener
+	return items, r.db.Order("site_id ASC, bind ASC").Find(&items).Error
+}
+
+// AllEnabled 只返回标记为启用的监听器。
+func (r *SiteListenerRepo) AllEnabled() ([]store.SiteListener, error) {
+	var items []store.SiteListener
+	return items, r.db.Where("enabled = ?", true).Order("site_id ASC, bind ASC").Find(&items).Error
+}
+
+// ListEnabledBySites 仅返回指定站点页的启用监听器，避免管理端渲染一页站点时扫描全表。
+func (r *SiteListenerRepo) ListEnabledBySites(siteIDs []uint) ([]store.SiteListener, error) {
+	if len(siteIDs) == 0 {
+		return []store.SiteListener{}, nil
+	}
+	var items []store.SiteListener
+	return items, r.db.Where("enabled = ? AND site_id IN ?", true, siteIDs).
+		Order("site_id ASC, bind ASC").Find(&items).Error
+}
+
+// ListBySite 返回某个站点的监听器，按 bind 排序。
+func (r *SiteListenerRepo) ListBySite(siteID uint) ([]store.SiteListener, error) {
+	var items []store.SiteListener
+	return items, r.db.Where("site_id = ?", siteID).Order("bind ASC").Find(&items).Error
+}
+
+func (r *SiteListenerRepo) Get(id uint) (*store.SiteListener, error) {
+	var item store.SiteListener
+	return &item, r.db.First(&item, id).Error
+}
+
+// Create 新建监听器。Enabled 带 gorm default:true，见 CreateWithZeroDefaults。
+func (r *SiteListenerRepo) Create(item *store.SiteListener) error {
+	return store.CreateWithZeroDefaults(r.db, item)
+}
+
+func (r *SiteListenerRepo) Update(item *store.SiteListener) error {
+	return r.db.Save(item).Error
+}
+
+func (r *SiteListenerRepo) Delete(id uint) error {
+	return r.db.Delete(&store.SiteListener{}, id).Error
+}
+
+func (r *SiteListenerRepo) DeleteBySite(siteID uint) error {
+	return r.db.Where("site_id = ?", siteID).Delete(&store.SiteListener{}).Error
+}
+
+func (r *SiteListenerRepo) CountByCertID(certID uint) (int64, error) {
+	var count int64
+	err := r.db.Model(&store.SiteListener{}).Where("cert_id = ?", certID).Count(&count).Error
+	return count, err
+}
+
+func (r *SiteListenerRepo) ApplyCertificateToTLSListeners(siteIDs []uint, certID uint) (int64, error) {
+	if len(siteIDs) == 0 {
+		return 0, nil
+	}
+	tx := r.db.Model(&store.SiteListener{}).
+		Where("site_id IN ? AND tls_enabled = ?", siteIDs, true).
+		Updates(map[string]any{"cert_id": certID})
+	return tx.RowsAffected, tx.Error
+}
+
+func (r *SiteListenerRepo) CreateWithLegacyPromotion(item *store.SiteListener, legacy *store.SiteListener) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if legacy != nil {
+			if err := tx.Create(legacy).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Create(item).Error
+	})
+}
+
+func (r *SiteListenerRepo) CreateLegacyReplacement(item *store.SiteListener) (bool, error) {
+	created := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&store.SiteListener{}).Where("site_id = ?", item.SiteID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 0 {
+			return nil
+		}
+		if err := store.CreateWithZeroDefaults(tx, item); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	return created, err
+}

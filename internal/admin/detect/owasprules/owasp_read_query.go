@@ -88,7 +88,7 @@ func paginateOWASPViews(c *app.RequestContext, views []owaspRuleView) []owaspRul
 		page = 1
 	}
 	if pageSize <= 0 || pageSize > 500 {
-		pageSize = 100
+		pageSize = 500
 	}
 	start := (page - 1) * pageSize
 	if start >= len(views) {

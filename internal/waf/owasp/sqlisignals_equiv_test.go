@@ -300,7 +300,7 @@ func TestSQLiShouldScanSignalsEquivalence(t *testing.T) {
 		}
 		for _, id := range sqliSignalsEquivIDs {
 			p := findSQLiPatternForTest(id)
-			if refShouldScanSQLiPatternWithSignals(in, p, ref) != shouldScanSQLiPatternWithSignals(in, p, got) {
+			if refShouldScanSQLiPatternWithSignals(in, p, ref) != shouldScanSQLiPatternWithSignals(in, p, got, nil) {
 				t.Fatalf("shouldScan 等价破坏 %s: %q", id, in)
 			}
 		}
@@ -337,7 +337,7 @@ func TestSQLiShouldScanSignalsRandomEquivalence(t *testing.T) {
 		got := collectSQLiPatternSignals(in)
 		for _, id := range ids {
 			p := findSQLiPatternForTest(id)
-			if refShouldScanSQLiPatternWithSignals(in, p, ref) != shouldScanSQLiPatternWithSignals(in, p, got) {
+			if refShouldScanSQLiPatternWithSignals(in, p, ref) != shouldScanSQLiPatternWithSignals(in, p, got, nil) {
 				t.Fatalf("随机 shouldScan 等价破坏 %s: %q", id, in)
 			}
 		}

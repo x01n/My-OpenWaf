@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -40,6 +41,7 @@ import (
 	adminupstream "My-OpenWaf/internal/admin/system/upstream"
 	"My-OpenWaf/internal/cache"
 	"My-OpenWaf/internal/core/adminweb"
+	"My-OpenWaf/internal/dataplane"
 	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/snapshot"
@@ -207,6 +209,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/tls-config", system.GetTLSDefaultConfig(r.SystemSettings))
 		readGroup.GET("/tls-cipher-suites", system.ListCipherSuites())
 		readGroup.GET("/http2-config", system.GetHTTP2Config(r.SystemSettings))
+		readGroup.GET("/image-transform", system.GetImageTransformConfig(r.SystemSettings))
 		readGroup.GET("/redis-config", system.GetRedisConfig(r.SystemSettings, false))
 		readGroup.GET("/log-config", system.GetLogConfig(r.SystemSettings))
 
@@ -241,6 +244,7 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		readGroup.GET("/drop-events", drop.GetDropEvents(r.DropEvent))
 		readGroup.GET("/upstreams/status", adminupstream.UpstreamStatus(deps.Upstreams))
 		readGroup.GET("/runtime-config", system.GetRuntimeConfig(deps.RuntimeState, deps.Snapshot, deps.Repos.SystemSettings))
+		readGroup.GET("/runtime-config/env-overrides", system.ListRuntimeConfigOverrides(deps.Repos.SystemSettings, deps.DB))
 		readGroup.GET("/realtime/ticket", deps.Realtime.TicketHandler())
 
 		readGroup.GET("/page-templates", pagehandler.GetPageTemplates(r.SystemSettings))
@@ -378,14 +382,19 @@ func RegisterRoutes(h *server.Hertz, deps *Dependencies) {
 		adminGroup.POST("/backup/import", system.ImportBackup(deps.DB, reload, func() {
 			r.CVERule.InvalidateCanonicalSnapshot()
 			owasprules.InvalidateOWASPReadSnapshots(deps.DB)
+			if err := dataplane.RevokeAllAccessSessions(); err != nil {
+				slog.Error("[admin] revoke access sessions after backup import failed", "error", err)
+			}
 		}))
 
 		adminGroup.POST("/network-config", system.UpdateNetworkConfig(r.SystemSettings, reload))
+		adminGroup.POST("/runtime-config/env-overrides", system.UpdateRuntimeConfigOverrides(r.SystemSettings, deps.DB, reload))
 		adminGroup.POST("/http2-config", system.UpdateHTTP2Config(r.SystemSettings, reload))
+		adminGroup.POST("/image-transform", system.UpdateImageTransformConfig(r.SystemSettings, reload))
 		adminGroup.POST("/redis-config", system.UpdateRedisConfig(r.SystemSettings, deps.ReloadRedis))
 		adminGroup.POST("/log-config", system.UpdateLogConfig(r.SystemSettings))
 		adminGroup.POST("/tls-config", system.UpdateTLSDefaultConfig(r.SystemSettings, reload))
-		adminGroup.POST("/certificates/acme/config", system.UpdateACMEConfig(r.SystemSettings))
+		adminGroup.POST("/certificates/acme/config", system.UpdateACMEConfig(r.SystemSettings, reload))
 		adminGroup.GET("/certificates/acme/status", system.ACMEStatus(deps.Repos))
 
 		adminGroup.POST("/api-keys", adminapikey.CreateAPIKey(r.AdminAPIKey, r.AdminAccount))

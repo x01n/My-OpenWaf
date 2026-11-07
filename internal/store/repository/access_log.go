@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"My-OpenWaf/internal/store"
+	"My-OpenWaf/internal/waf/bot/tlsfp"
 
 	"gorm.io/gorm"
 )
@@ -19,6 +21,11 @@ type AccessLogRepo struct {
 	writeQueue           WriteQueueBackend
 	fingerprintCache     *fingerprintResultCache
 	fingerprintNamespace string
+	// fingerprintHotKeys 记录本进程写入过的指纹聚合热列表键。
+	//
+	// 热列表键带进程级随机 namespace，只有本进程会读，因此失效时按记录
+	// 精确删除即可，不需要 SCAN 整个 keyspace，也不会误删其它实例的键。
+	fingerprintHotKeys sync.Map
 }
 
 // CountCache 是昂贵的 COUNT 查询所用的可选缓存。
@@ -64,13 +71,53 @@ func (r *AccessLogRepo) SetWriteQueue(wq WriteQueueBackend) {
 	r.writeQueue = wq
 }
 
-// invalidateFingerprintCache 清除进程内指纹聚合结果，并递增共享缓存的代际。
-// Redis 旧键仅保留短 TTL，避免在每次高频日志写入时执行昂贵的 SCAN 删除。
+/**
+ * invalidateFingerprintCache 清除进程内指纹聚合结果，并删除本进程写入的
+ * Redis 热列表键。
+ *
+ * 顺序不能颠倒：必须先删热列表、再递增代际。反过来的话，并发读会在新的
+ * 代际下读到尚未删除的旧热列表并回填进程内缓存，失效就失效不掉了。
+ *
+ * 热列表键带进程级随机 namespace，只有本进程会读，因此按记录精确删除即可，
+ * 不需要 SCAN；键列表为空时（从未查询过指纹页）零开销。
+ */
 func (r *AccessLogRepo) invalidateFingerprintCache() {
-	if r == nil || r.fingerprintCache == nil {
+	if r == nil {
+		return
+	}
+	if r.hotCache != nil {
+		keys := make([]string, 0, 8)
+		r.fingerprintHotKeys.Range(func(key, _ any) bool {
+			if k, ok := key.(string); ok {
+				keys = append(keys, k)
+			}
+			r.fingerprintHotKeys.Delete(key)
+			return true
+		})
+		if len(keys) > 0 {
+			if many, ok := r.hotCache.(interface{ InvalidateMany([]string) }); ok {
+				many.InvalidateMany(keys)
+			} else {
+				for _, key := range keys {
+					r.hotCache.Invalidate(key)
+				}
+			}
+		}
+	}
+	if r.fingerprintCache == nil {
 		return
 	}
 	r.fingerprintCache.invalidate()
+}
+
+/**
+ * InvalidateFingerprintCache 供数据面统一写入器在访问日志事务提交后调用。
+ *
+ * 数据面直写日志库，不经过本仓储的写入方法；缺少这条通知时，管理端的
+ * 进程内指纹聚合会在 TTL 内继续返回写入前的旧结果。
+ */
+func (r *AccessLogRepo) InvalidateFingerprintCache() {
+	r.invalidateFingerprintCache()
 }
 
 type AccessLogFilter struct {
@@ -162,6 +209,7 @@ type FingerprintSummary struct {
 	TLSVersion      string    `json:"tls_version"`
 	TLSALPN         string    `json:"tls_alpn"`
 	TLSSNI          string    `json:"tls_sni"`
+	TLSSNIPresence  string    `json:"tls_sni_presence,omitempty"`
 	TLSCipherSuites string    `json:"tls_cipher_suites"`
 	TLSExtensions   string    `json:"tls_extensions"`
 	TLSCurves       string    `json:"tls_curves"`
@@ -408,11 +456,52 @@ func (r *AccessLogRepo) List(offset, limit int, f AccessLogFilter) ([]store.Acce
 	return items, total, nil
 }
 
+// accessLogStatsCacheTTL 是站点访问统计结果的缓存时长。
+//
+// StatsBySite 沿 idx_al_site_created 做范围扫描，并对窗口内每一行执行条件
+// 聚合；满负荷实例的 24 小时窗口是十亿行级扫描。管理端面板按固定间隔轮询，
+// 不缓存会把日志库打满。30s 足以吸收轮询频率，同时远小于小时级窗口统计
+// 结果的变化速度。
+const accessLogStatsCacheTTL = 30 * time.Second
+
+// accessLogStatsTerminalActions 是计入「拦截」的 waf_action 集合。
+var accessLogStatsTerminalActions = []string{
+	"intercept", "block", "drop", "challenge",
+	"captcha_challenge", "shield_challenge", "chain_challenge", "rate_limit",
+}
+
+// accessLogStatsCacheKey 按站点与「分钟截断」的窗口起点构造缓存键。
+//
+// 调用方每次传入 time.Now().Add(-hours*time.Hour)，秒值持续变化；不截断的话
+// 每次请求都是新键，缓存永不命中。截断到分钟只让窗口边界漂移不足一分钟，
+// 对小时级窗口的统计没有意义；TTL 小于该粒度，保证跨分钟边界后不会继续
+// 返回上一个窗口的结果。
+func accessLogStatsCacheKey(siteID uint, since time.Time) string {
+	return "al_stats:v1:s" + strconv.FormatUint(uint64(siteID), 10) +
+		":t" + strconv.FormatInt(since.Truncate(time.Minute).Unix(), 10)
+}
+
 func (r *AccessLogRepo) StatsBySite(siteID uint, since time.Time) (SiteAccessLogStats, error) {
+	if r.hotCache == nil || !r.hotCache.Available() {
+		return r.statsBySiteFromDB(siteID, since)
+	}
+	key := accessLogStatsCacheKey(siteID, since)
+	var cached SiteAccessLogStats
+	if r.hotCache.Get(key, &cached) {
+		return cached, nil
+	}
+	stats, err := r.statsBySiteFromDB(siteID, since)
+	if err != nil {
+		return stats, err
+	}
+	r.hotCache.Set(key, stats, accessLogStatsCacheTTL)
+	return stats, nil
+}
+
+func (r *AccessLogRepo) statsBySiteFromDB(siteID uint, since time.Time) (SiteAccessLogStats, error) {
 	var stats SiteAccessLogStats
-	terminalActions := []string{"intercept", "block", "drop", "challenge", "captcha_challenge", "shield_challenge", "chain_challenge", "rate_limit"}
 	err := r.db.Model(&store.AccessLog{}).
-		Select("COUNT(*) AS requests, SUM(CASE WHEN waf_action IN ? THEN 1 ELSE 0 END) AS intercepts, SUM(CASE WHEN waf_action = ? THEN 1 ELSE 0 END) AS observes, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_hits, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_misses, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_bypasses, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_stales", terminalActions, "observe", "hit", "miss", "bypass", "stale").
+		Select("COUNT(*) AS requests, SUM(CASE WHEN waf_action IN ? THEN 1 ELSE 0 END) AS intercepts, SUM(CASE WHEN waf_action = ? THEN 1 ELSE 0 END) AS observes, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_hits, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_misses, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_bypasses, SUM(CASE WHEN cache_state = ? THEN 1 ELSE 0 END) AS cache_stales", accessLogStatsTerminalActions, "observe", "hit", "miss", "bypass", "stale").
 		Where("site_id = ? AND created_at >= ?", siteID, since).
 		Scan(&stats).Error
 	return stats, err
@@ -528,10 +617,9 @@ func (r *AccessLogRepo) ListFingerprints(offset, limit int, f FingerprintFilter)
 		result, err := r.loadFingerprints(offset, limit, f)
 		return result.Items, result.Total, err
 	}
-	generation := r.fingerprintCache.generationValue()
 	result, err := r.fingerprintCache.getOrLoad(key, func() (fingerprintResult, error) {
 		if r.hotCache != nil && r.hotCache.Available() {
-			hotKey := fingerprintHotCacheKey(r.fingerprintNamespace, generation, key)
+			hotKey := fingerprintHotCacheKey(r.fingerprintNamespace, key)
 			if rawItems, cachedTotal, ok := r.hotCache.GetListRaw(hotKey); ok {
 				var items []FingerprintSummary
 				if json.Unmarshal(rawItems, &items) == nil {
@@ -544,7 +632,10 @@ func (r *AccessLogRepo) ListFingerprints(offset, limit int, f FingerprintFilter)
 			return fingerprintResult{}, loadErr
 		}
 		if r.hotCache != nil && r.hotCache.Available() {
-			r.hotCache.SetList(fingerprintHotCacheKey(r.fingerprintNamespace, generation, key), loaded.Items, loaded.Total, fingerprintResultCacheTTL)
+			hotKey := fingerprintHotCacheKey(r.fingerprintNamespace, key)
+			r.hotCache.SetList(hotKey, loaded.Items, loaded.Total, fingerprintResultCacheTTL)
+			// 记录本进程写入的热键，供写侧失效时精确删除。
+			r.fingerprintHotKeys.Store(hotKey, struct{}{})
 		}
 		return loaded, nil
 	})
@@ -647,6 +738,7 @@ func (r *AccessLogRepo) loadFingerprints(offset, limit int, f FingerprintFilter)
 			TLSVersion:      row.TLSVersion,
 			TLSALPN:         row.TLSALPN,
 			TLSSNI:          row.TLSSNI,
+			TLSSNIPresence:  tlsfp.SNIPresenceFromValues(row.TLSSNI, row.TLSJA4, row.TLSVersion != "" || row.TLSJA4 != ""),
 			TLSCipherSuites: row.TLSCipherSuites,
 			TLSExtensions:   row.TLSExtensions,
 			TLSCurves:       row.TLSCurves,
@@ -857,7 +949,7 @@ func (r *AccessLogRepo) DeleteOlderThan(before time.Time) (int64, error) {
 	r.invalidateCountCache()
 
 	for {
-		tx := r.db.Where("id IN (?)",
+		tx := r.db.Where("id IN (SELECT id FROM (?) AS archive_batch)",
 			r.db.Model(&store.AccessLog{}).Select("id").Where("created_at < ?", before).Limit(batchSize),
 		).Delete(&store.AccessLog{})
 		if tx.Error != nil {
@@ -886,10 +978,36 @@ func (r *AccessLogRepo) Get(id uint) (*store.AccessLog, error) {
 }
 
 func (r *AccessLogRepo) FindByRequestID(requestID string) ([]store.AccessLog, error) {
+	// 先读 Redis 详情键：写入器在事务提交后按 request_id 写入完整记录，
+	// 因此追踪页与 request_id 精确查询通常可以单次 GET 命中，不必回源。
+	// 键与写侧共用 cache.HotKey 命名空间（observability.pushToRedis）。
+	if requestID != "" && r.hotCache != nil && r.hotCache.Available() {
+		var cached store.AccessLog
+		if r.hotCache.Get(accessLogRequestCacheKey(requestID), &cached) {
+			normalizeAccessLogProtocol(&cached)
+			return []store.AccessLog{cached}, nil
+		}
+	}
 	var items []store.AccessLog
 	err := r.db.Where("request_id = ?", requestID).Order("id ASC").Find(&items).Error
 	normalizeAccessLogProtocols(items)
+	// 唯一命中时回填短 TTL，避免热门追踪请求反复回源；多条时无法用单键
+	// 表达完整结果集，交给数据库查询。回填使用 SetIfAbsent：本次回源与写侧
+	// 推 Redis 并发时，不能把写侧那份 7 天 TTL 的键覆盖成短 TTL。
+	if err == nil && len(items) == 1 && requestID != "" && r.hotCache != nil {
+		r.hotCache.SetIfAbsent(accessLogRequestCacheKey(requestID), items[0], accessLogRequestCacheTTL)
+	}
 	return items, err
+}
+
+// accessLogRequestCacheTTL 是 request_id 详情回填缓存的存活时间。
+// 只用于「DB 回源后避免重复查询」，写侧独立写入的那份由 7 天 TTL 管理。
+const accessLogRequestCacheTTL = 5 * time.Minute
+
+// accessLogRequestCacheKey 返回 request_id 详情在热缓存中的键（不含前缀）。
+// 键名由 store 包统一导出，与写侧 observability.pushToRedis 共用同一构造器。
+func accessLogRequestCacheKey(requestID string) string {
+	return store.AccessLogRequestCacheKey(requestID)
 }
 
 func normalizeAccessLogProtocols(items []store.AccessLog) {

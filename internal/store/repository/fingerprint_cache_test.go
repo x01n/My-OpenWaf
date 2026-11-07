@@ -100,17 +100,37 @@ func TestFingerprintResultCacheIsBoundedAndGenerationAware(t *testing.T) {
 }
 
 func TestFingerprintHotCacheKeyIsBoundedAndFilterSpecific(t *testing.T) {
-	first := fingerprintHotCacheKey("database-a", 0, fingerprintResultCacheKey{Offset: 0, Limit: 20, Filter: FingerprintFilter{TLSJA3Hash: "ja3-a"}})
-	second := fingerprintHotCacheKey("database-a", 0, fingerprintResultCacheKey{Offset: 0, Limit: 20, Filter: FingerprintFilter{TLSJA3Hash: "ja3-b"}})
+	first := fingerprintHotCacheKey("database-a", fingerprintResultCacheKey{Offset: 0, Limit: 20, Filter: FingerprintFilter{TLSJA3Hash: "ja3-a"}})
+	second := fingerprintHotCacheKey("database-a", fingerprintResultCacheKey{Offset: 0, Limit: 20, Filter: FingerprintFilter{TLSJA3Hash: "ja3-b"}})
 	if first == second {
 		t.Fatal("different fingerprint filters shared a hot-cache key")
 	}
-	otherDatabase := fingerprintHotCacheKey("database-b", 0, fingerprintResultCacheKey{Offset: 0, Limit: 20, Filter: FingerprintFilter{TLSJA3Hash: "ja3-a"}})
+	otherDatabase := fingerprintHotCacheKey("database-b", fingerprintResultCacheKey{Offset: 0, Limit: 20, Filter: FingerprintFilter{TLSJA3Hash: "ja3-a"}})
 	if first == otherDatabase {
 		t.Fatal("different database namespaces shared a hot-cache key")
 	}
 	if len(first) > 128 || len(second) > 128 || len(otherDatabase) > 128 {
 		t.Fatalf("hot-cache key length exceeds bound: %d/%d", len(first), len(second))
+	}
+}
+
+/**
+ * TestFingerprintHotCacheKeyIsStableAcrossWrites 固定「远端缓存键不含进程内代际」
+ * 这一约束：每次日志写入都会推进代际，若代际进键，远端缓存的键就随写入不断
+ * 变化，等价于永不命中。
+ */
+func TestFingerprintHotCacheKeyIsStableAcrossWrites(t *testing.T) {
+	repo := NewAccessLogRepo(nil)
+	key := fingerprintResultCacheKey{Offset: 0, Limit: 20}
+	before := fingerprintHotCacheKey(repo.fingerprintNamespace, key)
+	repo.invalidateFingerprintCache()
+	repo.invalidateFingerprintCache()
+	if repo.fingerprintCache.generationValue() == 0 {
+		t.Fatal("generation did not advance")
+	}
+	after := fingerprintHotCacheKey(repo.fingerprintNamespace, key)
+	if before != after {
+		t.Fatalf("remote fingerprint key changed across writes: %q -> %q", before, after)
 	}
 }
 
@@ -124,7 +144,7 @@ func TestAccessLogRepoFingerprintNamespaceSeparatesRepositories(t *testing.T) {
 		t.Fatal("separate repositories must not share a remote fingerprint cache namespace")
 	}
 	key := fingerprintResultCacheKey{Offset: 0, Limit: 20}
-	if fingerprintHotCacheKey(first.fingerprintNamespace, 0, key) == fingerprintHotCacheKey(second.fingerprintNamespace, 0, key) {
+	if fingerprintHotCacheKey(first.fingerprintNamespace, key) == fingerprintHotCacheKey(second.fingerprintNamespace, key) {
 		t.Fatal("separate repository namespaces produced the same remote fingerprint key")
 	}
 }

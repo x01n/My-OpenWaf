@@ -5,6 +5,55 @@ import (
 	"testing"
 )
 
+func TestPathContainsTreePrefixUsesSegmentBoundaries(t *testing.T) {
+	cases := []struct {
+		path, prefix string
+		want         bool
+	}{
+		{path: "/restapi/soa2/collect", prefix: "/restapi/soa2", want: true},
+		{path: "/api/restapi/soa2/events", prefix: "/restapi/soa2", want: true},
+		{path: "/restapi/soa20/collect", prefix: "/restapi/soa2", want: false},
+		{path: "/web/common-extra", prefix: "/web/common", want: false},
+		{path: "/cdn-cgi/rum", prefix: "/cdn-cgi/", want: true},
+		{path: "/g/collector", prefix: "/g/collect", want: false},
+		{path: "/g/collect", prefix: "/g/collect", want: true},
+	}
+	for _, tc := range cases {
+		if got := pathContainsTreePrefix(tc.path, tc.prefix); got != tc.want {
+			t.Fatalf("pathContainsTreePrefix(%q, %q) = %v, want %v", tc.path, tc.prefix, got, tc.want)
+		}
+	}
+}
+
+func TestOWASPBodySkipPathsRespectSegmentBoundaries(t *testing.T) {
+	body := []string{"test|whoami"}
+	if hits := CheckOWASP("mid", "/restapi/soa2/collect", "", nil, body); hasCategory(hits, CatCmdInject) {
+		t.Fatalf("/restapi/soa2/ body command payload should be skipped, got %+v", hits)
+	}
+	if hits := CheckOWASP("mid", "/restapi/soa20/collect", "", nil, body); !hasCategory(hits, CatCmdInject) {
+		t.Fatalf("near-miss /restapi/soa20/ must not inherit body command skip, got %+v", hits)
+	}
+	if hits := CheckOWASP("mid", "/web/common-extra", "", nil, body); !hasCategory(hits, CatCmdInject) {
+		t.Fatalf("near-miss /web/common-extra must not inherit body command skip, got %+v", hits)
+	}
+
+	ssrfBody := []string{"url=file:///127.0.0.1/admin"}
+	if hits := CheckOWASP("mid", "/cdn-cgi/rum", "", nil, ssrfBody); hasCategory(hits, CatSSRF) {
+		t.Fatalf("/cdn-cgi/ body SSRF payload should be skipped, got %+v", hits)
+	}
+	if hits := CheckOWASP("mid", "/cdn-cgix/rum", "", nil, ssrfBody); !hasCategory(hits, CatSSRF) {
+		t.Fatalf("near-miss /cdn-cgix/ must not inherit body SSRF skip, got %+v", hits)
+	}
+
+	sqliBody := []string{"id=1' OR 1=1--"}
+	if hits := CheckOWASP("mid", "/g/collect", "", nil, sqliBody); hasCategory(hits, CatSQLi) {
+		t.Fatalf("/g/collect body SQLi payload should be skipped, got %+v", hits)
+	}
+	if hits := CheckOWASP("mid", "/g/collector", "", nil, sqliBody); !hasCategory(hits, CatSQLi) {
+		t.Fatalf("near-miss /g/collector must not inherit body SQLi skip, got %+v", hits)
+	}
+}
+
 func TestCheckOWASP_SSRF_Metadata(t *testing.T) {
 	hits := CheckOWASP("mid", "/fetch", "url=http://169.254.169.254/latest/meta-data/", nil, nil)
 	if !hasCategory(hits, CatSSRF) {
@@ -97,8 +146,8 @@ func TestShouldScanCmdPatternPrefilterHighFrequencyRules(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing command pattern %s", tt.id)
 		}
-		if got := shouldScanCmdPattern(tt.input, pattern); got != tt.want {
-			t.Fatalf("shouldScanCmdPattern(%s, %q) = %v, want %v", tt.id, tt.input, got, tt.want)
+		if got := shouldScanCmdPattern(tt.input, pattern, nil); got != tt.want {
+			t.Fatalf("shouldScanCmdPattern(%s, %q, nil) = %v, want %v", tt.id, tt.input, got, tt.want)
 		}
 	}
 }

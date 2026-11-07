@@ -86,6 +86,7 @@ type realtimeAccessLog struct {
 	UpstreamHTTPProtocol string    `json:"upstream_http_protocol"`
 	TLSVersion           string    `json:"tls_version"`
 	TLSSNI               string    `json:"tls_sni"`
+	TLSSNIPresence       string    `json:"tls_sni_presence,omitempty"`
 	TLSALPN              string    `json:"tls_alpn"`
 	TLSJA3Hash           string    `json:"tls_ja3_hash"`
 	TLSJA4               string    `json:"tls_ja4"`
@@ -115,6 +116,7 @@ type realtimeSecurityEvent struct {
 	MatchDesc       string    `json:"match_desc"`
 	TLSVersion      string    `json:"tls_version"`
 	TLSSNI          string    `json:"tls_sni"`
+	TLSSNIPresence  string    `json:"tls_sni_presence,omitempty"`
 	TLSALPN         string    `json:"tls_alpn"`
 	TLSJA3Hash      string    `json:"tls_ja3_hash"`
 	TLSJA4          string    `json:"tls_ja4"`
@@ -147,6 +149,7 @@ type realtimeFingerprintSummary struct {
 	TLSVersion      string    `json:"tls_version"`
 	TLSALPN         string    `json:"tls_alpn"`
 	TLSSNI          string    `json:"tls_sni"`
+	TLSSNIPresence  string    `json:"tls_sni_presence,omitempty"`
 	TLSCipherSuites string    `json:"tls_cipher_suites"`
 	TLSExtensions   string    `json:"tls_extensions"`
 	TLSCurves       string    `json:"tls_curves"`
@@ -330,6 +333,7 @@ func mapAccessLogSnapshot(items []store.AccessLog) []realtimeAccessLog {
 			UpstreamHTTPProtocol: item.UpstreamHTTPProtocol,
 			TLSVersion:           item.TLSVersion,
 			TLSSNI:               item.TLSSNI,
+			TLSSNIPresence:       item.TLSSNIPresence,
 			TLSALPN:              item.TLSALPN,
 			TLSJA3Hash:           item.TLSJA3Hash,
 			TLSJA4:               item.TLSJA4,
@@ -354,6 +358,7 @@ func mapFingerprintSnapshot(items []repository.FingerprintSummary) []realtimeFin
 			TLSVersion:      item.TLSVersion,
 			TLSALPN:         item.TLSALPN,
 			TLSSNI:          item.TLSSNI,
+			TLSSNIPresence:  item.TLSSNIPresence,
 			TLSCipherSuites: item.TLSCipherSuites,
 			TLSExtensions:   item.TLSExtensions,
 			TLSCurves:       item.TLSCurves,
@@ -390,6 +395,7 @@ func mapSecurityEventSnapshot(items []store.SecurityEvent) []realtimeSecurityEve
 			MatchDesc:       item.MatchDesc,
 			TLSVersion:      item.TLSVersion,
 			TLSSNI:          item.TLSSNI,
+			TLSSNIPresence:  item.TLSSNIPresence,
 			TLSALPN:         item.TLSALPN,
 			TLSJA3Hash:      item.TLSJA3Hash,
 			TLSJA4:          item.TLSJA4,

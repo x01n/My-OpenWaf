@@ -24,6 +24,7 @@ const (
 	defaultHTTPProbeExpectContinue      = time.Second
 	defaultHTTPProbeQUICHandshakeIdle   = 5 * time.Second
 	defaultHTTPProbeQUICMaxIdle         = 90 * time.Second
+	defaultHTTPProbeMaxConnsPerHost     = 32
 )
 
 const (
@@ -379,22 +380,27 @@ func pickByProtocolPreferenceWithPool(urls []string, pool *Pool, start int) (str
 
 func protocolPreference(raw string) int {
 	raw = strings.TrimSpace(raw)
-	if idx := strings.Index(raw, "://"); idx > 0 {
-		scheme := raw[:idx]
-		if target, ok := rpcSchemeAliases[strings.ToLower(scheme+"://")]; ok {
-			scheme = target
-		} else {
-			scheme = strings.ToLower(scheme)
-		}
-		switch scheme {
+	idx := strings.Index(raw, "://")
+	if idx <= 0 {
+		return 0
+	}
+	scheme := raw[:idx]
+	switch {
+	case strings.EqualFold(scheme, "h3"):
+		return 3
+	case strings.EqualFold(scheme, "h2c"):
+		return 2
+	case strings.EqualFold(scheme, "https"):
+		return 1
+	}
+	if target, ok := rpcSchemeAliases[strings.ToLower(scheme+"://")]; ok {
+		switch target {
 		case "h3":
 			return 3
 		case "h2c":
 			return 2
 		case "https":
 			return 1
-		default:
-			return 0
 		}
 	}
 	return 0
@@ -665,6 +671,7 @@ func newHTTPProbeTransport(timeout time.Duration) *http.Transport {
 	return &http.Transport{
 		MaxIdleConns:          128,
 		MaxIdleConnsPerHost:   32,
+		MaxConnsPerHost:       defaultHTTPProbeMaxConnsPerHost,
 		DialContext:           dialer.DialContext,
 		IdleConnTimeout:       defaultHTTPProbeIdleConnTimeout,
 		TLSHandshakeTimeout:   defaultHTTPProbeTLSHandshakeTimeout,

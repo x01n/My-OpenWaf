@@ -339,8 +339,12 @@ cd .. && CGO_ENABLED=1 go build -tags=quickjs -ldflags="-s -w" -o bin/my-openwaf
 | `MY_OPENWAF_LOG_FILE` | 空 | 日志文件路径（默认仅 stdout） |
 | `MY_OPENWAF_LOG_ALSO_STDOUT` | 空 | 置 `1` 时日志文件同时镜像到 stdout |
 | `MY_OPENWAF_PPROF_BIND` | 空 | 可选 pprof 监听地址 |
+| `MY_OPENWAF_RESPONSE_CACHE_MB` | `64` | 站点响应缓存容量（MiB）；只定容量，是否缓存由站点缓存规则决定 |
+| `MY_OPENWAF_RESPONSE_CACHE_TTL_SEC` | `60` | 响应缓存默认 TTL（秒），仅在规则未单独指定 TTL 时生效 |
+| `MY_OPENWAF_H3_ALLOW_0RTT` | 空（继承） | HTTP/3 0-RTT 开关：不设或非 `1`/`0` 时透传 `tls_default_config.allow_0rtt`（该项未显式配置时再继承 `session_tickets_enabled`）；`1` 仍受会话票据开关约束；`0` 直接关闭 0-RTT 且不改票据配置。TLS 全局默认配置里的 `allow_0rtt` 为三态，`POST /api/v1/tls-config` 传 `null` 可清除显式配置回到继承 |
+| `MY_OPENWAF_H2WS_PEEKER_OFF` | 空 | 仅测试用逃生门：置 `1` 时不包装 ClientHello 窥探连接，JA3/JA4 为空属预期，`tls_version`/SNI/ALPN 仍会回填。生产勿设 |
 
-完整清单（含 CVE 订阅、验证码目录、队列缓冲参数组 `MY_OPENWAF_QUEUE_*` 等）与校验语义见 [CLAUDE.md](./CLAUDE.md) 的环境变量表。
+完整清单（含 CVE 订阅、验证码目录、队列缓冲参数组 `MY_OPENWAF_QUEUE_*`、追踪参数组 `MY_OPENWAF_TRACE_*`、响应缓存与 HTTP/3 开关等）与校验语义见 [CLAUDE.md](./CLAUDE.md) 的环境变量表。
 
 </details>
 
@@ -404,7 +408,7 @@ wasm-pow-solver/         PoW 质询求解器（Rust -> WASM）
 
 ## 文档导航
 
-- 项目概述与快速开始：[项目介绍](docs/项目概述/项目介绍.md) · [快速开始](docs/项目概述/快速开始.md)
+- 项目概述与快速开始：[项目概述](docs/项目概述/项目概述.md) · [核心特性](docs/项目概述/核心特性.md) · [快速开始](docs/项目概述/快速开始.md)
 - 系统架构与数据面：[系统架构设计](docs/系统架构设计/系统架构设计.md) · [控制面设计](docs/系统架构设计/控制面设计.md) · [数据平面处理](docs/数据平面处理/数据平面处理.md) · [请求处理流程](docs/数据平面处理/请求处理流程.md)
 - WAF 引擎系统：[WAF 引擎系统](docs/WAF%20引擎系统/WAF%20引擎系统.md)
 - 管理 API：[管理 API 系统](docs/管理%20API%20系统/管理%20API%20系统.md) · [规则管理 API](docs/管理%20API%20系统/规则管理%20API/规则管理%20API.md)
@@ -414,6 +418,9 @@ wasm-pow-solver/         PoW 质询求解器（Rust -> WASM）
 - 数据存储层：[数据存储层](docs/数据存储层/数据存储层.md) · [多数据库支持](docs/数据存储层/多数据库支持.md)
 - 扩展与插件：[扩展与插件系统](docs/扩展与插件系统/扩展与插件系统.md) · [Lua 策略插件](docs/扩展与插件系统/Lua%20策略插件.md)（含可运行示例 `docs/扩展与插件系统/lua-examples/`）
 - 监控与可观测：[监控与可观测性](docs/监控与可观测性/监控与可观测性.md) · [事件归档系统](docs/监控与可观测性/事件归档系统.md)
+- 部署运维：[部署运维](docs/部署运维/部署运维.md) · [容器化部署](docs/部署运维/容器化部署.md) · [CI与发布流水线](docs/部署运维/CI与发布流水线.md) · [环境变量与运行参数](docs/部署运维/环境变量与运行参数.md) · [数据目录与备份恢复](docs/部署运维/数据目录与备份恢复.md)
+- 故障排除：[故障排除](docs/故障排除/故障排除.md) · [启动与依赖故障](docs/故障排除/启动与依赖故障.md) · [规则误杀与漏杀](docs/故障排除/规则误杀与漏杀.md) · [存储与Redis故障](docs/故障排除/存储与Redis故障.md) · [证书与TLS故障](docs/故障排除/证书与TLS故障.md) · [性能与内存排查](docs/故障排除/性能与内存排查.md)
+- 索引与记录：[文档总索引](docs/index.md) · [问题检测报告](docs/问题检测报告.md) · [变更日志](docs/Chanlog.md)
 
 ## 开发与测试
 

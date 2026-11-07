@@ -39,12 +39,9 @@ import {
 import type { AccessLog, SecurityEvent, IPEntry } from "@/lib/types"
 import { ipListApi, falsePositiveApi, requestTraceApi } from "@/lib/api"
 import { countryFlag, countryName } from "@/lib/country-names"
-import {
-  categoryLabel,
-  phaseLabel,
-  severityLabel,
-} from "@/lib/attack-category"
+import { categoryLabel, phaseLabel, severityLabel } from "@/lib/attack-category"
 import { localizeMatchDesc } from "@/lib/match-desc-i18n"
+import { tlsSniDisplayValue } from "@/lib/tls-sni-presence"
 import { IpHoverPreview } from "@/components/ip-hover-preview"
 import { cn } from "@/lib/utils"
 import { invalidateIPListCaches } from "@/hooks/use-api"
@@ -485,15 +482,29 @@ export function SecurityEventDetailDialog({
   /** 指纹字段清单，仅渲染后端实际返回的项 */
   const fingerprintFields: Array<{ label: string; value?: string }> = [
     { label: t("securityEventDetail.tlsVersion"), value: ev.tls_version },
-    { label: t("securityEventDetail.sni"), value: ev.tls_sni },
+    {
+      label: t("securityEventDetail.sni"),
+      value: tlsSniDisplayValue(
+        ev.tls_sni,
+        ev.tls_sni_presence,
+        t("securityEventDetail.sniAbsent"),
+        t("securityEventDetail.sniUnknown")
+      ),
+    },
     { label: t("securityEventDetail.alpn"), value: ev.tls_alpn },
     { label: t("securityEventDetail.tlsJa4"), value: ev.tls_ja4 },
     { label: t("securityEventDetail.tlsJa3Hash"), value: ev.tls_ja3_hash },
     { label: t("securityEventDetail.tlsJa3"), value: ev.tls_ja3 },
-    { label: t("securityEventDetail.cipherSuites"), value: ev.tls_cipher_suites },
+    {
+      label: t("securityEventDetail.cipherSuites"),
+      value: ev.tls_cipher_suites,
+    },
     { label: t("securityEventDetail.extensions"), value: ev.tls_extensions },
     { label: t("securityEventDetail.curves"), value: ev.tls_curves },
-    { label: t("securityEventDetail.pointFormats"), value: ev.tls_point_formats },
+    {
+      label: t("securityEventDetail.pointFormats"),
+      value: ev.tls_point_formats,
+    },
     { label: t("securityEventDetail.headerOrder"), value: ev.header_order },
   ]
 
@@ -870,7 +881,9 @@ export function SecurityEventDetailDialog({
                     variant="outline"
                     size="icon-sm"
                     className="h-7 w-7"
-                    aria-label={t("securityEventDetail.decreaseMessageTextSize")}
+                    aria-label={t(
+                      "securityEventDetail.decreaseMessageTextSize"
+                    )}
                     title={t("securityEventDetail.decreaseMessageTextSize")}
                     disabled={messageScale <= 0.8}
                     onClick={() =>
@@ -892,7 +905,9 @@ export function SecurityEventDetailDialog({
                     variant="outline"
                     size="icon-sm"
                     className="h-7 w-7"
-                    aria-label={t("securityEventDetail.increaseMessageTextSize")}
+                    aria-label={t(
+                      "securityEventDetail.increaseMessageTextSize"
+                    )}
                     title={t("securityEventDetail.increaseMessageTextSize")}
                     disabled={messageScale >= 1.4}
                     onClick={() =>

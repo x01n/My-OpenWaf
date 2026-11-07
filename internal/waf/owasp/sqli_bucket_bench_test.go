@@ -29,7 +29,7 @@ func benchSQliGateMiss(b *testing.B, sample string) {
 			if p.hint != "" && !strings.Contains(in, p.hint) {
 				continue
 			}
-			if shouldScanSQLiPatternWithSignals(in, p, signals) {
+			if shouldScanSQLiPatternWithSignals(in, p, signals, nil) {
 				hit = true
 				break
 			}
@@ -52,7 +52,7 @@ func benchSQliGateHit(b *testing.B, sample string) {
 			if p.hint != "" && !strings.Contains(in, p.hint) {
 				continue
 			}
-			if shouldScanSQLiPatternWithSignals(in, p, signals) {
+			if shouldScanSQLiPatternWithSignals(in, p, signals, nil) {
 				hit = true
 				break
 			}
@@ -136,7 +136,7 @@ func TestBenchSanityGate(t *testing.T) {
 		t.Fatal("abc 不应命中 hasSuspiciousContent")
 	}
 	signals := collectSQLiPatternSignals("id=union select")
-	if !shouldScanSQLiPatternWithSignals("id=union select", findSQLiPatternForTest("owasp:sqli:028"), signals) {
+	if !shouldScanSQLiPatternWithSignals("id=union select", findSQLiPatternForTest("owasp:sqli:028"), signals, nil) {
 		t.Fatal("union select 样本应推进 sqli:028 信号门")
 	}
 	gateBenchSinkInt++

@@ -17,17 +17,19 @@ import (
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/store/repository"
+	owaspdetect "My-OpenWaf/internal/waf/owasp"
 )
 
 type owaspRulePatch struct {
-	Enabled     *bool     `json:"enabled,omitempty"`
-	Whitelist   *[]string `json:"whitelist,omitempty"`
-	Action      *string   `json:"action,omitempty"`
-	StatusCode  *int      `json:"status_code,omitempty"`
-	RedirectTo  *string   `json:"redirect_to,omitempty"`
-	CaptchaType *string   `json:"captcha_type,omitempty"`
-	Sensitivity *string   `json:"sensitivity,omitempty"`
-	Note        *string   `json:"note,omitempty"`
+	Enabled      *bool     `json:"enabled,omitempty"`
+	Whitelist    *[]string `json:"whitelist,omitempty"`
+	Action       *string   `json:"action,omitempty"`
+	StatusCode   *int      `json:"status_code,omitempty"`
+	RedirectTo   *string   `json:"redirect_to,omitempty"`
+	CaptchaType  *string   `json:"captcha_type,omitempty"`
+	Sensitivity  *string   `json:"sensitivity,omitempty"`
+	CiscoASAMode *string   `json:"cisco_asa_mode,omitempty"`
+	Note         *string   `json:"note,omitempty"`
 }
 
 type owaspRuleView struct {
@@ -50,6 +52,7 @@ type owaspRuleView struct {
 	RedirectTo         string   `json:"redirect_to,omitempty"`
 	CaptchaType        string   `json:"captcha_type,omitempty"`
 	Sensitivity        string   `json:"sensitivity,omitempty"`
+	CiscoASAMode       string   `json:"cisco_asa_mode,omitempty"`
 	Note               string   `json:"note,omitempty"`
 	Overridden         bool     `json:"overridden"`
 }
@@ -114,9 +117,13 @@ func ListOWASPRulesFromRegistry(repo *repository.SystemSettingsRepo) app.Handler
 			"stats":     buildOWASPRuleStats(policyID, filteredViews),
 		}
 		if strings.TrimSpace(string(c.Query("include_grouped"))) != "false" {
+			// grouped 是「按分类枚举并判定该类是否有规则」的完整视图，必须基于
+			// 过滤后的全量视图构建。若改用分页后的 views，默认 page_size=500
+			// 会把 rule_id 字典序末段的分类（xss、file_upload、template_injection）
+			// 整类截掉，前端据 grouped 判断「无规则」并禁用该类防护入口。
 			grouped := make(map[string][]owaspRuleView)
-			for i := range views {
-				view := views[i]
+			for i := range filteredViews {
+				view := filteredViews[i]
 				grouped[view.Category] = append(grouped[view.Category], view)
 			}
 			response["grouped"] = grouped
@@ -151,6 +158,9 @@ func validateOWASPPatch(patch *owaspRulePatch) error {
 		default:
 			return errors.New("invalid sensitivity")
 		}
+	}
+	if patch.CiscoASAMode != nil && !owaspdetect.IsValidCiscoASAMode(*patch.CiscoASAMode) {
+		return errors.New("invalid cisco_asa_mode")
 	}
 	if patch.CaptchaType != nil {
 		normalized, ok := shared.ValidateCaptchaType(*patch.CaptchaType)
@@ -275,6 +285,13 @@ func applyOWASPPatch(config *owasp.PolicyOWASPRuleConfig, patch owaspRulePatch) 
 			config.CaptchaType = nil
 		} else {
 			config.CaptchaType = patch.CaptchaType
+		}
+	}
+	if patch.CiscoASAMode != nil {
+		if strings.TrimSpace(*patch.CiscoASAMode) == "" {
+			config.CiscoASAMode = nil
+		} else {
+			config.CiscoASAMode = patch.CiscoASAMode
 		}
 	}
 	if patch.Whitelist != nil {

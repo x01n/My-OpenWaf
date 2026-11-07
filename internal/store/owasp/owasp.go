@@ -21,17 +21,18 @@ type OWASPRuleCatalog struct {
 
 // PolicyOWASPRuleConfig 存储单条内置规则的按策略可空覆盖。
 type PolicyOWASPRuleConfig struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	PolicyID    uint      `gorm:"not null;uniqueIndex:ux_policy_owasp_rule" json:"policy_id"`
-	RuleID      string    `gorm:"size:128;not null;uniqueIndex:ux_policy_owasp_rule" json:"builtin_id"`
-	Enabled     *bool     `json:"enabled,omitempty"`
-	Action      *string   `gorm:"size:32" json:"action,omitempty"`
-	Sensitivity *string   `gorm:"size:32" json:"sensitivity,omitempty"`
-	StatusCode  *int      `json:"status_code,omitempty"`
-	RedirectTo  *string   `gorm:"type:text" json:"redirect_to,omitempty"`
-	CaptchaType *string   `gorm:"size:16" json:"captcha_type,omitempty"`
-	Whitelist   *string   `gorm:"type:text" json:"whitelist_json,omitempty"`
-	Note        *string   `gorm:"type:text" json:"note,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	PolicyID     uint      `gorm:"not null;uniqueIndex:ux_policy_owasp_rule" json:"policy_id"`
+	RuleID       string    `gorm:"size:128;not null;uniqueIndex:ux_policy_owasp_rule" json:"builtin_id"`
+	Enabled      *bool     `json:"enabled,omitempty"`
+	Action       *string   `gorm:"size:32" json:"action,omitempty"`
+	Sensitivity  *string   `gorm:"size:32" json:"sensitivity,omitempty"`
+	StatusCode   *int      `json:"status_code,omitempty"`
+	RedirectTo   *string   `gorm:"type:text" json:"redirect_to,omitempty"`
+	CaptchaType  *string   `gorm:"size:16" json:"captcha_type,omitempty"`
+	Whitelist    *string   `gorm:"type:text" json:"whitelist_json,omitempty"`
+	Note         *string   `gorm:"type:text" json:"note,omitempty"`
+	CiscoASAMode *string   `gorm:"size:16" json:"cisco_asa_mode,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }

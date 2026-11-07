@@ -1,0 +1,3 @@
+# 本目录的 PNG 是测试 fixture 与迁移前的 golden 字节，不是构建产物；
+# 仓库根 .gitignore 的 `*.png` 会把它们排除，这里显式取反。
+!*.png

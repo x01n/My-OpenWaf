@@ -281,7 +281,7 @@ func PutProtectionSettings(repo *repository.SystemSettingsRepo, reload func() er
 				}
 			}
 			if present["cve_auto_drop_critical"] || present["cve_auto_drop_high"] {
-				if err := shared.SyncCVEAutoDropToDropPolicy(txRepo, cfg.CVEAutoDropCritical, cfg.CVEAutoDropHigh); err != nil {
+				if err := shared.SyncCVEAutoDropToDropPolicyRuntime(txRepo, cfg.CVEAutoDropCritical, cfg.CVEAutoDropHigh); err != nil {
 					return err
 				}
 			}

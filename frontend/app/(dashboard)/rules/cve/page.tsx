@@ -37,6 +37,7 @@ import {
   usePolicies,
 } from "@/hooks/use-api"
 import { useAuth } from "@/hooks/use-auth"
+import { EnvOverrideDomainCard } from "@/components/env-override-card"
 import { useDebouncedValue } from "@/hooks/use-debounced-value"
 import type { CVERuleItem, CVERuleWriteInput, CVEScopeType } from "@/lib/types"
 import { categoryLabel, severityLabel } from "@/lib/attack-category"
@@ -60,6 +61,15 @@ const ACTIONS = [
 const SCOPE_GLOBAL = "global"
 /** 搜索输入的去抖时长：与 OWASP 目录页保持一致。 */
 const CVE_SEARCH_DEBOUNCE_MS = 300
+
+/** detection 域中归属 CVE 规则页的环境变量覆盖键。 */
+const CVE_ENV_OVERRIDE_KEYS = [
+  "cve_enabled",
+  "cve_feed_enabled",
+  "cve_feed_interval",
+  "nvd_api_key",
+  "cve_auto_approve",
+] as const
 
 const PAGE_SIZE = 50
 
@@ -88,6 +98,11 @@ function CVERulesPageContent() {
   const { user } = useAuth()
   const canManage = user?.role === "admin" || user?.role === "operator"
   const canManageCustom = user?.role === "admin"
+  /**
+   * 环境变量覆盖的写端点属 adminGroup（仅 admin），不过它是与规则 CRUD
+   * 无关的独立能力，故单列一个门控，不借用上面的 canManageCustom。
+   */
+  const canManageOverrides = user?.role === "admin"
   const initialRuleQuery = useInitialCVEQuery()
   // CVE 目录的查询只覆盖 cve_id 与 description（见 cve_scope.go），
   // 安全事件详情跳转时传入的是剥掉 cve: 前缀的 CVE 编号。
@@ -734,6 +749,19 @@ function CVERulesPageContent() {
           {t("cveRules.customGlobalOnly")}
         </p>
       )}
+      {/*
+        detection 域中 CVE 相关的环境变量覆盖键落在这里（用户选择的
+        「分散进现有领域」）；本页既有的规则 CRUD 逻辑不受影响。
+        全局 env 覆盖的写端点与 network-config / tls-config 同级，属
+        adminGroup（仅 admin），故此处传 canManageOverrides。
+      */}
+      <EnvOverrideDomainCard
+        titleKey="envOverrides.cveCardTitle"
+        descriptionKey="envOverrides.detectionGroupDescription"
+        group="detection"
+        keys={CVE_ENV_OVERRIDE_KEYS}
+        canManage={canManageOverrides}
+      />
       <CVERuleFormDialog
         open={customDialogOpen}
         rule={customEditingRule}

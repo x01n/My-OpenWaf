@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -88,13 +89,25 @@ func SetLevel(level string) {
 	})
 }
 
+// Config 是日志器的可调参数。
 type Config struct {
 	Level      string
 	FilePath   string
 	AlsoStdout bool
+	// Color 是着色模式：auto / on / off，空串等价 auto（不接管，按终端判定）。
+	Color string
 }
 
+/**
+ * Configure 重建全局 handler：级别、输出目标与着色模式。
+ *
+ * 着色模式先于 handler 构造生效——newPrettyHandler 需要最终的布尔值，
+ * 之后再改只能重建 handler。
+ *
+ * @param cfg 级别、文件路径与镜像开关。
+ */
 func Configure(cfg Config) {
+	SetColorMode(cfg.Color)
 	var l slog.Level
 	switch strings.ToUpper(strings.TrimSpace(cfg.Level)) {
 	case "DEBUG":
@@ -184,7 +197,25 @@ func parseLevel() slog.Level {
 	}
 }
 
+// colorOverride 保存覆盖表注入的着色决策：nil 表示未接管，按环境变量与终端自动判定。
+//
+// 只在 Configure 里写入，读取全部发生在 useColor。用原子指针而不是普通字段：
+// Configure 可能由管理端点在请求 goroutine 里调用，而 useColor 会在任意 goroutine
+// 的日志路径上读。
+var colorOverride atomic.Pointer[bool]
+
+/**
+ * useColor 决定日志是否着色。
+ *
+ * 优先级：覆盖表注入的显式决策 > MY_OPENWAF_LOG_COLOR > stdout 是否为终端。
+ * 中间那一档的取值口径保持既有语义不变（只有 1 / true 着色，留空走自动判定）。
+ *
+ * @return true 表示本次输出着色。
+ */
 func useColor() bool {
+	if override := colorOverride.Load(); override != nil {
+		return *override
+	}
 	if v := os.Getenv("MY_OPENWAF_LOG_COLOR"); v != "" {
 		return v == "1" || strings.EqualFold(v, "true")
 	}
@@ -194,6 +225,49 @@ func useColor() bool {
 		return true
 	}
 	return false
+}
+
+/**
+ * ColorMode 返回当前生效的着色模式。
+ *
+ * 供管理端保存 log_config 时透传：那个端点只改级别 / 文件 / 镜像三项，
+ * 每次保存都重跑 Configure；不透传当前着色模式就会把覆盖表注入的决策
+ * 静默重置成 auto。
+ *
+ * @return auto / on / off。
+ */
+func ColorMode() string {
+	override := colorOverride.Load()
+	switch {
+	case override == nil:
+		return "auto"
+	case *override:
+		return "on"
+	default:
+		return "off"
+	}
+}
+
+/**
+ * SetColorMode 注入日志着色模式，供逐键三态覆盖表使用。
+ *
+ * 传 auto 表示不接管，回到「环境变量 + 终端判定」的既有行为。这一档必须存在：
+ * 覆盖表把 log_color 的未覆盖状态解析成 auto，不区分就会把 auto 当成「关」，
+ * 让一次无关的保存顺手把着色永久关掉。
+ *
+ * @param mode auto / on / off（大小写不敏感）；其余取值按 auto 处理。
+ */
+func SetColorMode(mode string) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "on":
+		value := true
+		colorOverride.Store(&value)
+	case "off":
+		value := false
+		colorOverride.Store(&value)
+	default:
+		colorOverride.Store(nil)
+	}
 }
 
 type prettyHandler struct {

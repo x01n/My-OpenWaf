@@ -3,10 +3,13 @@ package drop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"gorm.io/gorm"
 
 	"My-OpenWaf/internal/admin/shared"
 	"My-OpenWaf/internal/store/repository"
@@ -79,25 +82,70 @@ func UpdateDropPolicy(settingsRepo *repository.SystemSettingsRepo, reload func()
 			return
 		}
 
-		current := defaultDropPolicyResponse(settingsRepo)
-		if val, err := settingsRepo.Get("drop_policy"); err == nil && val != "" {
-			_ = json.Unmarshal([]byte(val), &current)
+		// 已持久化的策略行原文。只回写请求中显式提交的键，避免把缺失键按默认值物化。
+		storedPolicy := make(map[string]json.RawMessage)
+		storedPolicyJSON := ""
+		storedPolicyExists := false
+		storedPolicyValidObject := false
+		if val, err := settingsRepo.Get("drop_policy"); err == nil {
+			storedPolicyExists = strings.TrimSpace(val) != ""
+			if storedPolicyExists && json.Unmarshal([]byte(val), &storedPolicy) == nil && storedPolicy != nil {
+				storedPolicyJSON = val
+				storedPolicyValidObject = true
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(500, map[string]string{"error": "load drop policy: " + err.Error()})
+			return
 		}
 
+		if storedPolicyExists && !storedPolicyValidObject {
+			c.JSON(500, map[string]string{"error": "stored drop policy is not a valid JSON object"})
+			return
+		}
+
+		current := defaultDropPolicyResponse(settingsRepo)
+		if storedPolicyValidObject {
+			if err := json.Unmarshal([]byte(storedPolicyJSON), &current); err != nil {
+				c.JSON(500, map[string]string{"error": "decode stored drop policy: " + err.Error()})
+				return
+			}
+		}
+
+		updates := make(map[string]any, 4)
 		if req.Enabled != nil {
 			current.Enabled = *req.Enabled
+			updates["enabled"] = current.Enabled
 		}
 		if req.BotScoreThreshold != nil {
 			current.BotScoreThreshold = *req.BotScoreThreshold
+			updates["bot_score_threshold"] = current.BotScoreThreshold
 		}
 		if req.CVEAutoDropCritical != nil {
 			current.CVEAutoDropCritical = *req.CVEAutoDropCritical
+			updates["cve_auto_drop_critical"] = current.CVEAutoDropCritical
 		}
 		if req.CVEAutoDropHigh != nil {
 			current.CVEAutoDropHigh = *req.CVEAutoDropHigh
+			updates["cve_auto_drop_high"] = current.CVEAutoDropHigh
 		}
 
-		data, err := json.Marshal(current)
+		// 首次创建记录时完整持久化默认值；非空损坏值维持旧策略并拒绝写入，
+		// 有效对象仅合并请求中显式提交的键。
+		var data []byte
+		var err error
+		if storedPolicyValidObject {
+			for key, value := range updates {
+				encoded, marshalErr := json.Marshal(value)
+				if marshalErr != nil {
+					c.JSON(500, map[string]string{"error": marshalErr.Error()})
+					return
+				}
+				storedPolicy[key] = encoded
+			}
+			data, err = json.Marshal(storedPolicy)
+		} else {
+			data, err = json.Marshal(current)
+		}
 		if err != nil {
 			c.JSON(500, map[string]string{"error": err.Error()})
 			return
@@ -114,7 +162,7 @@ func UpdateDropPolicy(settingsRepo *repository.SystemSettingsRepo, reload func()
 				protection.CVEAutoDropHigh = current.CVEAutoDropHigh
 			}
 			if req.BotScoreThreshold != nil {
-				if err := shared.SyncDropThresholdToBotSettings(txRepo, current.BotScoreThreshold); err != nil {
+				if err := shared.SyncDropThresholdToBotSettingsRuntime(txRepo, current.BotScoreThreshold); err != nil {
 					return err
 				}
 			}

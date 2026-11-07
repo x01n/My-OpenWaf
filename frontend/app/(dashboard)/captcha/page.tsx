@@ -73,6 +73,19 @@ import type {
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { BotObservationCard } from "./components/bot-observation-card"
+import { ImageTransformCard } from "./components/image-transform-card"
+import { EnvOverrideDomainCard } from "@/components/env-override-card"
+
+/** detection 域中归属本页（Bot 设置块为其既有归属）的环境变量覆盖键。 */
+const CAPTCHA_ENV_OVERRIDE_KEYS = [
+  "geoip_db_path",
+  "bot_threshold",
+  "drop_enabled",
+  "drop_bot_threshold",
+  "cve_auto_drop_critical",
+  "cve_auto_drop_high",
+  "bot_enabled",
+] as const
 
 const CHAIN_CAPTCHA_TYPES: Array<CaptchaConfig["captcha_type"] | ""> = [
   "",
@@ -140,6 +153,7 @@ type BotEditableKey =
   | "browser_sign_enabled"
   | "browser_sign_ttl"
   | "browser_sign_action"
+  | "html_to_markdown_enabled"
 
 /**
  * GeoIP 数据源运行模式：
@@ -695,6 +709,12 @@ export default function CaptchaPage() {
   const { t } = useTranslation()
   const { user, loading: authLoading } = useAuth()
   const canManage = user?.role === "admin" || user?.role === "operator"
+  /**
+   * 环境变量覆盖的写端点属 adminGroup（仅 admin），与本页 bot 表单的
+   * canManage 口径不同：operator 可以改 bot 设置，但改不了全局 env
+   * 覆盖，因此覆盖卡片单独走这一口径。
+   */
+  const canManageOverrides = user?.role === "admin"
   const {
     data: botSettings,
     isLoading: botIsLoading,
@@ -1394,8 +1414,24 @@ export default function CaptchaPage() {
                       }
                     />
                   </div>
+                  {/*
+                    HTML→Markdown 是响应表示协商（客户端显式 Accept: text/markdown），
+                    不属于动态保护能力，因此不受 dynamic_protection_enabled 约束，
+                    开关位于缩进块之外。
+                  */}
+                  <SettingSwitch
+                    id="html_to_markdown_enabled"
+                    label={t("captcha.htmlToMarkdown")}
+                    description={`${t("captcha.htmlToMarkdownDesc")}${t("captcha.htmlToMarkdownPriority")}`}
+                    checked={getBotValue("html_to_markdown_enabled", false)}
+                    onCheckedChange={(checked) =>
+                      setBotValue("html_to_markdown_enabled", checked)
+                    }
+                  />
                 </CardContent>
               </Card>
+
+              <ImageTransformCard canManage={canManage} />
 
               <Card>
                 <CardHeader>
@@ -1857,6 +1893,23 @@ export default function CaptchaPage() {
             </div>
           </div>
         </fieldset>
+
+        {/*
+          detection 域余下的键落在这里：本页是 bot_settings 的既有归属页
+          （GeoIP 卡的「环境变量 / 自定义路径」语义就是 MY_OPENWAF_GEOIP_DB
+          的 fallback），CVE 自动降级与 bot_enabled 同样属 Bot/Drop 语义。
+          cc-protection 页只有请求/错误频率限制与自定义规则，与 Drop/Bot
+          无关，故未插在那里。全局 env 覆盖的写端点属 adminGroup（仅
+          admin），由 canManageOverrides 单独把关。
+        */}
+        <EnvOverrideDomainCard
+          titleKey="envOverrides.botCardTitle"
+          descriptionKey="envOverrides.detectionGroupDescription"
+          group="detection"
+          keys={CAPTCHA_ENV_OVERRIDE_KEYS}
+          canManage={canManageOverrides}
+          enabled={Boolean(user?.role)}
+        />
       </div>
     </TooltipProvider>
   )

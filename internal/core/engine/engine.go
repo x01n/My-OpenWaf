@@ -516,7 +516,7 @@ func (e *Engine) getOrBuildPhases(sn *snapshot.Snapshot, rt *snapshot.SiteRuntim
 
 	if prot.RequestRateLimitEnabled && deps.reqRateLimiter != nil {
 		act := action.Type(prot.RequestRateLimitAction)
-		addPhase(rules.NewReqRateLimitPhase(deps.reqRateLimiter, act))
+		addPhase(rules.NewReqRateLimitPhaseWithQuota(deps.reqRateLimiter, act, prot.RequestRateLimitWindow, prot.RequestRateLimitMax))
 	}
 
 	// signature 与 custom 是用户自建规则，不参与按 phase 跳过（停用规则本身即可），

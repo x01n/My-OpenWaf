@@ -16,19 +16,21 @@ var internalSettingKeys = map[string]struct{}{
 }
 
 var protectedSettingKeys = map[string]string{
-	"protection":                        "/api/v1/protection-settings",
-	"bot_settings":                      "/api/v1/bot-settings/update",
-	"drop_policy":                       "/api/v1/drop-policy/update",
-	store.SettingKeyRedisConfig:         "/api/v1/redis-config",
-	store.SettingKeyHPKP:                "/api/v1/protection-settings",
-	store.SettingKeyHPKPValue:           "/api/v1/protection-settings",
-	store.SettingKeyHPKPReportOnly:      "/api/v1/protection-settings",
-	store.SettingKeyHPKPReportOnlyValue: "/api/v1/protection-settings",
-	settingKeyNetwork:                   "/api/v1/network-config",
-	settingKeyHTTP2:                     "/api/v1/http2-config",
-	settingKeyLog:                       "/api/v1/log-config",
-	settingKeyTLSDefault:                "/api/v1/tls-config",
-	store.SettingKeyACMEConfig:          "/api/v1/certificates/acme/config",
+	"protection":                           "/api/v1/protection-settings",
+	"bot_settings":                         "/api/v1/bot-settings/update",
+	"drop_policy":                          "/api/v1/drop-policy/update",
+	store.SettingKeyRedisConfig:            "/api/v1/redis-config",
+	store.SettingKeyRuntimeConfigOverrides: "/api/v1/runtime-config/env-overrides",
+	store.SettingKeyHPKP:                   "/api/v1/protection-settings",
+	store.SettingKeyHPKPValue:              "/api/v1/protection-settings",
+	store.SettingKeyHPKPReportOnly:         "/api/v1/protection-settings",
+	store.SettingKeyHPKPReportOnlyValue:    "/api/v1/protection-settings",
+	settingKeyNetwork:                      "/api/v1/network-config",
+	settingKeyHTTP2:                        "/api/v1/http2-config",
+	imagerySettingKey:                      "/api/v1/image-transform",
+	settingKeyLog:                          "/api/v1/log-config",
+	settingKeyTLSDefault:                   "/api/v1/tls-config",
+	store.SettingKeyACMEConfig:             "/api/v1/certificates/acme/config",
 }
 
 func isInternalSettingKey(key string) bool {

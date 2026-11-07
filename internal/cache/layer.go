@@ -22,12 +22,12 @@ import (
  * 触发数据库重载，而不是共享缓存中的快照。
  */
 type Layer struct {
-	inner *ristretto.Cache
+	inner *ristretto.Cache[string, *snapshot.Snapshot]
 }
 
 // NewLayer 创建本地快照缓存。
 func NewLayer() (*Layer, error) {
-	c, err := ristretto.NewCache(&ristretto.Config{
+	c, err := ristretto.NewCache(&ristretto.Config[string, *snapshot.Snapshot]{
 		NumCounters: 1e4,
 		MaxCost:     1 << 20,
 		BufferItems: 64,
@@ -57,8 +57,7 @@ func (l *Layer) GetSnapshot(rev uint64) (*snapshot.Snapshot, bool) {
 	if !ok {
 		return nil, false
 	}
-	sn, _ := v.(*snapshot.Snapshot)
-	return sn, sn != nil
+	return v, v != nil
 }
 
 // InvalidateAll 清空整个本地缓存。

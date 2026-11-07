@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"time"
 
+	"My-OpenWaf/internal/waf/bot/tlsfp"
+
 	"gorm.io/gorm"
 )
 
@@ -56,6 +58,7 @@ type SecurityEvent struct {
 
 	TLSVersion      string `gorm:"size:16" json:"tls_version"`
 	TLSSNI          string `gorm:"size:255" json:"tls_sni"`
+	TLSSNIPresence  string `gorm:"-" json:"tls_sni_presence,omitempty"`
 	TLSALPN         string `gorm:"size:128" json:"tls_alpn"`
 	TLSJA3          string `gorm:"size:1024" json:"tls_ja3"`
 	TLSJA3Hash      string `gorm:"size:32" json:"tls_ja3_hash"`
@@ -75,11 +78,11 @@ type SecurityEvent struct {
 // AccessLog 记录每个入站请求的最终结果，供查询与审计使用。
 type AccessLog struct {
 	ID          uint      `gorm:"primaryKey;index:idx_al_site_created_id,priority:3" json:"id"`
-	CreatedAt   time.Time `gorm:"index:idx_al_created;index:idx_al_site_created;index:idx_al_site_created_id,priority:2" json:"created_at"`
-	SiteID      uint      `gorm:"index:idx_al_site_created;index:idx_al_site_created_id,priority:1" json:"site_id"`
+	CreatedAt   time.Time `gorm:"index:idx_al_created;index:idx_al_site_created_id,priority:2" json:"created_at"`
+	SiteID      uint      `gorm:"index:idx_al_site_created_id,priority:1" json:"site_id"`
 	RequestID   string    `gorm:"size:64;index:idx_al_request_id" json:"request_id"`
 	ClientIP    string    `gorm:"size:45;index:idx_al_client_ip" json:"client_ip"`
-	Host        string    `gorm:"size:255;index:idx_al_host" json:"host"`
+	Host        string    `gorm:"size:255" json:"host"`
 	Path        string    `gorm:"size:2048" json:"path"`
 	QueryString string    `gorm:"size:2048" json:"query_string"`
 	Method      string    `gorm:"size:16" json:"method"`
@@ -99,6 +102,7 @@ type AccessLog struct {
 	UpstreamHTTPProtocol string `gorm:"size:32" json:"upstream_http_protocol"`
 	TLSVersion           string `gorm:"size:16" json:"tls_version"`
 	TLSSNI               string `gorm:"size:255" json:"tls_sni"`
+	TLSSNIPresence       string `gorm:"-" json:"tls_sni_presence,omitempty"`
 	TLSALPN              string `gorm:"size:128" json:"tls_alpn"`
 	TLSJA3               string `gorm:"size:1024" json:"tls_ja3"`
 	TLSJA3Hash           string `gorm:"size:32;index:idx_al_tls_ja3_hash" json:"tls_ja3_hash"`
@@ -112,13 +116,15 @@ type AccessLog struct {
 	TLSPointFormats string `gorm:"type:text" json:"tls_point_formats"`
 	HeaderOrder     string `gorm:"size:1024" json:"header_order"`
 
-	VisitorFusionClass              string `gorm:"size:16;index:idx_al_visitor_fusion_window,priority:2" json:"visitor_fusion_class"`
+	VisitorFusionClass              string `gorm:"size:16" json:"visitor_fusion_class"`
 	VisitorFusionScore              int    `gorm:"default:0" json:"visitor_fusion_score"`
 	VisitorFusionClientFamily       string `gorm:"size:32" json:"visitor_fusion_client_family"`
 	VisitorFusionUAClaim            string `gorm:"size:32" json:"visitor_fusion_ua_claim"`
 	VisitorFusionConsistency        string `gorm:"size:32" json:"visitor_fusion_consistency"`
-	VisitorFusionEvidenceSufficient bool   `gorm:"default:false;index:idx_al_visitor_fusion_window,priority:1" json:"visitor_fusion_evidence_sufficient"`
+	VisitorFusionEvidenceSufficient bool   `gorm:"default:false" json:"visitor_fusion_evidence_sufficient"`
 	VisitorFusionReasons            string `gorm:"size:1024" json:"visitor_fusion_reasons"`
+
+	ZeroRTT bool `gorm:"default:false" json:"zero_rtt"`
 
 	UpstreamLatencyMs int64 `gorm:"default:0" json:"upstream_latency_ms"`
 	ResponseSize      int64 `gorm:"default:0" json:"response_size"`
@@ -186,6 +192,47 @@ func (a *AccessLog) BeforeSave(*gorm.DB) error {
 		a.TLSCurves,
 		a.TLSPointFormats,
 	)
+	// TLSSNIPresence 是 gorm:"-" 的读侧派生字段（见 sni_presence.go），
+	// 但走 GORM 的写入路径会把它一并带进来，因此在落库前统一清空，
+	// 避免读取侧看到的是一个由请求路径决定、而非由落库数据决定的值。
+	a.TLSSNIPresence = ""
+	return nil
+}
+
+/**
+ * AfterFind 在读取访问日志后派生 SNI 存在性。
+ *
+ * 这样做的原因是读取侧出口很多（仓储列表/详情/按请求号查询、实时推送
+ * 快照、指纹聚合），只在其中一个出口赋值会让其余出口漏标。
+ */
+func (a *AccessLog) AfterFind(*gorm.DB) error {
+	if a == nil {
+		return nil
+	}
+	a.TLSSNIPresence = tlsfp.SNIPresenceFromValues(a.TLSSNI, a.TLSJA4, a.TLSVersion != "" || a.TLSJA4 != "")
+	return nil
+}
+
+/**
+ * AfterFind 在读取安全事件后派生 SNI 存在性，规则同 AccessLog.AfterFind。
+ */
+func (e *SecurityEvent) AfterFind(*gorm.DB) error {
+	if e == nil {
+		return nil
+	}
+	e.TLSSNIPresence = tlsfp.SNIPresenceFromValues(e.TLSSNI, e.TLSJA4, e.TLSVersion != "" || e.TLSJA4 != "")
+	return nil
+}
+
+/*
+*
+  - AfterFind 在读取 Bot 评分日志后派生 SNI 存在性，规则同 AccessLog.AfterFind。
+*/
+func (b *BotScoreLog) AfterFind(*gorm.DB) error {
+	if b == nil {
+		return nil
+	}
+	b.TLSSNIPresence = tlsfp.SNIPresenceFromValues(b.TLSSNI, b.TLSJA4, b.TLSVersion != "" || b.TLSJA4 != "")
 	return nil
 }
 
@@ -215,6 +262,7 @@ type BotScoreLog struct {
 	TLSJA4           string    `gorm:"size:255;index" json:"tls_ja4"`
 	TLSVersion       string    `gorm:"size:16" json:"tls_version"`
 	TLSSNI           string    `gorm:"size:255" json:"tls_sni"`
+	TLSSNIPresence   string    `gorm:"-" json:"tls_sni_presence,omitempty"`
 	TLSALPN          string    `gorm:"size:128" json:"tls_alpn"`
 	HeaderOrder      string    `gorm:"size:1024" json:"header_order"`
 	TotalScore       int       `gorm:"index" json:"total_score"`

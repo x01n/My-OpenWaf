@@ -294,6 +294,30 @@ func (p *ProtectionConfig) SetCategorySensitivity(m map[string]string) {
 	p.CategorySensitivity = string(b)
 }
 
+// CiscoASAModeOverride 返回站点生效配置里 `owasp:path:006` 的档位覆盖值。
+//
+// 返回空串表示「未配置」：语义与 internal/core/rules 的 NewOWASPPhase 一致，
+// 调用方必须按 scoped 处理，不能按 legacy。显式配置时按配置值原样返回，档位
+// 合法性由 owasp.NormalizeCiscoASAMode 在调用侧归一（未知值回落 legacy）。
+//
+// 数据面的内联 OWASP 护栏与引擎必须共用同一口径，否则同一请求会被其中一道
+// 提前拦掉，端到端结论与单元语义相反。
+func (p *ProtectionConfig) CiscoASAModeOverride() string {
+	if p == nil || p.OWASPRulesConfig == "" || p.OWASPRulesConfig == "{}" {
+		return ""
+	}
+	var m map[string]struct {
+		CiscoASAMode string `json:"cisco_asa_mode"`
+	}
+	if err := json.Unmarshal([]byte(p.OWASPRulesConfig), &m); err != nil {
+		return ""
+	}
+	if ov, ok := m["owasp:path:006"]; ok {
+		return strings.TrimSpace(ov.CiscoASAMode)
+	}
+	return ""
+}
+
 // GetOWASPRulesConfig 把 OWASPRulesConfig JSON 字段解析成 map。
 func (p *ProtectionConfig) GetOWASPRulesConfig() map[string]interface{} {
 	if p.OWASPRulesConfig == "" || p.OWASPRulesConfig == "{}" {

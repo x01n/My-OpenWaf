@@ -410,7 +410,8 @@ func TestForEachOWASPTargetMatchesCollectTargetsAndMarksBody(t *testing.T) {
 			t.Fatalf("body flag %d = %v, want %v; flags=%v", i, bodyFlags[i], wantBody, bodyFlags)
 		}
 	}
-	wantQueryPlusFlags := []bool{true, true, true, false, true, true}
+	// 末尾两项是 body 目标：body 不按 query 语义解码，`+` 不做空格转换。
+	wantQueryPlusFlags := []bool{true, true, true, false, false, false}
 	if len(queryPlusFlags) != len(wantQueryPlusFlags) {
 		t.Fatalf("query plus flag count = %d, want %d; flags=%v", len(queryPlusFlags), len(wantQueryPlusFlags), queryPlusFlags)
 	}
@@ -1279,15 +1280,15 @@ func TestCheckOWASP_SQLi_BlindFalseCondition(t *testing.T) {
 
 func TestShouldScanSQLiBooleanPrefilterKeepsAttackShapes(t *testing.T) {
 	signals := collectSQLiPatternSignals("id=1 and 1=2")
-	if !shouldScanSQLiPatternWithSignals("id=1 and 1=2", findSQLiPatternForTest("owasp:sqli:010"), signals) {
+	if !shouldScanSQLiPatternWithSignals("id=1 and 1=2", findSQLiPatternForTest("owasp:sqli:010"), signals, nil) {
 		t.Fatal("numeric boolean SQLi shape should enter sqli:010 regex")
 	}
 	signals = collectSQLiPatternSignals(`name=admin" or "a"="a"`)
-	if !shouldScanSQLiPatternWithSignals(`name=admin" or "a"="a"`, findSQLiPatternForTest("owasp:sqli:011"), signals) {
+	if !shouldScanSQLiPatternWithSignals(`name=admin" or "a"="a"`, findSQLiPatternForTest("owasp:sqli:011"), signals, nil) {
 		t.Fatal("quoted boolean SQLi shape should enter sqli:011 regex")
 	}
 	signals = collectSQLiPatternSignals(`id=1' or ''='`)
-	if !shouldScanSQLiPatternWithSignals(`id=1' or ''='`, findSQLiPatternForTest("owasp:sqli:036"), signals) {
+	if !shouldScanSQLiPatternWithSignals(`id=1' or ''='`, findSQLiPatternForTest("owasp:sqli:036"), signals, nil) {
 		t.Fatal("empty quoted boolean SQLi shape should enter sqli:036 regex")
 	}
 }
@@ -1303,7 +1304,7 @@ func TestShouldScanSQLiBooleanPrefilterSkipsPlainText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		signals := collectSQLiPatternSignals(tt.input)
-		if shouldScanSQLiPatternWithSignals(tt.input, findSQLiPatternForTest(tt.id), signals) {
+		if shouldScanSQLiPatternWithSignals(tt.input, findSQLiPatternForTest(tt.id), signals, nil) {
 			t.Fatalf("%s should skip plain text input %q", tt.id, tt.input)
 		}
 	}
@@ -1317,7 +1318,7 @@ func TestShouldScanSQLiFunctionAndHexPrefilter(t *testing.T) {
 		"id=conv (10,10,16)",
 	} {
 		signals := collectSQLiPatternSignals(input)
-		if !shouldScanSQLiPatternWithSignals(input, sqli007, signals) {
+		if !shouldScanSQLiPatternWithSignals(input, sqli007, signals, nil) {
 			t.Fatalf("sqli:007 should enter regex for %q", input)
 		}
 	}
@@ -1327,7 +1328,7 @@ func TestShouldScanSQLiFunctionAndHexPrefilter(t *testing.T) {
 		"topic=conversation notes",
 	} {
 		signals := collectSQLiPatternSignals(input)
-		if shouldScanSQLiPatternWithSignals(input, sqli007, signals) {
+		if shouldScanSQLiPatternWithSignals(input, sqli007, signals, nil) {
 			t.Fatalf("sqli:007 should skip plain text input %q", input)
 		}
 	}
@@ -1339,7 +1340,7 @@ func TestShouldScanSQLiFunctionAndHexPrefilter(t *testing.T) {
 		"items, 0xabcdef",
 	} {
 		signals := collectSQLiPatternSignals(input)
-		if !shouldScanSQLiPatternWithSignals(input, sqli008, signals) {
+		if !shouldScanSQLiPatternWithSignals(input, sqli008, signals, nil) {
 			t.Fatalf("sqli:008 should enter regex for %q", input)
 		}
 	}
@@ -1349,7 +1350,7 @@ func TestShouldScanSQLiFunctionAndHexPrefilter(t *testing.T) {
 		"value=(0xzzzz)",
 	} {
 		signals := collectSQLiPatternSignals(input)
-		if shouldScanSQLiPatternWithSignals(input, sqli008, signals) {
+		if shouldScanSQLiPatternWithSignals(input, sqli008, signals, nil) {
 			t.Fatalf("sqli:008 should skip plain text input %q", input)
 		}
 	}
@@ -1361,7 +1362,7 @@ func TestShouldScanSQLiFunctionAndHexPrefilter(t *testing.T) {
 		"id=if(select 1,1,0)",
 	} {
 		signals := collectSQLiPatternSignals(input)
-		if !shouldScanSQLiPatternWithSignals(input, sqli022, signals) {
+		if !shouldScanSQLiPatternWithSignals(input, sqli022, signals, nil) {
 			t.Fatalf("sqli:022 should enter regex for %q", input)
 		}
 	}
@@ -1370,7 +1371,7 @@ func TestShouldScanSQLiFunctionAndHexPrefilter(t *testing.T) {
 		"specific(ascii) label",
 	} {
 		signals := collectSQLiPatternSignals(input)
-		if shouldScanSQLiPatternWithSignals(input, sqli022, signals) {
+		if shouldScanSQLiPatternWithSignals(input, sqli022, signals, nil) {
 			t.Fatalf("sqli:022 should skip plain text input %q", input)
 		}
 	}

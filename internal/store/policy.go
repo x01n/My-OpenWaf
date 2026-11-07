@@ -87,7 +87,7 @@ type Rule struct {
 
 	// WindowSeconds 与 RequestCount 是规则级频次限制参数（秒 / 次数）。
 	// 二者同时大于 0 时，规则条件在快照编译期被包装成 cc_rate 复合条件：
-	// 命中本规则条件的请求按 clientIP|host 计数，窗口内达到 RequestCount
+	// 命中本规则条件的请求按 bind+siteID+规范化 Host+客户端 IP 计数，窗口内达到 RequestCount
 	// 次后执行本规则的 Action。任一为 0 表示不做频次限制。
 	WindowSeconds int `gorm:"default:0" json:"window_seconds"`
 	RequestCount  int `gorm:"default:0" json:"request_count"`

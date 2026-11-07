@@ -223,15 +223,11 @@ func CreateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		if siteRequestHasField(body, "cc_rules") || (item.CCUseCustom != nil && *item.CCUseCustom) {
+		if ccRulesValidationRequired(body, &item) {
 			if err := shared.ValidateCCRules(item.CCRules); err != nil {
 				c.JSON(400, map[string]string{"error": err.Error()})
 				return
 			}
-		}
-		if err := shared.ValidateCCRules(item.CCRules); err != nil {
-			c.JSON(400, map[string]string{"error": err.Error()})
-			return
 		}
 		if err := shared.ValidateSiteTLSCertificate(item.TLSEnabled, item.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -345,15 +341,11 @@ func UpdateSite(repo *repository.SiteRepo, certRepo *repository.CertificateRepo,
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
 		}
-		if siteRequestHasField(body, "cc_rules") || (siteRequestHasField(body, "cc_use_custom") && existing.CCUseCustom != nil && *existing.CCUseCustom) {
+		if ccRulesValidationRequired(body, existing) {
 			if err := shared.ValidateCCRules(existing.CCRules); err != nil {
 				c.JSON(400, map[string]string{"error": err.Error()})
 				return
 			}
-		}
-		if err := shared.ValidateCCRules(existing.CCRules); err != nil {
-			c.JSON(400, map[string]string{"error": err.Error()})
-			return
 		}
 		if err := shared.ValidateSiteTLSCertificate(existing.TLSEnabled, existing.CertID, certRepo); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
@@ -380,6 +372,29 @@ func siteRequestHasField(body []byte, field string) bool {
 	}
 	_, ok := raw[field]
 	return ok
+}
+
+/**
+ * ccRulesValidationRequired 判定一次站点写入是否必须校验 cc_rules。
+ *
+ * 三种情形必须校验，缺一不可：
+ *   - 请求体显式携带 `cc_rules`：错误提示要指向本次提交的内容；
+ *   - 请求体显式携带 `cc_use_custom`：开启站点覆盖必须携带合法规则，
+ *     关闭覆盖则不应被库里遗留的规则挡住，故本分支只在绑定结果为真时成立；
+ *   - 绑定后站点处于「使用自定义 CC 规则」状态：存量脏数据不得继续外流。
+ *
+ * @param body 原始请求体，用于区分「字段缺省」与「显式提交」。
+ * @param item 已绑定请求体的站点快照。
+ * @return 需要校验返回 true。
+ */
+func ccRulesValidationRequired(body []byte, item *store.Site) bool {
+	if siteRequestHasField(body, "cc_rules") {
+		return true
+	}
+	if siteRequestHasField(body, "cc_use_custom") && item.CCUseCustom != nil && *item.CCUseCustom {
+		return true
+	}
+	return item.CCUseCustom != nil && *item.CCUseCustom
 }
 
 func validateSiteCache(item *store.Site) error {

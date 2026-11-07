@@ -102,19 +102,16 @@ type ImportBackupReq struct {
  *
  * @param db          数据库句柄。
  * @param reload      snapshot 重建回调。
- * @param invalidates 备份写入后需要立即失效的进程内只读缓存。备份导入可能改写
- *                    SiteAccessConfig / AccessProvider / AccessUser / AccessPathRule，
- *                    而已登录用户持有的访问控制会话存放在数据面的
- *                    dataplane.globalAccessSessionStore（内存/Redis，与库表无关）。
- *                    接入点经核实的接线方式为：在 router.go 现有 invalidates 回调
- *                    （r.CVERule.InvalidateCanonicalSnapshot /
- *                    detect.InvalidateOWASPReadSnapshots，router.go:356-358）之后
- *                    追加一个会话吊销回调。当前 dataplane 包没有暴露"清空/吊销
- *                    全部会话"的入口（仅 CleanExpired，access_control.go:43，只清
- *                    过期不吊销；accessgate.SessionStore 接口 gate.go:65 无
- *                    ClearAll 方法），因此本文件无法在不新造会话管理逻辑的前提
- *                    下完成该接线，待 dataplane/accessgate 侧补一个全量吊销入口后
- *                    在此回调内调用。
+ * @param invalidates 备份写入后、reload 之前需要执行的失效回调，无条件执行
+ *                    （不看 ReplaceMode：合并模式同样会改写
+ *                    SiteAccessConfig / AccessProvider / AccessUser / AccessPathRule）。
+ *                    已登录用户持有的访问控制会话存放在数据面的
+ *                    dataplane.globalAccessSessionStore（内存/Redis，与库表无关），
+ *                    库里删掉用户并不会让旧 token 失效——Gate.CheckAccess 只校验
+ *                    会话的 SiteID 与 ExpiresAt，不校验用户是否仍存在。因此
+ *                    router.go 的 /backup/import 接线在本回调内追加
+ *                    dataplane.RevokeAllAccessSessions()，把恢复配置当作一次权限重置：
+ *                    旧会话在 reload 让新配置生效之前就全部作废。
  * @return Hertz 处理器。
  */
 func ImportBackup(db *gorm.DB, reload func() error, invalidates ...func()) app.HandlerFunc {

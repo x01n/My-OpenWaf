@@ -65,6 +65,7 @@ type SessionStore interface {
 	Create(siteID uint, identity string, provider string, ttl int) (token string, err error)
 	Validate(token string) (*SessionInfo, error)
 	Revoke(token string) error
+	RevokeAll() error
 	CleanExpired() error
 }
 

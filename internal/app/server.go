@@ -14,7 +14,6 @@ import (
 	"net"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,10 +47,12 @@ import (
 	"My-OpenWaf/internal/dataplane"
 	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
 	dptlsfp "My-OpenWaf/internal/dataplane/tlsfp"
+	"My-OpenWaf/internal/imagery"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/pkg/logger"
 	"My-OpenWaf/internal/pkg/memreclaim"
 	"My-OpenWaf/internal/proxy"
+	proxytransport "My-OpenWaf/internal/proxy/transport"
 	snapshotpkg "My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 	authstore "My-OpenWaf/internal/store/auth"
@@ -133,12 +134,36 @@ func effectiveHTTP2Config(sn *snapshotpkg.Snapshot) snapshotpkg.HTTP2Config {
 	return sn.HTTP2Config
 }
 
-func applyLogConfig(repo *repository.SystemSettingsRepo) {
-	if repo == nil {
-		return
+/**
+ * applyLogConfig 用 log_config 设置行重建日志器，并把着色模式一并注入。
+ *
+ * 着色模式来自 core.Config（环境变量与逐键覆盖表在那里汇合）：log_config
+ * 设置行没有这个字段，它只在这里与 /api/v1/log-config 的保存路径上被重建。
+ *
+ * @param repo      系统设置仓储；nil 或没有设置行时按环境变量重建。
+ * @param colorMode 着色模式：on / off / auto。
+ */
+func applyLogConfig(repo *repository.SystemSettingsRepo, colorMode string) {
+	raw := ""
+	if repo != nil {
+		if value, err := repo.Get("log_config"); err == nil {
+			raw = strings.TrimSpace(value)
+		}
 	}
-	raw, err := repo.Get("log_config")
-	if err != nil || strings.TrimSpace(raw) == "" {
+	if raw == "" {
+		// 没有设置行且着色模式也没有被接管：保持 init() 已经装配好的日志器不动。
+		// 这里刻意不做「按环境变量重建一次」——那会白白关闭并重开一次日志文件，
+		// 而结果与 init() 完全一致。
+		if colorMode == "" || colorMode == "auto" {
+			return
+		}
+		// 着色模式被覆盖表接管：级别 / 文件 / 镜像三项仍跟随环境变量。
+		logger.Configure(logger.Config{
+			Level:      os.Getenv("MY_OPENWAF_LOG_LEVEL"),
+			FilePath:   os.Getenv("MY_OPENWAF_LOG_FILE"),
+			AlsoStdout: os.Getenv("MY_OPENWAF_LOG_ALSO_STDOUT") == "1",
+			Color:      colorMode,
+		})
 		return
 	}
 	var cfg struct {
@@ -149,7 +174,7 @@ func applyLogConfig(repo *repository.SystemSettingsRepo) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return
 	}
-	logger.Configure(logger.Config{Level: cfg.Level, FilePath: cfg.FilePath, AlsoStdout: cfg.AlsoStdout})
+	logger.Configure(logger.Config{Level: cfg.Level, FilePath: cfg.FilePath, AlsoStdout: cfg.AlsoStdout, Color: colorMode})
 }
 
 func adminPasswordMinLength(repo *repository.SystemSettingsRepo) int {
@@ -233,7 +258,7 @@ func Run() {
 		log.Error("reconcile CVE catalog failed", slog.Any("err", err))
 		os.Exit(1)
 	}
-	if err := store.AutoMigrateLogs(rt.LogDB); err != nil {
+	if err := store.AutoMigrateLogsDeferred(rt.LogDB); err != nil {
 		log.Error("log auto migrate failed", slog.Any("err", err))
 		os.Exit(1)
 	}
@@ -275,7 +300,7 @@ func Run() {
 
 	repos := repository.NewWithLogDB(rt.DB, rt.LogDB)
 	repos.CVERule.MarkBuiltinCatalogReady()
-	applyLogConfig(repos.SystemSettings)
+	applyLogConfig(repos.SystemSettings, rt.Config.LogColor)
 	redisKV := cache.NewRedisKV(rt.Redis)
 	rt.RedisKV = redisKV
 
@@ -313,13 +338,16 @@ func Run() {
 	// 在一个 DB 事务里落盘，消除 SQLite 写锁竞争。
 	// 容量、批大小、flush 周期全部从 rt.Config.Queue 注入。
 	unifiedWriter := observability.NewUnifiedWriterWithOptions(rt.LogDB, logger.New("writer"), observability.UnifiedWriterOptions{
-		EventBufferSize: rt.Config.Queue.EventBufferSize,
-		DropBufferSize:  rt.Config.Queue.DropBufferSize,
-		BatchSize:       rt.Config.Queue.BatchSize,
-		FlushInterval:   rt.Config.Queue.FlushInterval,
+		EventBufferSize:      rt.Config.Queue.EventBufferSize,
+		DropBufferSize:       rt.Config.Queue.DropBufferSize,
+		BatchSize:            rt.Config.Queue.BatchSize,
+		FlushInterval:        rt.Config.Queue.FlushInterval,
+		SlowLogGrace:         rt.Config.Queue.SlowLogGraceDuration,
+		SlowLogGraceDisabled: rt.Config.Queue.SlowLogGraceDisabled,
 	})
 	unifiedWriter.SetRedis(rt.Redis)
 	unifiedWriter.SetCountCacheInvalidator(queryCache)
+	unifiedWriter.SetFingerprintCacheInvalidator(repos.AccessLog)
 	defer unifiedWriter.Close()
 
 	// 事件归档器（按保留策略自动清理安全事件、访问日志与 drop 事件）。
@@ -327,6 +355,7 @@ func Run() {
 	archiver := observability.NewArchiver(rt.LogDB, repos.SecurityEvent, repos.AccessLog, repos.DropEvent, logger.New("archiver"), 30)
 	archiver.SetSettingsRepo(repos.SystemSettings)
 	archiver.SetSyncLogRepo(repos.ThreatIntelSyncLog)
+	archiver.SetBotScoreRepo(repos.BotScore)
 	defer archiver.Close()
 
 	responseCache := cache.NewResponseCache(rt.Config.ResponseCacheMB, rt.Config.ResponseCacheTTLSec)
@@ -508,6 +537,17 @@ func Run() {
 		}
 		return snapshot
 	})
+	// 出站请求净化器计数：畸形头被丢、裸 '%' 被转义都不会让请求失败，因此
+	// 没有这三个计数器时，这类客户端流量在 /metrics 上不可见。
+	promMetrics.SetUpstreamRequestGuardStatsProvider(func() observability.UpstreamRequestGuardStatsSnapshot {
+		s := proxy.UpstreamRequestGuardSnapshot()
+		return observability.UpstreamRequestGuardStatsSnapshot{
+			DroppedHeaderNames:         s.DroppedHeaderNames,
+			DroppedHeaderValues:        s.DroppedHeaderValues,
+			SanitizedPaths:             s.SanitizedPaths,
+			DroppedSecurityHeaderNames: s.DroppedSecurityHeaderNames,
+		}
+	})
 	// 缓存命中率指标：汇总各缓存层的 hits/misses，通过 /metrics 暴露。
 	promMetrics.SetCacheStatsProvider(func() []observability.CacheLayerStats {
 		qcHits, qcMisses := queryCache.HitStats()
@@ -538,6 +578,21 @@ func Run() {
 		}
 		return out
 	})
+	// 图像转换指标：其中 openwaf_imagery_webp_dynamic_available 是 libwebp
+	// 装载失败的唯一信号——webp 包加载不到共享库时会静默退回纯 Go 转译路径，
+	// 功能照常、只是慢数倍，没有这条 gauge 就无法在部署侧发现。
+	promMetrics.SetImageTransformStatsProvider(func() observability.ImageTransformStatsSnapshot {
+		m := imagery.Metrics()
+		return observability.ImageTransformStatsSnapshot{
+			WebPDynamicAvailable: m.WebPDynamicAvailable,
+			Applied:              m.Applied,
+			Skipped:              m.Skipped,
+			TimedOut:             m.TimedOut,
+			GateLimit:            m.GateLimit,
+			GateInUse:            m.GateInUse,
+			GateSkipped:          m.GateSkipped,
+		}
+	})
 
 	hc := health.New(rt.DB, rt.Snapshot)
 	lm := lifecycle.New(log)
@@ -552,7 +607,8 @@ func Run() {
 
 	// 初始化 go-captcha 高级验证码（点击/滑动/旋转）
 	goCaptchaCfg := challenge.DefaultGoCaptchaConfig()
-	if dir := os.Getenv("MY_OPENWAF_CAPTCHA_DIR"); dir != "" {
+	// 目录来自 core.Config：环境变量与逐键覆盖表都在那里汇合，这里不再各自读一遍环境。
+	if dir := rt.Config.CaptchaDir; dir != "" {
 		goCaptchaCfg.ResourceDir = dir
 	}
 	goCaptchaProvider := challenge.NewGoCaptchaProvider(goCaptchaCfg, logger.New("gocaptcha"))
@@ -641,12 +697,8 @@ func Run() {
 	resourceAggregator := dataplane.NewRecordedResourceAggregator(repos.RecordedResource, logger.New("resource-agg"))
 	resourceAggregator.SetRedis(redisKV)
 	defer resourceAggregator.Close()
-	samplingRate := 1
-	if v := os.Getenv("MY_OPENWAF_ACCESSLOG_SAMPLING"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n >= 1 {
-			samplingRate = int(n)
-		}
-	}
+	// 采样率来自 core.Config.AccessLogSamplingRate：环境变量与逐键覆盖表都在那里汇合。
+	samplingRate := rt.Config.AccessLogSamplingRate
 
 	// dataListenerOpts 保存创建数据面 handler 时的共享选项。
 	dataplane.SetAccessStoreRedisClients(rt.Redis)
@@ -656,7 +708,7 @@ func Run() {
 		Metrics:               metrics,
 		Writer:                unifiedWriter,
 		ResponseCache:         responseCache,
-		AccessLogSamplingRate: uint32(samplingRate),
+		AccessLogSamplingRate: samplingRate,
 		Log:                   dpLog,
 		CaptchaManager:        captchaMgr,
 		ShieldManager:         shieldMgr,
@@ -753,13 +805,7 @@ func Run() {
 			if lm.Has(name) {
 				continue
 			}
-			h3Srv := NewHTTP3Server(HTTP3ServerConfig{
-				Bind:       plan.Bind,
-				RouteTable: plan.RouteTable,
-				TLSConfig:  plan.TLSConfig,
-				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
-				Allow0RTT:  h3Allow0RTT(newSn),
-			})
+			h3Srv := newHTTP3ServerFromPlan(plan, newSn, log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)))
 			lm.AddWithTag(name, h3Srv, plan.Tag)
 			if err := lm.StartOne(name); err != nil {
 				log.Error("hot-started HTTP/3 listener failed", slog.String("name", name), slog.Any("err", err))
@@ -838,12 +884,12 @@ func Run() {
 		loadIPLists(ipRep, repos.IPList)
 		reconcileListeners()
 		upstreamEndpointsChanged := snapshotUpstreamSetChanged(previousSnapshot, currentSnapshot)
-		prunedUpstreamTransports := proxy.PruneInactiveUpstreamTransports(currentSnapshot)
+		prunedUpstreamTransports := proxytransport.PruneInactiveUpstreamTransports(currentSnapshot)
 		closedHTTPTransports, closedH2CTransports, closedHTTP3Transports := 0, 0, 0
 		if upstreamEndpointsChanged {
-			closedHTTPTransports, closedH2CTransports, closedHTTP3Transports = proxy.CloseIdleUpstreamTransports()
+			closedHTTPTransports, closedH2CTransports, closedHTTP3Transports = proxytransport.CloseIdleUpstreamTransports()
 		}
-		upstreamTransportStats := proxy.UpstreamTransportPoolStatsSnapshot()
+		upstreamTransportStats := proxytransport.UpstreamTransportPoolStatsSnapshot()
 		if upstreamEndpointsChanged || closedHTTPTransports > 0 || closedH2CTransports > 0 || closedHTTP3Transports > 0 || prunedUpstreamTransports.Changed() {
 			log.Info("reconciled idle upstream transports after snapshot reload",
 				slog.Bool("upstream_endpoints_changed", upstreamEndpointsChanged),
@@ -1055,17 +1101,12 @@ func Run() {
 			lm.AddHertzWithTag(name, srv, tag)
 		}
 		for name, plan := range http3Plans {
-			h3Srv := NewHTTP3Server(HTTP3ServerConfig{
-				Bind:       plan.Bind,
-				RouteTable: plan.RouteTable,
-				TLSConfig:  plan.TLSConfig,
-				Log:        log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)),
-				Allow0RTT:  h3Allow0RTT(sn),
-			})
+			h3Srv := newHTTP3ServerFromPlan(plan, sn, log.With(slog.String("proto", "h3"), slog.String("udp_bind", plan.Bind)))
 			lm.AddWithTag(name, h3Srv, plan.Tag)
 			log.Info("HTTP/3 QUIC listener registered",
 				slog.String("name", name),
 				slog.String("bind", plan.Bind),
+				slog.Bool("per_port", sn.NetworkDefaults.HTTP3PerPortEnabled),
 				slog.String("targets", plan.RouteTable.targetSummary()),
 			)
 		}
@@ -1082,18 +1123,20 @@ func Run() {
 	stopBackground()
 }
 
+/**
+ * h3Allow0RTT 返回 HTTP/3 监听是否接受 0-RTT 早期数据。
+ *
+ * 判定规则集中在 `snapshotpkg.H3Allow0RTT`，本函数只负责读取进程环境与
+ * nil 快照兜底，避免 env 语义在数据面与 Admin 自检之间各写一份而漂移。
+ *
+ * @param sn 当前快照；nil 表示尚未构建快照，一律关闭。
+ * @return 是否接受 HTTP/3 0-RTT 早期数据。
+ */
 func h3Allow0RTT(sn *snapshotpkg.Snapshot) bool {
 	if sn == nil {
 		return false
 	}
-	switch os.Getenv("MY_OPENWAF_H3_ALLOW_0RTT") {
-	case "1":
-		return sn.TLSDefaults.SessionTicketsEnabled
-	case "0":
-		return false
-	default:
-		return sn.TLSDefaults.SessionTicketsEnabled
-	}
+	return snapshotpkg.H3Allow0RTT(os.Getenv(snapshotpkg.H3Allow0RTTEnvKey), sn.TLSDefaults)
 }
 
 func siteListenerName(bind string) string {
@@ -1526,6 +1569,12 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 		server.WithMaxRequestBodySize(32 << 20),
 		server.WithMaxKeepBodySize(64 << 10),
 		server.WithSenseClientDisconnection(true),
+		// 关闭尾部斜杠自动重定向：Hertz 默认对所有非 GET 请求返回 307，
+		// 且 Location 取自被 CleanPath 清理后的路径。本项目用 NoRoute 兜底
+		// 全部路径，不存在需要重定向的路由，开启后只会把含 "//" 或 "../"
+		// 的代理请求改写成 307 重定向，既泄露规范化后的路径，又让上游
+		// 拿到与客户端原始请求不一致的目标。代理语义要求原样转发。
+		server.WithRedirectTrailingSlash(false),
 		// 将连接读缓冲从默认 4KB 提升到 16KB，减少读取请求头/体时的
 		// read 系统调用次数，属于保守的读路径吞吐优化，不影响超时与保活语义。
 		server.WithReadBufferSize(16 << 10),
@@ -1574,6 +1623,7 @@ func buildDataServerWithHTTP3Plans(siteRT snapshotpkg.SiteRuntime, sn *snapshotp
 		slog.Info("HTTP/3 Alt-Svc enabled",
 			slog.String("bind", siteRT.Bind),
 			slog.String("http3_bind", http3AltSvc.udpBind),
+			slog.Bool("http3_per_port", siteRT.NetworkDefaults.HTTP3PerPortEnabled),
 			slog.String("alt_svc", http3AltSvc.value),
 		)
 		origHandler := handler
@@ -1770,6 +1820,7 @@ func buildListenerTLS(siteRT snapshotpkg.SiteRuntime, sn *snapshotpkg.Snapshot) 
 			return selfSignedForBind(bind), nil
 		},
 	}
+	applySharedSessionTicketKey(cfg)
 	return cfg
 }
 
@@ -1985,9 +2036,10 @@ func siteListenerFingerprint(bind string, sn *snapshotpkg.Snapshot) string {
 		effectiveNetwork, effectiveALPN := snapshotpkg.EffectiveSiteNetwork(site.ALPN, site.Network, rt.NetworkDefaults, rt.TLSDefaults)
 		effectiveMinTLS, effectiveMaxTLS, effectiveCiphers := snapshotpkg.EffectiveSiteTLS(site.MinTLSVersion, site.MaxTLSVersion, site.CipherSuites, rt.TLSDefaults)
 		fmt.Fprintf(h, " site=%d tls=%v network=%s min=%s max=%s alpn=%s", site.ID, rt.Site.TLSEnabled, effectiveNetwork, effectiveMinTLS, effectiveMaxTLS, effectiveALPN)
-		fmt.Fprintf(h, " http3_enabled=%v http3_bind=%s ciphers=%s curves=%s prefer_server_cipher_suites=%v session_tickets_enabled=%v self_signed_on_ip=%v",
+		fmt.Fprintf(h, " http3_enabled=%v http3_bind=%s http3_per_port=%v ciphers=%s curves=%s prefer_server_cipher_suites=%v session_tickets_enabled=%v self_signed_on_ip=%v",
 			rt.NetworkDefaults.HTTP3Enabled,
 			strings.TrimSpace(rt.NetworkDefaults.HTTP3Bind),
+			rt.NetworkDefaults.HTTP3PerPortEnabled,
 			effectiveCiphers,
 			strings.TrimSpace(rt.TLSDefaults.CurvePreferences),
 			rt.TLSDefaults.PreferServerCipherSuites,

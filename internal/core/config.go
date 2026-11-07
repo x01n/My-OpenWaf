@@ -87,7 +87,9 @@ type QueueConfig struct {
 	// WriteQueueCapacity 是通用 WriteQueue 的任务通道容量。默认 256；上限 1M。
 	WriteQueueCapacity int
 	// WriteQueueInterval 是 WriteQueue 的 ticker 周期。默认 50ms。
-	WriteQueueInterval time.Duration
+	WriteQueueInterval   time.Duration
+	SlowLogGraceDuration time.Duration
+	SlowLogGraceDisabled bool
 }
 
 // 各项硬上限（与 internal/observability 中对应常量保持一致）。
@@ -96,22 +98,29 @@ const (
 	queueMaxChannelCapacity = 1 << 20 // 1M
 	queueMaxBatchSize       = 10000
 	queueMaxFlushInterval   = 60 * time.Second
+	// queueMaxSlowLogGrace 是 UnifiedWriter 慢速日志宽限的上界，与
+	// internal/observability 的 unifiedWriterMaxSlowLogGrace 保持一致。
+	// 上界存在的意义：该值直接决定 DB 持续跟不上时请求能被拖慢多久，
+	// 无上界等于允许把数据面拖成不可用。
+	queueMaxSlowLogGrace = 5 * time.Minute
 )
 
-// DefaultQueueConfig 返回生产默认值。除 BatchSize 外均与 observability 包
-// 参数化前的硬编码常量一致；BatchSize 经 SQLite 写径审计由 64 上调至 256。
-// WriteQueue 各默认值不变。
 func DefaultQueueConfig() QueueConfig {
 	return QueueConfig{
 		EventBufferSize:     16384,
 		DropBufferSize:      8192,
-		BatchSize:           256,
+		BatchSize:           4096,
 		FlushInterval:       3 * time.Second,
 		WriteQueueBatchSize: 64,
 		WriteQueueCapacity:  256,
 		WriteQueueInterval:  50 * time.Millisecond,
 	}
 }
+
+// defaultSlowLogGraceDuration 是慢速日志宽限的生产默认值：0，即关闭。
+// 与 observability.defaultSlowLogGrace 保持同一口径：请求路径不得为可观测性
+// 背压阻塞，队列满时直接丢弃并计数。需要等待语义的部署显式配置正数。
+const defaultSlowLogGraceDuration = 0 * time.Second
 
 /**
  * queueParseWarning 构造一条"环境变量值无法解析"的告警文本。
@@ -233,6 +242,18 @@ func clampQueueConfig(cfg QueueConfig) (QueueConfig, []string) {
 	cfg.WriteQueueInterval, warns = clampQueueDuration(
 		"MY_OPENWAF_QUEUE_WRITE_INTERVAL",
 		cfg.WriteQueueInterval, def.WriteQueueInterval, 0, warns)
+	if cfg.SlowLogGraceDisabled {
+		cfg.SlowLogGraceDuration = 0
+	} else if cfg.SlowLogGraceDuration < 0 {
+		warns = append(warns, fmt.Sprintf(
+			"MY_OPENWAF_QUEUE_SLOW_LOG_GRACE=%s is negative, treated as unset", cfg.SlowLogGraceDuration))
+		cfg.SlowLogGraceDuration = 0
+	} else if cfg.SlowLogGraceDuration > queueMaxSlowLogGrace {
+		warns = append(warns, fmt.Sprintf(
+			"MY_OPENWAF_QUEUE_SLOW_LOG_GRACE=%s exceeds the hard limit, clamped to %s",
+			cfg.SlowLogGraceDuration, queueMaxSlowLogGrace))
+		cfg.SlowLogGraceDuration = queueMaxSlowLogGrace
+	}
 
 	return cfg, warns
 }
@@ -257,8 +278,15 @@ type Config struct {
 
 	// AdminBind 是管理控制面服务器的监听地址。
 	AdminBind string
-	// AdminStaticDir 在本地开发时覆盖内嵌前端产物。
+	// AdminStaticDir 在本地开发时覆盖内嵌前端产物。空值表示使用内嵌资源。
 	AdminStaticDir string
+	// CaptchaDir 覆盖验证码图片资源目录；空值表示使用 challenge 包的内置默认目录。
+	CaptchaDir string
+	// LogColor 是日志着色模式：on / off / auto。auto 表示按标准输出是否为终端判定。
+	LogColor string
+	// AccessLogSamplingRate 是访问日志采样分母：N >= 1 时每 N 条普通成功请求记录一条。
+	// 带 WAF 动作或 4xx/5xx 的记录不受采样影响。0 表示全量记录。
+	AccessLogSamplingRate uint32
 
 	// CVE 检测配置。
 	CVE CVEConfig
@@ -282,12 +310,8 @@ type Config struct {
 	ResponseDecompressionMaxBytes int64
 
 	// Queue 调优各类可观测/异步写入队列的容量与批大小。
-	// 默认值与历史硬编码常量一致；环境变量主要用于高并发场景扩容。
 	Queue QueueConfig
-	// QueueWarnings 记录加载 Queue 时发生的解析失败与越界钳制。
-	// 由 LoadConfigFromEnv 填充，NewRuntime 逐条打成 WARN。
-	// 单独成字段而不是走 Validate()：Validate 在启动流程里被调用两次
-	// （preflight + 应用存储 Redis 配置后），复用它会让每条告警重复出现。
+	// QueueWarnings 是 LoadConfigFromEnv 解析环境变量时产生的告警。
 	QueueWarnings []string
 	HTTPTrace     HTTPTraceConfig
 }
@@ -338,6 +362,19 @@ func LoadConfigFromEnv() Config {
 	adminBind := strings.TrimSpace(os.Getenv("MY_OPENWAF_ADMIN_BIND"))
 	if adminBind == "" {
 		adminBind = ":9443"
+	}
+
+	// 访问日志采样率：未设置时保持 1（全量）；非法取值沿用队列参数的处置口径——
+	// 保留默认值并产出告警，不静默。
+	accessLogSampling := uint32(1)
+	accessLogWarns := []string{}
+	if v := strings.TrimSpace(os.Getenv("MY_OPENWAF_ACCESSLOG_SAMPLING")); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil || n < 1 {
+			accessLogWarns = append(accessLogWarns, queueParseWarning("MY_OPENWAF_ACCESSLOG_SAMPLING", v, accessLogSampling))
+		} else {
+			accessLogSampling = uint32(n)
+		}
 	}
 
 	// 解压产出上限：未设置时保持 0，由 proxy 包内的默认值兜底；解析失败沿用队列
@@ -457,6 +494,14 @@ func LoadConfigFromEnv() Config {
 			queueWarns = append(queueWarns, queueParseWarning("MY_OPENWAF_QUEUE_WRITE_INTERVAL", v, queueCfg.WriteQueueInterval))
 		}
 	}
+	if v := strings.TrimSpace(os.Getenv("MY_OPENWAF_QUEUE_SLOW_LOG_GRACE")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			queueCfg.SlowLogGraceDuration = d
+			queueCfg.SlowLogGraceDisabled = d == 0
+		} else {
+			queueWarns = append(queueWarns, queueParseWarning("MY_OPENWAF_QUEUE_SLOW_LOG_GRACE", v, queueCfg.SlowLogGraceDuration))
+		}
+	}
 	queueCfg, clampWarns := clampQueueConfig(queueCfg)
 	queueWarns = append(queueWarns, clampWarns...)
 
@@ -470,6 +515,9 @@ func LoadConfigFromEnv() Config {
 		RedisDB:                       rd,
 		AdminBind:                     adminBind,
 		AdminStaticDir:                strings.TrimSpace(os.Getenv("MY_OPENWAF_ADMIN_STATIC_DIR")),
+		CaptchaDir:                    strings.TrimSpace(os.Getenv("MY_OPENWAF_CAPTCHA_DIR")),
+		LogColor:                      logColorMode(strings.TrimSpace(os.Getenv("MY_OPENWAF_LOG_COLOR"))),
+		AccessLogSamplingRate:         accessLogSampling,
 		Bot:                           botCfg,
 		CVE:                           cveCfg,
 		Drop:                          dropCfg,
@@ -478,9 +526,29 @@ func LoadConfigFromEnv() Config {
 		RequestDecompressionMaxBytes:  requestDecompressionMaxBytes,
 		ResponseDecompressionMaxBytes: responseDecompressionMaxBytes,
 		Queue:                         queueCfg,
-		QueueWarnings:                 append(queueWarns, decompressionWarns...),
+		QueueWarnings:                 append(append(queueWarns, decompressionWarns...), accessLogWarns...),
 		HTTPTrace:                     httpTraceCfg,
 	}
+}
+
+/**
+ * logColorMode 把 MY_OPENWAF_LOG_COLOR 的原文归一化成着色模式。
+ *
+ * 口径与 logger.useColor 逐字一致：只有 1 / true 着色，其余非空取值一律关闭，
+ * 空值表示跟随终端自动判定。归一化在这里做，是为了让覆盖表与构建期注入共用
+ * 同一个三态表示，而不是让消费点各自解释原始文本。
+ *
+ * @param raw 环境变量原文（已去首尾空白）。
+ * @return on / off / auto。
+ */
+func logColorMode(raw string) string {
+	if raw == "" {
+		return "auto"
+	}
+	if raw == "1" || strings.EqualFold(raw, "true") {
+		return "on"
+	}
+	return "off"
 }
 
 /**

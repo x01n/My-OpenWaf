@@ -138,6 +138,38 @@ func (rl *RedisRateLimiter) Allow(key string) bool {
 	return result == 1
 }
 
+/**
+ * AllowWithQuota 用调用方给定的窗口与配额判定，用于站点级覆盖值。
+ *
+ * @param key       计数键。
+ * @param windowSec 窗口长度（秒）；<=0 时按未启用处理。
+ * @param maxReqs   窗口内允许的请求数；<=0 时按未启用处理。
+ * @return 未超限返回 true。
+ */
+func (rl *RedisRateLimiter) AllowWithQuota(key string, windowSec, maxReqs int) bool {
+	if rl == nil {
+		return true
+	}
+	rl.configMu.RLock()
+	enabled := rl.enabled.Load()
+	rl.configMu.RUnlock()
+	if !enabled || windowSec <= 0 || maxReqs <= 0 {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	redisKey := rl.prefix + ":rl:" + key
+	now := time.Now().UnixMilli()
+	windowMs := int64(windowSec) * 1000
+
+	result, err := slidingWindowScript.Exec(ctx, rl.client, []string{redisKey}, []string{strconv.FormatInt(now, 10), strconv.FormatInt(windowMs, 10), strconv.Itoa(maxReqs)}).AsInt64()
+	if err != nil {
+		return true
+	}
+	return result == 1
+}
+
 // Increment 向当前滑动窗口加入一个事件并返回计数。
 func (rl *RedisRateLimiter) Increment(key string) int64 {
 	if rl == nil {

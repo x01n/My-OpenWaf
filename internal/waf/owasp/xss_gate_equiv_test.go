@@ -164,7 +164,7 @@ func TestNextXSSHitGateKeepsHitSet(t *testing.T) {
 	}
 	want := make([][]string, len(inputs))
 	for i, s := range inputs {
-		h, ok := nextXSSHit(s, 1)
+		h, ok := nextXSSHit(s, 1, nil)
 		if ok {
 			want[i] = append(want[i], h.RuleID)
 		}
@@ -176,7 +176,7 @@ func TestNextXSSHitGateKeepsHitSet(t *testing.T) {
 		}
 	}
 	for i, s := range inputs {
-		h, ok := nextXSSHit(s, 1)
+		h, ok := nextXSSHit(s, 1, nil)
 		if ok != (len(want[i]) > 0) {
 			t.Fatalf("input %q: hit-ok changed to %v (want %d hits)", s, ok, len(want[i]))
 		}

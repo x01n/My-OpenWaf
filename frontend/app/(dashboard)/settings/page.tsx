@@ -19,12 +19,14 @@ import {
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { cn } from "@/lib/utils"
 import {
   IconFileText,
   IconNetwork,
   IconShieldLock,
   IconDatabase,
   IconAlertTriangle,
+  IconAdjustmentsHorizontal,
 } from "@tabler/icons-react"
 import {
   useLogConfig,
@@ -37,7 +39,10 @@ import {
   useTLSConfigUpdate,
   useRuntimeConfig,
 } from "@/hooks/use-api"
+import { useEnvOverrides } from "@/hooks/use-env-overrides"
+import { EnvOverrideSection } from "@/components/env-override-card"
 import type {
+  EnvOverrideGroupKey,
   LogConfigUpdate,
   NetworkConfig,
   NetworkConfigUpdate,
@@ -45,11 +50,29 @@ import type {
   TLSConfigUpdate,
 } from "@/lib/types"
 
+/**
+ * settings 页承载的域。
+ *
+ * detection 域按「分散进现有领域」的决议拆到 CVE 规则页与 CC/Drop 页；
+ * bootstrap 与 internal 是只读卡（引导类与测试专用键留在 env）。
+ */
+const SETTINGS_ENV_OVERRIDE_GROUPS = [
+  "network",
+  "observability",
+  "limits",
+  "cache",
+  "queue",
+  "http3",
+  "bootstrap",
+  "internal",
+] as const satisfies readonly EnvOverrideGroupKey[]
+
 const networkFields = [
   "ipv6_enabled",
   "http2_enabled",
   "http3_enabled",
   "http3_bind",
+  "http3_per_port_enabled",
   "default_alpn",
   "default_network",
 ] as const
@@ -64,6 +87,27 @@ const tlsFields = [
   "self_signed_on_ip",
 ] as const
 const logFields = ["level", "file_path", "also_stdout"] as const
+
+/**
+ * HTTP/3 0-RTT 的三态取值。
+ *
+ * - "inherit" 未显式配置，运行态继承 session_tickets_enabled（提交 null）
+ * - "on"      显式开启（提交 true）
+ * - "off"     显式关闭（提交 false）
+ */
+type Allow0RTTState = "inherit" | "on" | "off"
+
+/**
+ * HTTP/3 0-RTT 三态取值到提交载荷的映射。
+ *
+ * @param state 三态取值
+ * @returns null（清除显式配置、回到继承）/ true（显式开）/ false（显式关）
+ */
+function allow0RTTStateToPayload(state: Allow0RTTState): boolean | null {
+  if (state === "on") return true
+  if (state === "off") return false
+  return null
+}
 
 function pickChangedFields<T extends object>(
   fields: readonly (keyof T)[],
@@ -112,10 +156,27 @@ export default function SettingsPage() {
     localNetwork[key] ?? networkConfig?.[key]
   const tlsValue = (key: keyof TLSConfigUpdate) =>
     localTLS[key] ?? tlsConfig?.[key]
+  /**
+   * 0-RTT 三态当前取值。
+   *
+   * 本地草稿里 `allow_0rtt` 可能是 null（清除显式配置）、true 或 false；
+   * 一旦本地设过该字段就不再看服务端值，避免 `??` 把 null 当成「未设置」。
+   */
+  const allow0RTTState: Allow0RTTState = (() => {
+    if (localTLS.allow_0rtt === true) return "on"
+    if (localTLS.allow_0rtt === false) return "off"
+    if (localTLS.allow_0rtt === null) return "inherit"
+    if (tlsConfig && !tlsConfig.has_explicit_allow_0rtt) return "inherit"
+    return tlsConfig?.allow_0rtt ? "on" : "off"
+  })()
   const logValue = (key: keyof LogConfigUpdate) =>
     localLog[key] ?? logConfig?.[key]
   const toggleNetwork = (
-    key: "ipv6_enabled" | "http2_enabled" | "http3_enabled"
+    key:
+      | "ipv6_enabled"
+      | "http2_enabled"
+      | "http3_enabled"
+      | "http3_per_port_enabled"
   ) => {
     if (!canManage) return
     setLocalNetwork((prev) => ({ ...prev, [key]: !networkValue(key) }))
@@ -148,6 +209,11 @@ export default function SettingsPage() {
   const saveTLS = async () => {
     if (!canManage) return
     const payload = pickChangedFields<TLSConfigUpdate>(tlsFields, localTLS)
+    // allow_0rtt 允许 null，不能走「非 undefined 即带上」的通用挑选：
+    // 只有本地草稿显式设过该键（含 null）才随请求提交。
+    if (Object.prototype.hasOwnProperty.call(localTLS, "allow_0rtt")) {
+      payload.allow_0rtt = localTLS.allow_0rtt
+    }
     if (!Object.keys(payload).length) return
     try {
       await tlsUpdate.execute(payload)
@@ -302,6 +368,11 @@ export default function SettingsPage() {
                     "settings.http3.enableLabel",
                     "settings.http3.description",
                   ],
+                  [
+                    "http3_per_port_enabled",
+                    "settings.http3.perPortLabel",
+                    "settings.http3.perPortDesc",
+                  ],
                 ] as const
               ).map(([key, label, desc]) => (
                 <div
@@ -364,7 +435,11 @@ export default function SettingsPage() {
                 <Label>{t("settings.http3.bindLabel")}</Label>
                 <Input
                   value={networkValue("http3_bind") ?? ""}
-                  disabled={!canManage || !networkValue("http3_enabled")}
+                  disabled={
+                    !canManage ||
+                    !networkValue("http3_enabled") ||
+                    Boolean(networkValue("http3_per_port_enabled"))
+                  }
                   onChange={(event) =>
                     setLocalNetwork((prev) => ({
                       ...prev,
@@ -373,6 +448,11 @@ export default function SettingsPage() {
                   }
                   placeholder={t("settings.http3.bindPlaceholder")}
                 />
+                {networkValue("http3_per_port_enabled") ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t("settings.http3.perPortBindIgnored")}
+                  </p>
+                ) : null}
               </div>
             </div>
             <div className="flex justify-end">
@@ -496,6 +576,55 @@ export default function SettingsPage() {
                 </div>
               ))}
             </div>
+            <div className="space-y-2 rounded-lg border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="allow_0rtt">
+                    {t("settings.allow0RTT")}
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {allow0RTTState === "inherit"
+                      ? t("settings.allow0RTTInheritHint", {
+                          value: tlsValue("session_tickets_enabled")
+                            ? t("settings.allow0RTTInheritedOn")
+                            : t("settings.allow0RTTInheritedOff"),
+                        })
+                      : t("settings.allow0RTTDesc")}
+                  </p>
+                </div>
+                <div className="inline-flex items-center gap-1 rounded-md border p-0.5">
+                  {(
+                    [
+                      ["inherit", "settings.allow0RTTInherit"],
+                      ["on", "settings.allow0RTTOn"],
+                      ["off", "settings.allow0RTTOff"],
+                    ] as const
+                  ).map(([state, label]) => (
+                    <button
+                      key={state}
+                      type="button"
+                      id={`allow_0rtt-${state}`}
+                      disabled={!canManage}
+                      onClick={() =>
+                        setLocalTLS((prev) => ({
+                          ...prev,
+                          allow_0rtt: allow0RTTStateToPayload(state),
+                        }))
+                      }
+                      className={cn(
+                        "rounded px-2.5 py-1 text-xs transition-colors",
+                        "disabled:cursor-not-allowed disabled:opacity-50",
+                        allow0RTTState === state
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:bg-muted"
+                      )}
+                    >
+                      {t(label)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
             <div className="flex justify-end">
               <Button
                 onClick={saveTLS}
@@ -579,7 +708,54 @@ export default function SettingsPage() {
         </Card>
         <RedisConfigCard canManage={canManage} canView={canView} />
       </fieldset>
+      <EnvOverridesSection canView={canView} canManage={canManage} />
     </div>
+  )
+}
+
+/**
+ * 环境变量覆盖分区。
+ *
+ * 权限沿用本页既有口径：写端点属管理员能力，非管理员只读展示；
+ * 读端点三角色均可访问。
+ */
+function EnvOverridesSection({
+  canView,
+  canManage,
+}: {
+  canView: boolean
+  canManage: boolean
+}) {
+  const { t } = useTranslation()
+  const { items, groups, isLoading, error, save, saving } = useEnvOverrides(
+    canView
+  )
+  const groupLabels = Object.fromEntries(
+    groups.map((group) => [group.key, group.label_key])
+  )
+
+  return (
+    <section className="space-y-6">
+      <div className="flex items-center gap-2">
+        <IconAdjustmentsHorizontal className="h-5 w-5 text-primary" />
+        <h2 className="text-lg font-semibold">
+          {t("envOverrides.sectionTitle")}
+        </h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        {t("envOverrides.sectionDescription")}
+      </p>
+      <EnvOverrideSection
+        groups={SETTINGS_ENV_OVERRIDE_GROUPS}
+        items={items}
+        groupLabels={groupLabels}
+        isLoading={isLoading}
+        error={error}
+        canManage={canManage}
+        saving={saving}
+        onSave={save}
+      />
+    </section>
   )
 }
 

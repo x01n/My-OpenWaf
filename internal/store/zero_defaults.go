@@ -83,9 +83,14 @@ func ApplyModelDefaults(item any) error {
  * 已重复 5 次并漏掉 5 处，且每一份都只处理 `Enabled`，覆盖不了 `Priority`
  * 这类数值字段。
  *
+ * 插入与回写在同一个事务内提交：两条语句分开发出时，Create 成功而回写失败会留下
+ * 「行已落库、零值未回写」的半成品，而调用方收到错误、以为整条写入没有发生。
+ * 结构体的内存回写不算数据库事务，但仍排在事务提交之后——回滚后调用方手里的对象
+ * 必须与库里（无此行）一致。
+ *
  * @param db   数据库句柄。
  * @param item 指向模型结构体的指针；非指针时退化为普通插入（无法回写）。
- * @return 插入或回写失败时返回错误。
+ * @return 插入或回写失败时返回错误；返回错误时本次写入已全部回滚。
  */
 func CreateWithZeroDefaults(db *gorm.DB, item any) error {
 	rv := reflect.ValueOf(item)
@@ -115,26 +120,33 @@ func CreateWithZeroDefaults(db *gorm.DB, item any) error {
 		}
 	}
 
-	if err := db.Create(item).Error; err != nil {
-		return err
-	}
-	if len(zeroed) == 0 {
-		return nil
-	}
-
 	pkField := sch.PrioritizedPrimaryField
-	pk, pkIsZero := pkField.ValueOf(ctx, elem)
-	if pkIsZero {
-		// 拿不到主键就无法定位这一行，跳过好过发出无条件 UPDATE。
-		return nil
-	}
-	if err := db.Model(item).Where(pkField.DBName+" = ?", pk).
-		UpdateColumns(zeroed).Error; err != nil {
+
+	// Create 与回写必须在同一个事务里：两条语句拆开执行时，Create 已提交而
+	// UpdateColumns 失败会把「行已落库、零值未回写」的半成品留给调用方，而调用方
+	// 收到的是错误、以为整条写入失败了。项目的 gorm 配置开了
+	// SkipDefaultTransaction，单个 Create 本身没有事务保护，这里必须显式包裹。
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(item).Error; err != nil {
+			return err
+		}
+		if len(zeroed) == 0 {
+			return nil
+		}
+
+		pk, pkIsZero := pkField.ValueOf(ctx, elem)
+		if pkIsZero {
+			// 拿不到主键就无法定位这一行，跳过好过发出无条件 UPDATE。
+			return nil
+		}
+		return tx.Model(item).Where(pkField.DBName+" = ?", pk).
+			UpdateColumns(zeroed).Error
+	}); err != nil {
 		return err
 	}
 
-	// 把结构体也改回零值：GORM 已经把它改成默认值了，不还原的话调用方
-	// 手里的对象与库里的行不一致，后续基于它做判断就会出错。
+	// 内存回写排在事务提交之后：事务回滚时库里的行不存在，若提前把调用方手里的
+	// 对象改回零值，两边会以「都失败」的表象产生错误的不一致。
 	for _, f := range candidates {
 		if _, ok := zeroed[f.DBName]; ok {
 			if err := f.Set(ctx, elem, reflect.Zero(f.FieldType).Interface()); err != nil {

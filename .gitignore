@@ -60,3 +60,5 @@ main
 internal/waf/owasp/*trace*_test.go
 internal/core/rules/zz_*_test.go
 asttool
+log.txt
+1.txt

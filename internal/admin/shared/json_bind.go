@@ -132,6 +132,16 @@ func bindSiteFromRaw(raw map[string]json.RawMessage, dst *store.Site) error {
 	if s, ok := preserved["dynamic_js_paths"]; ok {
 		dst.DynamicJSPaths = s
 	}
+	if v, ok := raw["dynamic_js_enabled"]; ok && strings.TrimSpace(string(v)) == "null" {
+		dst.DynamicJSMode = ""
+		dst.DynamicJSPaths = ""
+	}
+	if v, ok := raw["dynamic_js_mode"]; ok && strings.TrimSpace(string(v)) == "null" {
+		dst.DynamicJSMode = ""
+	}
+	if v, ok := raw["dynamic_js_paths"]; ok && strings.TrimSpace(string(v)) == "null" {
+		dst.DynamicJSPaths = ""
+	}
 	if s, ok := preserved["cc_rules"]; ok {
 		dst.CCRules = s
 	}

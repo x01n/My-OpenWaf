@@ -1,6 +1,7 @@
 package system
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -23,12 +24,13 @@ import (
 
 // NetworkConfig 网络协议配置。
 type NetworkConfig struct {
-	IPv6Enabled    bool   `json:"ipv6_enabled"`
-	HTTP2Enabled   bool   `json:"http2_enabled"`
-	HTTP3Enabled   bool   `json:"http3_enabled"`
-	HTTP3Bind      string `json:"http3_bind"`
-	DefaultALPN    string `json:"default_alpn"`
-	DefaultNetwork string `json:"default_network"` // tcp, tcp4, tcp6
+	IPv6Enabled         bool   `json:"ipv6_enabled"`
+	HTTP2Enabled        bool   `json:"http2_enabled"`
+	HTTP3Enabled        bool   `json:"http3_enabled"`
+	HTTP3Bind           string `json:"http3_bind"`
+	HTTP3PerPortEnabled bool   `json:"http3_per_port_enabled"`
+	DefaultALPN         string `json:"default_alpn"`
+	DefaultNetwork      string `json:"default_network"` // tcp, tcp4, tcp6
 }
 
 // LogConfig 日志配置。
@@ -48,6 +50,8 @@ type TLSDefaultConfig struct {
 	CurvePreferences         string `json:"curve_preferences"` // 逗号分隔
 	PreferServerCipherSuites bool   `json:"prefer_server_cipher_suites"`
 	SessionTicketsEnabled    bool   `json:"session_tickets_enabled"`
+	Allow0RTT                bool   `json:"allow_0rtt,omitempty"`
+	HasExplicitAllow0RTT     bool   `json:"has_explicit_allow_0rtt"`
 	SelfSignedOnIP           bool   `json:"self_signed_on_ip"` // IP 直接访问时使用自签证书
 }
 
@@ -91,12 +95,13 @@ func GetNetworkConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 func UpdateNetworkConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
-			IPv6Enabled    *bool   `json:"ipv6_enabled"`
-			HTTP2Enabled   *bool   `json:"http2_enabled"`
-			HTTP3Enabled   *bool   `json:"http3_enabled"`
-			HTTP3Bind      *string `json:"http3_bind"`
-			DefaultALPN    *string `json:"default_alpn"`
-			DefaultNetwork *string `json:"default_network"`
+			IPv6Enabled         *bool   `json:"ipv6_enabled"`
+			HTTP2Enabled        *bool   `json:"http2_enabled"`
+			HTTP3Enabled        *bool   `json:"http3_enabled"`
+			HTTP3Bind           *string `json:"http3_bind"`
+			HTTP3PerPortEnabled *bool   `json:"http3_per_port_enabled"`
+			DefaultALPN         *string `json:"default_alpn"`
+			DefaultNetwork      *string `json:"default_network"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "请求体格式无效"})
@@ -119,6 +124,9 @@ func UpdateNetworkConfig(repo *repository.SystemSettingsRepo, reload func() erro
 				return
 			}
 			cfg.HTTP3Bind = normalizedBind
+		}
+		if req.HTTP3PerPortEnabled != nil {
+			cfg.HTTP3PerPortEnabled = *req.HTTP3PerPortEnabled
 		}
 		if req.DefaultALPN != nil {
 			cfg.DefaultALPN = snapshotpkg.NormalizeALPNList(*req.DefaultALPN)
@@ -276,7 +284,12 @@ func UpdateLogConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 		if req.AlsoStdout != nil {
 			cfg.AlsoStdout = *req.AlsoStdout
 		}
-		logger.Configure(logger.Config{Level: cfg.Level, FilePath: cfg.FilePath, AlsoStdout: cfg.AlsoStdout})
+		logger.Configure(logger.Config{
+			Level:      cfg.Level,
+			FilePath:   cfg.FilePath,
+			AlsoStdout: cfg.AlsoStdout,
+			Color:      logger.ColorMode(),
+		})
 		cfg.Level = logger.GetLevel()
 		data, _ := json.Marshal(cfg)
 		if err := repo.Set(settingKeyLog, string(data)); err != nil {
@@ -299,14 +312,15 @@ func GetTLSDefaultConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
-			MinVersion               *string `json:"min_version"`
-			MaxVersion               *string `json:"max_version"`
-			CipherSuites             *string `json:"cipher_suites"`
-			DefaultALPN              *string `json:"default_alpn"`
-			CurvePreferences         *string `json:"curve_preferences"`
-			PreferServerCipherSuites *bool   `json:"prefer_server_cipher_suites"`
-			SessionTicketsEnabled    *bool   `json:"session_tickets_enabled"`
-			SelfSignedOnIP           *bool   `json:"self_signed_on_ip"`
+			MinVersion               *string         `json:"min_version"`
+			MaxVersion               *string         `json:"max_version"`
+			CipherSuites             *string         `json:"cipher_suites"`
+			DefaultALPN              *string         `json:"default_alpn"`
+			CurvePreferences         *string         `json:"curve_preferences"`
+			PreferServerCipherSuites *bool           `json:"prefer_server_cipher_suites"`
+			SessionTicketsEnabled    *bool           `json:"session_tickets_enabled"`
+			Allow0RTT                json.RawMessage `json:"allow_0rtt"`
+			SelfSignedOnIP           *bool           `json:"self_signed_on_ip"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(400, map[string]string{"error": "请求体格式无效"})
@@ -357,6 +371,15 @@ func UpdateTLSDefaultConfig(repo *repository.SystemSettingsRepo, reload func() e
 		}
 		if req.SessionTicketsEnabled != nil {
 			cfg.SessionTicketsEnabled = *req.SessionTicketsEnabled
+		}
+		allow0RTT, allow0RTTPresent, err := parseOptionalBool(req.Allow0RTT)
+		if err != nil {
+			c.JSON(400, map[string]string{"error": "allow_0rtt must be a boolean or null"})
+			return
+		}
+		if allow0RTTPresent {
+			cfg.HasExplicitAllow0RTT = allow0RTT != nil
+			cfg.Allow0RTT = allow0RTT != nil && *allow0RTT
 		}
 		if req.SelfSignedOnIP != nil {
 			cfg.SelfSignedOnIP = *req.SelfSignedOnIP
@@ -596,11 +619,12 @@ func validateHTTP2Config(cfg snapshotpkg.HTTP2Config) error {
 
 func loadNetworkConfig(repo *repository.SystemSettingsRepo) NetworkConfig {
 	cfg := NetworkConfig{
-		HTTP2Enabled:   true,
-		HTTP3Enabled:   true,
-		HTTP3Bind:      ":443",
-		DefaultALPN:    snapshotpkg.DefaultALPNForProtocolSwitches(true, true),
-		DefaultNetwork: "tcp",
+		HTTP2Enabled:        true,
+		HTTP3Enabled:        true,
+		HTTP3Bind:           ":443",
+		HTTP3PerPortEnabled: false,
+		DefaultALPN:         snapshotpkg.DefaultALPNForProtocolSwitches(true, true),
+		DefaultNetwork:      "tcp",
 	}
 	val, err := repo.Get(settingKeyNetwork)
 	if err != nil || val == "" {
@@ -648,6 +672,7 @@ func loadTLSDefaultConfig(repo *repository.SystemSettingsRepo) TLSDefaultConfig 
 	var explicit struct {
 		DefaultALPN           *string `json:"default_alpn"`
 		SessionTicketsEnabled *bool   `json:"session_tickets_enabled"`
+		Allow0RTT             *bool   `json:"allow_0rtt"`
 	}
 	_ = json.Unmarshal([]byte(val), &explicit)
 	_ = json.Unmarshal([]byte(val), &cfg)
@@ -668,6 +693,10 @@ func loadTLSDefaultConfig(repo *repository.SystemSettingsRepo) TLSDefaultConfig 
 	if explicit.SessionTicketsEnabled == nil {
 		cfg.SessionTicketsEnabled = true
 	}
+	cfg.HasExplicitAllow0RTT = explicit.Allow0RTT != nil
+	if explicit.Allow0RTT != nil {
+		cfg.Allow0RTT = *explicit.Allow0RTT
+	}
 	return cfg
 }
 
@@ -675,6 +704,11 @@ func marshalTLSDefaultConfigForStorage(cfg TLSDefaultConfig) ([]byte, error) {
 	var defaultALPN *string
 	if cfg.HasExplicitDefaultALPN && strings.TrimSpace(cfg.DefaultALPN) != "" {
 		defaultALPN = &cfg.DefaultALPN
+	}
+	var allow0RTT *bool
+	if cfg.HasExplicitAllow0RTT {
+		value := cfg.Allow0RTT
+		allow0RTT = &value
 	}
 	return json.Marshal(struct {
 		MinVersion               string  `json:"min_version"`
@@ -684,6 +718,7 @@ func marshalTLSDefaultConfigForStorage(cfg TLSDefaultConfig) ([]byte, error) {
 		CurvePreferences         string  `json:"curve_preferences"`
 		PreferServerCipherSuites bool    `json:"prefer_server_cipher_suites"`
 		SessionTicketsEnabled    bool    `json:"session_tickets_enabled"`
+		Allow0RTT                *bool   `json:"allow_0rtt,omitempty"`
 		SelfSignedOnIP           bool    `json:"self_signed_on_ip"`
 	}{
 		MinVersion:               cfg.MinVersion,
@@ -693,8 +728,30 @@ func marshalTLSDefaultConfigForStorage(cfg TLSDefaultConfig) ([]byte, error) {
 		CurvePreferences:         cfg.CurvePreferences,
 		PreferServerCipherSuites: cfg.PreferServerCipherSuites,
 		SessionTicketsEnabled:    cfg.SessionTicketsEnabled,
+		Allow0RTT:                allow0RTT,
 		SelfSignedOnIP:           cfg.SelfSignedOnIP,
 	})
+}
+
+/**
+ * parseOptionalBool 解析可为 null 的可选布尔字段，区分「未提供」与「显式 null」。
+ *
+ * @param raw 请求体中该字段的原始 JSON；字段缺省时为 nil 或空。
+ * @return value 字段显式给出的布尔值，null 时为 nil；present 字段是否出现；err 取值非布尔且非 null。
+ */
+func parseOptionalBool(raw json.RawMessage) (value *bool, present bool, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, false, nil
+	}
+	if bytes.Equal(trimmed, []byte("null")) {
+		return nil, true, nil
+	}
+	var parsed bool
+	if err := json.Unmarshal(trimmed, &parsed); err != nil {
+		return nil, true, err
+	}
+	return &parsed, true, nil
 }
 
 func loadLogConfig(repo *repository.SystemSettingsRepo) LogConfig {

@@ -26,12 +26,23 @@ type sqliteBulkFlusher struct {
 	// stmts 以表名为键的单行长期语句；multStmts 为多值组语句模板。
 	stmts     map[string]*sql.Stmt
 	multStmts map[string]*sql.Stmt
+	// savePoints 以保存点名称为键的 SAVEPOINT 长期语句。flushType 每批
+	// 对四类各执行一次 SAVEPOINT，走 database/sql 的动态 SQL 会每次重新
+	// prepare（sqlite 解析器成本可观），因此与 INSERT 一样复用语句。
+	savePoints map[string]*sql.Stmt
 
 	// specs 以表名为键的模型元信息与行取值函数。
 	specs map[string]bulkModelSpec
 
 	// sqlDB 是长期语句的 Prepare 载体（由 attachSQLDB 从 LogDB 取出）。
 	sqlDB *sql.DB
+	// conn 是专用于日志落库的固定连接。长期语句绑定连接，只有始终复用
+	// 同一条连接，驱动层缓存的编译语句（modernc stmt.pstmt）才能跨批命中；
+	// 若每次 flush 重新从池里借连接，事务切换会让语句反复重新解析。
+	conn *sql.Conn
+
+	// now 与 GORM 的 NowFunc 同源，供批量取值函数填充零值创建时间。
+	now func() time.Time
 }
 
 // bulkModelSpec 汇集一张日志表生成长期 INSERT 所需的全部信息。
@@ -61,10 +72,11 @@ func newSQLiteBulkFlusher(log *slog.Logger) *sqliteBulkFlusher {
 	}
 
 	bf := &sqliteBulkFlusher{
-		log:       log,
-		stmts:     map[string]*sql.Stmt{},
-		multStmts: map[string]*sql.Stmt{},
-		specs:     map[string]bulkModelSpec{},
+		log:        log,
+		stmts:      map[string]*sql.Stmt{},
+		multStmts:  map[string]*sql.Stmt{},
+		savePoints: map[string]*sql.Stmt{},
+		specs:      map[string]bulkModelSpec{},
 	}
 	// 共享 schema 缓存店面：四个模型只建一次结构。
 	var cache sync.Map
@@ -95,6 +107,17 @@ func newSQLiteBulkFlusher(log *slog.Logger) *sqliteBulkFlusher {
 		}
 		if len(cols) == 0 {
 			bf.disable("no creatable columns", spec.tableName, "column", nil)
+			return nil
+		}
+		// 构建期校验列清单与行取值函数等长。
+		//
+		// cols 由 GORM schema 动态生成，values 是手写清单；模型新增字段后若不
+		// 同步 values，运行期每次 execRowsInTx 都会得到 "N values for M columns"
+		// 而整批落库失败——表现为「访问日志静默全部丢失」，比直接回退 GORM 路径
+		// 严重得多。这里提前否决并回退，让缺失字段只损失加速能力，不损失数据。
+		if got, want := len(spec.values(spec.model, time.Time{})), len(cols); got != want {
+			bf.disable("values/columns mismatch", spec.tableName,
+				"values", fmt.Sprintf("%d values for %d columns", got, want))
 			return nil
 		}
 		// multiGroupSizeFor 按单类绑定列数求多值组大小：N = min(defaultMultiGroupSize,
@@ -146,16 +169,81 @@ func (bf *sqliteBulkFlusher) disable(msg, table, kvMsg string, detail any) {
 	}
 }
 
-// attachSQLDB 把 UnifiedWriter 的 LogDB 底层连接池绑定到 flusher。
-// SQLite 连接无轮换（internal/core/database/gorm.go 的 ConnMaxLifetime(0)），
-// 长期持有合法。
+/**
+ * attachSQLDB 把 UnifiedWriter 的 LogDB 底层连接池绑定到 flusher。
+ *
+ * 这里只保存连接池，真正的固定连接在首次 flush 时通过 [(*sqliteBulkFlusher).beginTx]
+ * 借出并长期持有。借出失败（连接池已关闭等）不在此处报错：flusher 保持
+ * 可用状态，调用方下次 flush 会再试，期间落回 GORM 路径。
+ *
+ * SQLite 连接无轮换（internal/core/database/gorm.go 的 ConnMaxLifetime(0)），
+ * 长期持有合法。
+ */
 func (bf *sqliteBulkFlusher) attachSQLDB(db *gorm.DB) error {
 	sqlDB, err := db.DB()
 	if err != nil {
 		return fmt.Errorf("sqlite bulk flusher: resolve conn pool: %w", err)
 	}
 	bf.sqlDB = sqlDB
+	bf.now = db.Config.NowFunc
 	return nil
+}
+
+/**
+ * ensureConn 取得（或复用）日志落库专用连接。
+ *
+ * @return 固定连接；连接池不可用或上下文取消时返回错误。
+ */
+func (bf *sqliteBulkFlusher) ensureConn(ctx context.Context) (*sql.Conn, error) {
+	if bf.conn != nil {
+		return bf.conn, nil
+	}
+	if bf.sqlDB == nil {
+		return nil, fmt.Errorf("sqlite bulk flusher: conn pool not attached")
+	}
+	conn, err := bf.sqlDB.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite bulk flusher: acquire conn: %w", err)
+	}
+	bf.conn = conn
+	return conn, nil
+}
+
+/**
+ * beginTx 在固定连接上开启一个原生事务。
+ *
+ * 不使用 GORM 的 Transaction：GORM 会从连接池另借连接，随后长期语句的
+ * Prepare 只能在第二条连接上执行；对 :memory: 这类「每连接独立库」的 DSN
+ * 会直接看不到表，对文件库则让语句缓存失去意义。
+ *
+ * @param ctx 事务上下文。
+ * @return 当前 flush 事务。
+ */
+func (bf *sqliteBulkFlusher) beginTx(ctx context.Context) (*sql.Tx, error) {
+	conn, err := bf.ensureConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite bulk flusher: begin tx: %w", err)
+	}
+	return tx, nil
+}
+
+/**
+ * prepareStmt 在固定连接上准备一条长期语句。
+ *
+ * 连接池级 sql.DB.Prepare 会把语句绑到任意空闲连接，既无法与 flush
+ * 事务共享，又会在连接切换时重复解析。统一走 bf.conn 后，语句句柄
+ * 与事务始终在同一条物理连接上。
+ */
+func (bf *sqliteBulkFlusher) prepareStmt(ctx context.Context, query string) (*sql.Stmt, error) {
+	conn, err := bf.ensureConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return conn.PrepareContext(ctx, query)
 }
 
 /**
@@ -239,7 +327,7 @@ func (bf *sqliteBulkFlusher) ensureStmtFor(table string) (*sql.Stmt, error) {
 	if bf.sqlDB == nil {
 		return nil, fmt.Errorf("sqlite bulk flusher: conn pool not attached for %q", table)
 	}
-	stmt, err := bf.sqlDB.Prepare(insertSQLText(spec.tableName, spec.cols))
+	stmt, err := bf.prepareStmt(context.Background(), insertSQLText(spec.tableName, spec.cols))
 	if err != nil {
 		return nil, fmt.Errorf("sqlite bulk flusher: prepare %q: %w", spec.tableName, err)
 	}
@@ -264,7 +352,7 @@ func (bf *sqliteBulkFlusher) ensureMultiStmtFor(table string) (*sql.Stmt, int, e
 	if bf.sqlDB == nil {
 		return nil, 0, fmt.Errorf("sqlite bulk flusher: conn pool not attached for %q", table)
 	}
-	stmt, err := bf.sqlDB.Prepare(insertMultiSQLText(spec.tableName, spec.cols, spec.groupSize))
+	stmt, err := bf.prepareStmt(context.Background(), insertMultiSQLText(spec.tableName, spec.cols, spec.groupSize))
 	if err != nil {
 		return nil, 0, fmt.Errorf("sqlite bulk flusher: prepare multi %q: %w", spec.tableName, err)
 	}
@@ -272,7 +360,7 @@ func (bf *sqliteBulkFlusher) ensureMultiStmtFor(table string) (*sql.Stmt, int, e
 	return stmt, spec.groupSize, nil
 }
 
-// closeAll 释放全部已准备语句（UnifiedWriter 排空完成后调用，幂等）。
+// closeAll 释放全部已准备语句与固定连接（UnifiedWriter 排空完成后调用，幂等）。
 func (bf *sqliteBulkFlusher) closeAll() {
 	for table, stmt := range bf.stmts {
 		_ = stmt.Close()
@@ -282,6 +370,69 @@ func (bf *sqliteBulkFlusher) closeAll() {
 		_ = stmt.Close()
 		delete(bf.multStmts, table)
 	}
+	for name, stmt := range bf.savePoints {
+		_ = stmt.Close()
+		delete(bf.savePoints, name)
+	}
+	if bf.conn != nil {
+		_ = bf.conn.Close()
+		bf.conn = nil
+	}
+}
+
+// reset 丢弃当前固定连接及其全部长期语句，供连接失效后重建。
+// 调用后下一次 flush 会重新借连接并重新 prepare。
+func (bf *sqliteBulkFlusher) reset() {
+	bf.closeAll()
+}
+
+// ensureSavePointStmtFor 惰性取得某个保存点的长期 SAVEPOINT 语句。
+//
+// 保存点名称只来自 flushType 的固定表名（security_events/access_logs/
+// drop_events/bot_scores），不含外部输入，因此直接拼入语句文本与 GORM
+// sqlite 方言的 SavePoint 实现一致（gorm.io/driver/sqlite: `SAVEPOINT `+name）。
+func (bf *sqliteBulkFlusher) ensureSavePointStmtFor(name string) (*sql.Stmt, error) {
+	if stmt := bf.savePoints[name]; stmt != nil {
+		return stmt, nil
+	}
+	if bf.sqlDB == nil {
+		return nil, fmt.Errorf("sqlite bulk flusher: conn pool not attached for savepoint %q", name)
+	}
+	stmt, err := bf.prepareStmt(context.Background(), "SAVEPOINT "+name)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite bulk flusher: prepare savepoint %q: %w", name, err)
+	}
+	bf.savePoints[name] = stmt
+	return stmt, nil
+}
+
+// execSavePointInTx 在当前事务内打保存点。
+//
+// 语句绑定在 flusher 的固定连接上，而事务也在同一条连接上开启，因此直接
+// 执行语句即可；改走 Tx.StmtContext 反而会因为 database/sql 认为「该语句
+// 已属于某个连接」而重新 prepare 一次，使语句缓存完全失效。
+//
+// @param name 保存点名称（固定表名）。
+// @return 错误；调用方按「打点失败则不回滚该类」的既有语义处理。
+func (bf *sqliteBulkFlusher) execSavePointInTx(name string) error {
+	stmt, err := bf.ensureSavePointStmtFor(name)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	_, err = stmt.ExecContext(ctx)
+	return err
+}
+
+// rollbackToInTx 回滚到指定保存点，保留事务本身与后续类的写入能力。
+func (bf *sqliteBulkFlusher) rollbackToInTx(tx *sql.Tx, name string) error {
+	if bf.conn == nil {
+		return fmt.Errorf("sqlite bulk flusher: conn not attached for rollback %q", name)
+	}
+	// 保存点名只来自固定表名，不含外部输入；动态语句每次重新 prepare 的
+	// 成本只会发生在类型写入失败后的异常路径，不值得再引入一条长期语句。
+	_, err := tx.ExecContext(context.Background(), "ROLLBACK TO "+name)
+	return err
 }
 
 // execRowsInTx 在当前 *gorm.DB 事务内写入一类审计行。
@@ -299,14 +450,13 @@ func (bf *sqliteBulkFlusher) closeAll() {
 // 语句准备失败的类只在此次 flush 逐行写完——仍是同一事务同一
 // flushType 保存点内，失败语义不变。
 //
-// 行执行载体：PreparedStmtTX 只是长期语句缓存的地盘，这里绕开语料缓存，
-// 直接取 tx.Statement.ConnPool.(stmtRunner).StmtContext(ctx, stmt) 把长期语句
-// 绑到当前事务连接——*sql.Tx 与 *PreparedStmtTX 都实现该接口
-// （gorm 1.31.2 prepare_stmt.go:147-150 / interfaces.go:59-63）。
+// 行执行载体：语句在固定连接上 prepare，事务也在同一条连接上开启。直接
+// 执行长期语句即可；Tx.StmtContext 会把「来自 *sql.Conn 的语句」判定为已
+// 归属连接并重新 prepare，反而让缓存失效（见 execSavePointInTx 注释）。
 //
 // 返回值：成功写入条数；错误时返回出错前已写入的条数。调用方依据错误把
 // 本类计入 failedRecords（flushBuffered 既有口径）。
-func (bf *sqliteBulkFlusher) execRowsInTx(tx *gorm.DB, table string, rows []any) (int, error) {
+func (bf *sqliteBulkFlusher) execRowsInTx(table string, rows []any) (int, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
@@ -318,20 +468,21 @@ func (bf *sqliteBulkFlusher) execRowsInTx(tx *gorm.DB, table string, rows []any)
 	if !ok {
 		return 0, fmt.Errorf("sqlite bulk flusher: unknown table %q", table)
 	}
-	runner, ok := tx.Statement.ConnPool.(stmtRunner)
-	if !ok {
-		return 0, fmt.Errorf("sqlite bulk flusher: conn pool of %q cannot run long-lived stmt", table)
-	}
 
 	ctx := context.Background()
-	now := bf.nowFunc(tx)
+	now := bf.nowFunc()
 
-	// 多值组语句可选：准备失败即退回单行路径（本次 flush 本类仍走
-	// 长期语句；GORM 兜底由 flushBuffered 的 bf==nil 分支承担）。
+	// 多值组语句可选：仅当本批行数足够整组时才准备——不足一组的类
+	// 会整批落回单行语句，提前 prepare 一条用不上的多值语句纯属浪费。
+	// sqlite 的 prepared statement 绑定连接，事务切换后 database/sql
+	// 需要在事务连接上重新 prepare，因此每条多值语句的文本解析成本
+	// 会按 flush 次数重复支付。
 	multiStmt := (*sql.Stmt)(nil)
 	groupSize := 0
-	if mStmt, mN, mErr := bf.ensureMultiStmtFor(table); mErr == nil {
-		multiStmt, groupSize = mStmt, mN
+	if len(rows) >= spec.groupSize && spec.groupSize > 1 {
+		if mStmt, mN, mErr := bf.ensureMultiStmtFor(table); mErr == nil {
+			multiStmt, groupSize = mStmt, mN
+		}
 	}
 
 	written := 0
@@ -344,7 +495,7 @@ func (bf *sqliteBulkFlusher) execRowsInTx(tx *gorm.DB, table string, rows []any)
 			for _, row := range group {
 				args = append(args, spec.values(row, now)...)
 			}
-			if _, execErr := runner.StmtContext(ctx, multiStmt).ExecContext(ctx, args...); execErr != nil {
+			if _, execErr := multiStmt.ExecContext(ctx, args...); execErr != nil {
 				return written, execErr
 			}
 			written += len(group)
@@ -355,7 +506,7 @@ func (bf *sqliteBulkFlusher) execRowsInTx(tx *gorm.DB, table string, rows []any)
 	// （v1.23.0 sqlite.go:132-144、1090）；这里不读取 Result，失败语义
 	// 由外层 SAVEPOINT 隔离负责。
 	for ; i < len(rows); i++ {
-		if _, execErr := runner.StmtContext(ctx, stmt).ExecContext(ctx, spec.values(rows[i], now)...); execErr != nil {
+		if _, execErr := stmt.ExecContext(ctx, spec.values(rows[i], now)...); execErr != nil {
 			return written, execErr
 		}
 		written++
@@ -366,17 +517,11 @@ func (bf *sqliteBulkFlusher) execRowsInTx(tx *gorm.DB, table string, rows []any)
 // nowFunc 取与 GORM 同源的当前时间：db.NowFunc()（gorm.go:186-187 默认
 // time.Now().Local()）。生产未覆盖 NowFunc，此处等价于 time.Now()；构建期
 // 校验过零值模型后无固定时间透出。
-func (bf *sqliteBulkFlusher) nowFunc(tx *gorm.DB) time.Time {
-	if tx.Config.NowFunc != nil {
-		return tx.Config.NowFunc()
+func (bf *sqliteBulkFlusher) nowFunc() time.Time {
+	if bf.now != nil {
+		return bf.now()
 	}
 	return time.Now()
-}
-
-// stmtRunner 是长期语句执行所需的最小接口：*sql.Tx 与 gorm 的
-// *PreparedStmtTX 均实现。
-type stmtRunner interface {
-	StmtContext(ctx context.Context, stmt *sql.Stmt) *sql.Stmt
 }
 
 // rowsToAny 把四类缓冲切片桥接成 []any（持原切片元素地址，零拷贝）。
@@ -415,7 +560,7 @@ func accessLogSpecValues(v any, created time.Time) []any {
 		a.TLSCipherSuites, a.TLSExtensions, a.TLSCurves, a.TLSPointFormats, a.HeaderOrder,
 		a.VisitorFusionClass, a.VisitorFusionScore, a.VisitorFusionClientFamily,
 		a.VisitorFusionUAClaim, a.VisitorFusionConsistency, a.VisitorFusionEvidenceSufficient,
-		a.VisitorFusionReasons, a.UpstreamLatencyMs, a.ResponseSize,
+		a.VisitorFusionReasons, a.ZeroRTT, a.UpstreamLatencyMs, a.ResponseSize,
 	}
 }
 

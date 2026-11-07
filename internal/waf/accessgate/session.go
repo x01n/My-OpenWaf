@@ -66,6 +66,13 @@ func (s *MemorySessionStore) Revoke(token string) error {
 	return nil
 }
 
+func (s *MemorySessionStore) RevokeAll() error {
+	s.mu.Lock()
+	s.sessions = make(map[string]*SessionInfo)
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *MemorySessionStore) CleanExpired() error {
 	now := time.Now()
 	s.mu.Lock()

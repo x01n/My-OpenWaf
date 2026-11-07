@@ -3,561 +3,452 @@
 # IP 信誉系统
 
 <cite>
-**本文引用的文件**
-- [iprep.go](file://internal/waf/iprep/iprep.go)
-- [iprep_test.go](file://internal/waf/iprep/iprep_test.go)
-- [ip_list.go](file://internal/store/ip_list.go)
-- [ip_list.go](file://internal/store/repository/ip_list.go)
-- [iplist.go](file://internal/admin/system/iplist.go)
-- [clientip.go](file://internal/security/clientip.go)
-- [engine.go](file://internal/core/engine/engine.go)
-- [phases.go](file://internal/core/rules/phases.go)
-- [IP 信誉系统.md](file://docs/安全防护功能/IP 信誉系统.md)
-- [IP 信誉检查阶段.md](file://docs/WAF 引擎系统/处理阶段详解/IP 信誉检查阶段.md)
-- [客户端 IP 获取.md](file://docs/安全机制/客户端 IP 获取.md)
+**本文档引用的文件**
+- [internal/waf/iprep/iprep.go](file://internal/waf/iprep/iprep.go)
+- [internal/waf/iprep/iprep_test.go](file://internal/waf/iprep/iprep_test.go)
+- [internal/waf/bot/bot.go](file://internal/waf/bot/bot.go)
+- [internal/core/rules/phases.go](file://internal/core/rules/phases.go)
+- [internal/core/engine/engine.go](file://internal/core/engine/engine.go)
+- [internal/core/action/action.go](file://internal/core/action/action.go)
+- [internal/core/pipeline/pipeline.go](file://internal/core/pipeline/pipeline.go)
+- [internal/security/clientip.go](file://internal/security/clientip.go)
+- [internal/store/iplist/ip_list.go](file://internal/store/iplist/ip_list.go)
+- [internal/store/repository/iplist/ip_list.go](file://internal/store/repository/iplist/ip_list.go)
+- [internal/store/protection.go](file://internal/store/protection.go)
+- [internal/store/site.go](file://internal/store/site.go)
+- [internal/snapshot/build.go](file://internal/snapshot/build.go)
+- [internal/admin/system/iplist/iplist.go](file://internal/admin/system/iplist/iplist.go)
+- [internal/admin/system/presetbots/preset_bots.go](file://internal/admin/system/presetbots/preset_bots.go)
+- [internal/admin/system/sitescope/site_scope.go](file://internal/admin/system/sitescope/site_scope.go)
+- [internal/admin/router.go](file://internal/admin/router.go)
+- [internal/app/server.go](file://internal/app/server.go)
+- [internal/dataplane/handler.go](file://internal/dataplane/handler.go)
+- [internal/visitorfusion/classifier.go](file://internal/visitorfusion/classifier.go)
+- [frontend/lib/api.ts](file://frontend/lib/api.ts)
+- [frontend/lib/types.ts](file://frontend/lib/types.ts)
+- [internal/dataplane/handler.go](file://internal/dataplane/handler.go)
+- [internal/dataplane/challenge.go](file://internal/dataplane/challenge.go)
+- [frontend/app/(dashboard)/ip-lists/page.tsx](file://frontend/app/(dashboard)/ip-lists/page.tsx)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
-4. [架构概览](#架构概览)
+4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
 7. [性能考虑](#性能考虑)
-8. [故障排除指南](#故障排除指南)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-IP 信誉系统是 OpenWAF 的核心安全组件之一，负责管理 IP 黑名单和白名单，以及实现智能的自动封禁机制。该系统通过多层决策流程确保网络安全，同时提供灵活的配置选项和高效的内存管理策略。
+IP 信誉系统负责三件事：维护黑白名单、按违规计数做自动封禁、把判定结果交给处理阶段。它是阶段链的第一环（`ip_reputation`），因此也是最便宜的止损点。
 
-系统的主要功能包括：
-- IP 地址和 CIDR 网段的精确匹配
-- 白名单优先级处理（允许通行）
-- 黑名单阻断处理（拒绝访问）
-- 基于违规次数的自动封禁机制
-- 智能内存清理和过期条目管理
-- 支持 IPv4 和 IPv6 双栈协议
+系统的关键设计是**双层名单 + 内存封禁**：
+- 全局名单驻留在 `IPReputation` 单例，命中即短路整条阶段链
+- 站点名单驻留在快照的 `SiteRuntime`，白名单命中**不短路**，只豁免本层判定
+- 自动封禁状态只在内存（`sync.Map`），进程重启即清空，持久化名单必须走 `ip_list_entries`
+
+本轮订正两处常被写错的事实：带过期语义的字段只存在于 `iprep` 包之内——条目侧是 `iprep.IPListEntry.ExpireAt`，封禁侧是 `iprep.BanEntry.BannedTil`——而**存储模型 `store/iplist.IPListEntry` 没有任何过期列**；白名单条目的动作在创建与更新时被强制回写为 `intercept`，不参与 Drop 决策。
+
+**章节来源**
+- [internal/waf/iprep/iprep.go:10-51](file://internal/waf/iprep/iprep.go#L10-L51)
+- [internal/core/rules/phases.go:368-433](file://internal/core/rules/phases.go#L368-L433)
+- [internal/store/iplist/ip_list.go:17-30](file://internal/store/iplist/ip_list.go#L17-L30)
 
 ## 项目结构
-IP 信誉系统在项目中的组织结构如下：
+四层各司其职：算法包、阶段适配、存储模型、管理接口。
+
+| 层 | 文件 | 行数 | 职责 | 关键符号 |
+|---|---|:--:|---|---|
+| 算法 | [iprep.go](file://internal/waf/iprep/iprep.go) | 281 | 名单匹配、封禁、清理 | `IPReputation`、`IPListEntry`、`IPDecision` |
+| 阶段 | [phases.go](file://internal/core/rules/phases.go) | 342-433 | 站点名单 + 全局信誉融合 | `ipReputationPhase` |
+| 存储模型 | [ip_list.go](file://internal/store/iplist/ip_list.go) | 30 | 持久化条目与作用域 | `iplist.IPListEntry`、`IPListKind` |
+| 仓储 | [repository/iplist](file://internal/store/repository/iplist/ip_list.go) | 62 | 分页/作用域查询 | `IPListRepo` |
+| 管理 | [system/iplist](file://internal/admin/system/iplist/iplist.go) | 212 | CRUD 与动作归一化 | `CreateIPEntry`、`NormalizeIPListAction` |
+| 装配 | [server.go](file://internal/app/server.go) | 392-393、640-641、1331-1352 | 名单加载与热更新 | `loadIPLists` |
+| 预置 | [preset_bots](file://internal/admin/system/presetbots/preset_bots.go) | 118 | 一条命令注入爬虫白名单 | `SeedBotWhitelist` |
 
 ```mermaid
 graph TB
-subgraph "WAF 层"
-A[IPReputation 核心类]
-B[IPListEntry 数据结构]
-C[ParseIPListEntry 解析函数]
+subgraph "持久化"
+TBL[("ip_list_entries<br/>kind/value/note/enabled/action/site_id/feed_id")]
+SET["system_settings.protection<br/>auto_ban_*"]
 end
-subgraph "存储层"
-D[IPListEntry 模型]
-E[IPListRepo 仓库]
+subgraph "装配"
+LOAD["loadIPLists（仅全局）"]
+SNAPB["loadSiteIPLists（仅站点）"]
+CFG["ConfigureAutoBan"]
 end
-subgraph "管理接口"
-F[IP 列表处理器]
-G[前端界面]
+subgraph "运行时"
+REP["IPReputation<br/>blacklist/whitelist/violations"]
+RT["SiteRuntime<br/>SiteIPWhitelist/Blacklist"]
 end
-subgraph "安全层"
-H[客户端 IP 解析]
+subgraph "判定"
+PH["ipReputationPhase"]
+BOT["botPhase（复用名单）"]
 end
-subgraph "引擎集成"
-I[规则阶段]
-J[引擎协调器]
-end
-A --> B
-A --> C
-D --> E
-F --> E
-H --> A
-I --> A
-J --> I
+TBL --> LOAD --> REP
+TBL --> SNAPB --> RT
+SET --> CFG --> REP
+RT --> PH
+REP --> PH
+REP --> BOT
+PH --> ACT["action.Result"]
 ```
 
 **图表来源**
-- [iprep.go:1-242](file://internal/waf/iprep/iprep.go#L1-L242)
-- [ip_list.go:1-29](file://internal/store/ip_list.go#L1-L29)
-- [ip_list.go:1-42](file://internal/store/repository/ip_list.go#L1-L42)
-- [iplist.go:1-146](file://internal/admin/system/iplist.go#L1-L146)
+- [internal/app/server.go:1331-1352](file://internal/app/server.go#L1331-L1352)
+- [internal/snapshot/build.go:1596-1644](file://internal/snapshot/build.go#L1596-L1644)
+- [internal/core/rules/phases.go:342-433](file://internal/core/rules/phases.go#L342-L433)
+- [internal/store/iplist/ip_list.go:17-30](file://internal/store/iplist/ip_list.go#L17-L30)
 
 **章节来源**
-- [iprep.go:1-242](file://internal/waf/iprep/iprep.go#L1-L242)
-- [ip_list.go:1-29](file://internal/store/ip_list.go#L1-L29)
-- [ip_list.go:1-42](file://internal/store/repository/ip_list.go#L1-L42)
-- [iplist.go:1-146](file://internal/admin/system/iplist.go#L1-L146)
+- [internal/store/repository/iplist/ip_list.go:14-62](file://internal/store/repository/iplist/ip_list.go#L14-L62)
+- [internal/admin/system/iplist/iplist.go:20-212](file://internal/admin/system/iplist/iplist.go#L20-L212)
 
 ## 核心组件
+- `IPListEntry`（运行时）：`CIDR *net.IPNet`、`Single net.IP`、`Note`、`ExpireAt int64`、`Action string` 五个字段，二者互斥（iprep.go:11-17）
+- `IPReputation`：读写锁护两张名单表、`sync.Map` 存违规计数、五个 `atomic` 配置项、清理协程与 `closeOnce`（iprep.go:20-33）
+- `violationCounter`：内部 `sync.Mutex` + `count` / `firstSeen` / `bannedTil`（iprep.go:35-40）
+- `IPDecision`：`Allowed`、`Matched`、`Reason`、`Category`、`Action`（iprep.go:97-103）
+- `BanEntry`：`IP`、`Count`、`BannedTil`，是 `ActiveBans()` 的对外视图（iprep.go:169-173）
 
-### IPListEntry 结构体设计
-IPListEntry 是系统的核心数据结构，用于表示单个 IP 或 CIDR 条目：
+| 方法 | 位置 | 语义 | 并发原语 |
+|---|---|---|---|
+| `SetLists(black, white)` | [iprep.go:65](file://internal/waf/iprep/iprep.go#L65) | 整体替换两张名单 | 写锁 |
+| `ConfigureAutoBan` | [iprep.go:72](file://internal/waf/iprep/iprep.go#L72) | 非正数参数被忽略，不会把阈值清零 | 原子存储 |
+| `ConfigureAutoBanAction` | [iprep.go:85](file://internal/waf/iprep/iprep.go#L85) | `drop`/`block`→`drop`，其余一律回落 `intercept` | 原子存储 |
+| `Check(ip)` | [iprep.go:105](file://internal/waf/iprep/iprep.go#L105) | 白 → 黑 → 自动封禁 → 允许 | 读锁 + 原子 |
+| `RecordViolation(ip)` | [iprep.go:144](file://internal/waf/iprep/iprep.go#L144) | 白名单 IP 直接不计数 | `LoadOrStore` + 互斥 |
+| `IPHistoryString(ip)` | [iprep.go:180](file://internal/waf/iprep/iprep.go#L180) | 纯只读，不改任何状态 | 只读 |
+| `ActiveBans()` | [iprep.go:194](file://internal/waf/iprep/iprep.go#L194) | 返回仍在封禁期内的记录 | `Range` |
+| `Close()` | [iprep.go:53](file://internal/waf/iprep/iprep.go#L53) | 幂等停清理协程 | `closeOnce` + WaitGroup |
+
+**章节来源**
+- [internal/waf/iprep/iprep.go:10-247](file://internal/waf/iprep/iprep.go#L10-L247)
+
+## 架构总览
+阶段执行顺序固定为「站点白 → 站点黑 → 全局判定」，短路语义逐条不同，这是本模块最容易踩坑的地方。
+
+| 序 | 判定 | 结果 | stop | RuleID | 证据 |
+|:--:|---|---|:--:|---|---|
+| 1 | 无客户端 IP | `Pass()` | false | — | phases.go:369-371 |
+| 2 | 站点白名单命中 | `Allow` | **false** | `ip:site_whitelist` | phases.go:374-385 |
+| 3 | 站点黑名单命中 | `Intercept` / `Drop` | true | `ip:site_blacklist` | phases.go:386-402 |
+| 4 | 全局白名单命中 | `Allow` | **true** | — | phases.go:411-419 |
+| 5 | 全局黑名单命中 | `Intercept` / `Drop` | true | `iprep:blacklist` | phases.go:421-432 |
+| 6 | 自动封禁命中 | 按 `auto_ban_action` | true | `iprep:auto_ban` | phases.go:124-135、421-432 |
+| 7 | 均未命中 | `Pass()` | false | — | phases.go:408-409 |
+
+`Action` 到动作的映射只认两个字面值：`drop` 与遗留别名 `block` 升级为 Drop，其余一律 Intercept（phases.go:390-393、421-424）。
 
 ```mermaid
-classDiagram
-class IPListEntry {
-+IPNet CIDR
-+IP Single
-+string Note
-+int64 ExpireAt
-+string Action
-}
-class IPReputation {
-+[]IPListEntry blacklist
-+[]IPListEntry whitelist
-+sync.Map violations
-+atomic.Bool autoBanEnabled
-+atomic.Int64 autoBanThreshold
-+atomic.Int64 autoBanWindow
-+atomic.Int64 autoBanDuration
-+atomic.Value autoBanAction
-+chan stopCh
-+sync.WaitGroup wg
-}
-class violationCounter {
-+Mutex mu
-+int64 count
-+int64 firstSeen
-+int64 bannedTil
-}
-IPReputation --> IPListEntry : "管理"
-IPReputation --> violationCounter : "记录违规"
+sequenceDiagram
+participant H as "数据面"
+participant PH as "ipReputationPhase"
+participant SR as "SiteRuntime 站点名单"
+participant REP as "IPReputation"
+participant ACT as "action.Result"
+H->>PH : "Execute(ctx)"
+PH->>SR : "站点白名单"
+SR-->>PH : "命中 → Allow(stop=false)"
+PH->>SR : "站点黑名单"
+SR-->>PH : "命中 → Intercept/Drop(stop=true)"
+PH->>REP : "Check(clientIP)"
+REP-->>ACT : "全局白 → Allow(stop=true)"
+REP-->>ACT : "全局黑/封禁 → 动作(stop=true)"
+ACT-->>H : "终端即短路"
 ```
 
 **图表来源**
-- [iprep.go:10-42](file://internal/waf/iprep/iprep.go#L10-L42)
-
-系统支持以下关键特性：
-- **CIDR 支持**：通过 `CIDR` 字段支持网段匹配
-- **单 IP 支持**：通过 `Single` 字段支持精确 IP 匹配  
-- **注释功能**：`Note` 字段提供描述信息
-- **过期机制**：`ExpireAt` 字段支持临时条目管理
-- **动作类型**：`Action` 字段支持拦截(intercept)或丢弃(drop)两种动作
+- [internal/core/rules/phases.go:368-433](file://internal/core/rules/phases.go#L368-L433)
+- [internal/waf/iprep/iprep.go:105-137](file://internal/waf/iprep/iprep.go#L105-L137)
 
 **章节来源**
-- [iprep.go:10-17](file://internal/waf/iprep/iprep.go#L10-L17)
-- [ip_list.go:16-28](file://internal/store/ip_list.go#L16-L28)
-- [iprep_test.go:8-20](file://internal/waf/iprep/iprep_test.go#L8-L20)
-
-### IP 决策流程
-系统采用三层决策流程，具有明确的优先级：
-
-```mermaid
-flowchart TD
-A[开始检查 IP] --> B{IP 是否为 nil?}
-B --> |是| C[返回允许]
-B --> |否| D[读取白名单]
-D --> E{找到匹配?}
-E --> |是| F[返回允许 + 白名单标记]
-E --> |否| G[读取黑名单]
-G --> H{找到匹配?}
-H --> |是| I[返回拒绝 + 黑名单标记]
-H --> |否| J[检查自动封禁]
-J --> K{自动封禁启用?}
-K --> |否| L[返回允许]
-K --> |是| M{IP 在违规表中?}
-M --> |否| N[返回允许]
-M --> |是| O{仍在封禁期内?}
-O --> |是| P[返回拒绝 + 自动封禁标记]
-O --> |否| Q[返回允许]
-```
-
-**图表来源**
-- [iprep.go:94-125](file://internal/waf/iprep/iprep.go#L94-L125)
-
-决策优先级：
-1. **白名单优先**：匹配到白名单直接放行
-2. **黑名单阻断**：匹配到黑名单直接拒绝
-3. **自动封禁检查**：未匹配到黑白名单时检查违规状态
-
-**章节来源**
-- [iprep.go:94-125](file://internal/waf/iprep/iprep.go#L94-L125)
-- [phases.go:200-240](file://internal/core/rules/phases.go#L200-L240)
-
-## 架构概览
-IP 信誉系统在整个 WAF 架构中的位置：
-
-```mermaid
-graph TB
-subgraph "请求处理管道"
-A[HTTP 请求]
-B[客户端 IP 解析]
-C[站点解析]
-D[维护模式检查]
-end
-subgraph "WAF 规则阶段"
-E[IP 信誉阶段]
-F[ACL 阶段]
-G[机器人检测阶段]
-H[速率限制阶段]
-I[OWASP 检测阶段]
-J[签名检测阶段]
-K[自定义规则阶段]
-end
-subgraph "IP 信誉系统"
-L[IPReputation 核心]
-M[黑白名单管理]
-N[自动封禁引擎]
-O[内存清理器]
-end
-A --> B --> C --> D
-D --> E
-E --> F
-F --> G
-G --> H
-H --> I
-I --> J
-J --> K
-E --> L
-L --> M
-L --> N
-L --> O
-```
-
-**图表来源**
-- [engine.go:37-74](file://internal/core/engine/engine.go#L37-L74)
-- [phases.go:200-240](file://internal/core/rules/phases.go#L200-L240)
-
-**章节来源**
-- [engine.go:37-74](file://internal/core/engine/engine.go#L37-L74)
-- [phases.go:200-240](file://internal/core/rules/phases.go#L200-L240)
+- [internal/core/rules/phases.go:342-433](file://internal/core/rules/phases.go#L342-L433)
+- [internal/core/engine/engine.go:479-481](file://internal/core/engine/engine.go#L479-L481)
 
 ## 详细组件分析
 
-### 自动封禁机制
-自动封禁机制是系统的核心安全特性，采用滑动窗口计数算法：
+### 名单条目解析与匹配
+`ParseIPListEntry(s, note, action...)` 先试 CIDR 再试单 IP，两者都失败即拒绝入库（iprep.go:226-247）。动作参数是可变参：缺省即 `intercept`，`drop`/`block` 归一为 `drop`，其它未知值保持 `intercept`。
 
-```mermaid
-sequenceDiagram
-participant Client as 客户端
-participant Rep as IPReputation
-participant Violations as 违规表
-participant Cleaner as 清理器
-Client->>Rep : 访问请求
-Rep->>Violations : 查找 IP 记录
-Violations-->>Rep : 返回违规计数
-alt 超出时间窗口
-Rep->>Violations : 重置计数器
-Violations-->>Rep : 更新计数
-end
-Rep->>Violations : 增加计数
-Violations-->>Rep : 更新计数
-alt 达到阈值且未被封禁
-Rep->>Violations : 设置封禁截止时间
-Violations-->>Rep : 应用封禁
-Rep-->>Client : 返回封禁响应
-else 未达到阈值
-Rep-->>Client : 允许访问
-end
-Note over Cleaner : 定时清理过期记录
-Cleaner->>Violations : 检查过期条目
-Violations-->>Cleaner : 删除过期记录
-```
+| 输入形态 | 结果 | 说明 |
+|---|---|---|
+| `192.168.1.0/24` | `CIDR` 条目 | 网段整体匹配 |
+| `192.168.1.1` | `Single` 条目 | 逐地址相等匹配 |
+| `::1` / `2001:db8::/32` | IPv6 同样支持 | 走同一套 `net` 解析 |
+| 空串 / 非法值 | `ok=false` | 快照构建期记诊断并跳过该条 |
 
-**图表来源**
-- [iprep.go:127-150](file://internal/waf/iprep/iprep.go#L127-L150)
-- [iprep.go:209-231](file://internal/waf/iprep/iprep.go#L209-L231)
+匹配函数 `entryMatchesAt` 把过期检查放在最前：`ExpireAt > 0 且 now > ExpireAt` 直接判不匹配，`ExpireAt == 0` 表示永不过期（iprep.go:213-224）。站点侧用的是同一套语义的副本 `siteIPEntryMatches`（phases.go:358-366）。
 
-#### 关键参数配置
-| 参数 | 默认值 | 单位 | 说明 |
-|------|--------|------|------|
-| autoBanThreshold | 10 | 次数 | 触发封禁的违规次数阈值 |
-| autoBanWindow | 60 | 秒 | 计数时间窗口长度 |
-| autoBanDuration | 3600 | 秒 | 封禁持续时间 |
+诊断口径：非法条目会以 `SnapshotConfigDiagnostic` 记录 `invalid_ip_or_cidr` 或 `empty_value`，并按 `site_id` 是否为空标记作用域，随后跳过该条而不中断整次快照构建（build.go:1607-1630）。
 
-#### 违规计数器结构
-```mermaid
-classDiagram
-class violationCounter {
-+Mutex mu
-+int64 count
-+int64 firstSeen
-+int64 bannedTil
+**章节来源**
+- [internal/waf/iprep/iprep.go:209-247](file://internal/waf/iprep/iprep.go#L209-L247)
+- [internal/core/rules/phases.go:358-366](file://internal/core/rules/phases.go#L358-L366)
+- [internal/snapshot/build.go:1607-1644](file://internal/snapshot/build.go#L1607-L1644)
+- [internal/waf/iprep/iprep_test.go:8-20](file://internal/waf/iprep/iprep_test.go#L8-L20)
+
+### 自动封禁引擎
+封禁是「窗口内计数达阈值 → 定时封禁」的两段式，实现刻意不用滑动窗口（iprep.go:144-167）：
+
+```go
+// internal/waf/iprep/iprep.go:157-165
+if now-vc.firstSeen > window {
+	vc.count = 0
+	vc.firstSeen = now
 }
-class IPReputation {
-+sync.Map violations
-+atomic.Int64 autoBanThreshold
-+atomic.Int64 autoBanWindow
-+atomic.Int64 autoBanDuration
-+atomic.Value autoBanAction
+vc.count++
+if vc.count >= threshold && vc.bannedTil < now {
+	vc.bannedTil = now + duration
+	return true
 }
-IPReputation --> violationCounter : "管理多个实例"
 ```
 
-**图表来源**
-- [iprep.go:34-39](file://internal/waf/iprep/iprep.go#L34-L39)
+| 参数 | 默认值 | 单位 | 证据 |
+|---|:--:|---|---|
+| `autoBanThreshold` | 10 | 次 | iprep.go:44、protection.go:174 |
+| `autoBanWindow` | 60 | 秒 | iprep.go:45、protection.go:175 |
+| `autoBanDuration` | 3600 | 秒 | iprep.go:46、protection.go:176 |
+| `autoBanAction` | `intercept` | 枚举 | iprep.go:47、protection.go:54 |
+| `autoBanEnabled` | `false` | bool | protection.go:173 |
+
+三个入口条件决定一条违规是否被记录：`ip` 非空、自动封禁已启用、且该 IP **不在全局白名单**（白名单 IP 永不进封禁，iprep.go:145）。调用方有三处，各自都先做了豁免：Bot 阶段只在档位不低于拦截档时计数（phases.go:562-564）；挑战提交失败时计数，但命中站点白名单则跳过（handler.go:264-271）；三个 challenge 校验端点的失败统一走 `recordChallengeFailure`，同样先查站点白名单，并且只在「确实是挑战提交格式但未通过」时计入，避免把普通业务 POST 算成失败（challenge.go:607-655）。
 
 **章节来源**
-- [iprep.go:127-150](file://internal/waf/iprep/iprep.go#L127-L150)
-- [iprep.go:209-231](file://internal/waf/iprep/iprep.go#L209-L231)
+- [internal/waf/iprep/iprep.go:42-51](file://internal/waf/iprep/iprep.go#L42-L51)
+- [internal/waf/iprep/iprep.go:144-167](file://internal/waf/iprep/iprep.go#L144-L167)
+- [internal/core/rules/phases.go:561-564](file://internal/core/rules/phases.go#L561-L564)
+- [internal/dataplane/handler.go:264-271](file://internal/dataplane/handler.go#L264-L271)
+- [internal/dataplane/challenge.go:607-655](file://internal/dataplane/challenge.go#L607-L655)
+- [internal/store/protection.go:159-203](file://internal/store/protection.go#L159-L203)
 
-### 内存清理机制
-系统实现了智能的内存清理策略，防止内存泄漏：
+### 内存清理与生命周期
+清理协程每 5 分钟扫描一次，删除条件是「封禁已结束」**且**「距首次发现超过 3600 秒」，两个条件同时成立才回收（iprep.go:249-271）。
+
+| 阶段 | 触发 | 状态变化 |
+|---|---|---|
+| 首次违规 | `LoadOrStore` 创建计数器 | `count=1`，记 `firstSeen` |
+| 窗口内累加 | 未达阈值 | 仅 `count++` |
+| 窗口过期 | `now-firstSeen > window` | 计数归零并重置 `firstSeen` |
+| 达阈值 | `count ≥ threshold` 且未在封禁期 | `bannedTil = now + duration`，返回 true |
+| 封禁期 | `Check` 命中 | 返回拒绝决策 |
+| 回收 | 封禁结束且静默超 1 小时 | `violations.Delete` |
 
 ```mermaid
-flowchart TD
-A[启动定时器] --> B[每 5 分钟触发一次]
-B --> C[获取当前时间戳]
-C --> D[遍历所有违规记录]
-D --> E{封禁已结束?}
-E --> |否| F[保留记录]
-E --> |是| G{超过 1 小时未活动?}
-G --> |是| H[删除记录]
-G --> |否| F[保留记录]
-F --> I[继续下一个记录]
-H --> I
-I --> J[完成清理]
+stateDiagram-v2
+  state "无记录" as NONE
+  state "计数中" as COUNT
+  state "封禁中" as BANNED
+  state "已解禁" as RELEASED
+  [*] --> NONE
+  NONE --> COUNT : RecordViolation
+  COUNT --> COUNT : 窗口内 count++
+  COUNT --> NONE : 窗口过期，计数清零
+  COUNT --> BANNED : count ≥ 10，bannedTil = now + 3600
+  BANNED --> BANNED : Check 命中，返回拒绝
+  BANNED --> RELEASED : bannedTil ≤ now
+  RELEASED --> NONE : 清理器：静默超 1 小时
+  RELEASED --> COUNT : 再次违规
 ```
 
 **图表来源**
-- [iprep.go:209-231](file://internal/waf/iprep/iprep.go#L209-L231)
-
-清理条件：
-- 封禁时间已过期
-- 距离最后活动时间超过 3600 秒（1 小时）
+- [internal/waf/iprep/iprep.go:144-167](file://internal/waf/iprep/iprep.go#L144-L167)
+- [internal/waf/iprep/iprep.go:249-271](file://internal/waf/iprep/iprep.go#L249-L271)
 
 **章节来源**
-- [iprep.go:209-231](file://internal/waf/iprep/iprep.go#L209-L231)
+- [internal/waf/iprep/iprep.go:144-271](file://internal/waf/iprep/iprep.go#L144-L271)
 
-### ParseIPListEntry 函数
-该函数负责将字符串解析为 IPListEntry 对象：
+### 存储模型与作用域
+持久化条目只有一个表，作用域由可空的 `site_id` 表达。
 
-```mermaid
-flowchart TD
-A[输入字符串] --> B[去除空白字符]
-B --> C{字符串为空?}
-C --> |是| D[返回失败]
-C --> |否| E{尝试解析 CIDR}
-E --> F{解析成功?}
-F --> |是| G[返回 CIDR 类型条目]
-F --> |否| H{尝试解析单 IP}
-H --> I{解析成功?}
-I --> |是| J[返回单 IP 类型条目]
-I --> |否| K[返回失败]
-```
+| 列 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `kind` | `IPListKind` | 必填 | `blacklist` / `whitelist`，其它值被拒 |
+| `value` | string(64) | 必填 | 单 IP 或 CIDR |
+| `note` | string(255) | 空 | 命中时作为 `Reason` 回显 |
+| `enabled` | bool | `true` | 关闭即不参与快照 |
+| `action` | string | `intercept` | 白名单条目会被强制回写为 `intercept` |
+| `site_id` | `*uint` | NULL | NULL 表示全局 |
+| `feed_id` | `*uint` | NULL | 非空表示来自威胁情报订阅 |
 
-**图表来源**
-- [iprep.go:186-207](file://internal/waf/iprep/iprep.go#L186-L207)
+注意**存储模型没有过期列**：`ExpireAt` 只存在于运行时结构体 `iprep.IPListEntry`（iprep.go:11-17），封禁到期另由 `iprep.BanEntry.BannedTil` 表达（iprep.go:169-173）。更关键的是装配链路 `ParseIPListEntry` 从不填 `ExpireAt`（iprep.go:226-247），因此无论来自管理面还是威胁情报订阅，入库条目的 `ExpireAt` 恒为 0，即**永不过期**；想让一条名单临时失效，只能停用 `enabled` 或删除条目。把「设了 TTL」当成默认能力是这类系统最常见的误判来源。
 
-支持的输入格式：
-- **CIDR 格式**：如 `192.168.1.0/24`、`10.0.0.0/8`
-- **单 IP 格式**：如 `192.168.1.1`、`::1`
-- **IPv6 支持**：完全支持 IPv6 地址
+查询侧区分三种作用域：`List` 按 `siteID` 是否为 nil 决定查站点还是查全局，`AllEnabledForSite` 同时返回该站点与全局条目，`AllEnabledGlobal` 只返回全局（repository/iplist/ip_list.go:14-50）。装配侧因此是两条独立管道：全局条目进 `IPReputation`，站点条目进 `SiteRuntime`（server.go:1331-1352、build.go:1596-1644）。
 
 **章节来源**
-- [iprep.go:186-207](file://internal/waf/iprep/iprep.go#L186-L207)
-- [iprep_test.go:8-20](file://internal/waf/iprep/iprep_test.go#L8-L20)
+- [internal/store/iplist/ip_list.go:9-30](file://internal/store/iplist/ip_list.go#L9-L30)
+- [internal/store/repository/iplist/ip_list.go:14-62](file://internal/store/repository/iplist/ip_list.go#L14-L62)
+- [internal/admin/system/iplist/iplist.go:60-193](file://internal/admin/system/iplist/iplist.go#L60-L193)
+- [internal/snapshot/build.go:1596-1644](file://internal/snapshot/build.go#L1596-L1644)
+
+### 管理接口与前端
+写操作一律 POST，路由中没有 PUT / DELETE。
+
+| 端点 | 方法 | 分组 | 说明 |
+|---|---|---|---|
+| `/ip-lists` | GET | readGroup | 分页 + `kind` + `site_id` 过滤 |
+| `/ip-lists/{id}` | GET | readGroup | 单条查询 |
+| `/ip-lists` | POST | opsGroup | 新建并 reload |
+| `/ip-lists/{id}/update` | POST | opsGroup | 局部字段更新 |
+| `/ip-lists/{id}/delete` | POST | opsGroup | 删除并 reload |
+| `/preset-bot-whitelist` | GET | readGroup | 预置清单预览 |
+| `/preset-bot-whitelist/seed` | POST | opsGroup | 注入主流爬虫网段 |
+| `/threat-intel-feeds/{id}/sync` | POST | opsGroup | 订阅源写回黑名单 |
+
+创建流程有三个值得注意的细节：先用 `ApplyModelDefaults` 填模型默认值再让请求体覆盖，因此「未提供」与「显式传 false/0」能被区分；`kind` 与 `value` 与 `action` 各自独立校验；白名单条目的 `action` 无论传什么都被改回 `intercept`（iplist.go:60-97）。更新走「先读库、再逐字段覆盖、最后整体 Save」，`site_id` 用 `json.RawMessage` 承载以区分「未提供」与「显式清空」（iplist.go:99-170）。
+
+前端入口是 `ip-lists/` 页（作用域下拉在全局与各站点之间切换、动作只在黑名单显示、并支持一键注入预置爬虫白名单）。**不存在 `protection/` 页面**。
+
+**章节来源**
+- [internal/admin/router.go:154-155](file://internal/admin/router.go#L154-L155)
+- [internal/admin/router.go:289-291](file://internal/admin/router.go#L289-L291)
+- [internal/admin/router.go:293-296](file://internal/admin/router.go#L293-L296)
+- [internal/admin/router.go:369](file://internal/admin/router.go#L369)
+- [internal/admin/system/iplist/iplist.go:60-212](file://internal/admin/system/iplist/iplist.go#L60-L212)
+- [internal/admin/system/presetbots/preset_bots.go:23-106](file://internal/admin/system/presetbots/preset_bots.go#L23-L106)
+- [frontend/app/(dashboard)/ip-lists/page.tsx:46-107](file://frontend/app/(dashboard)/ip-lists/page.tsx#L46-L107)
+
+### 与其他能力的协同
+- Bot 阶段读同一份名单：`deepScore` 按 `blacklist` 60 分、`auto_ban` 50 分、其它拒绝 30 分给 IP 声誉模块，并且**名单命中即置危险标记**，保证即使站点没开 `ip_reputation` 也能终止（bot.go:750-767）
+- 数据面在白名单命中时会跳过挑战与防重放的若干分支，白名单是「豁免」而不是「免检」以外的第二套判定（handler.go:225、challenge.go:643）
+- `visitorfusion` 把 `IPRepScore` 与 `GeoIPScore` 合并进融合分的 IP 维度，上限 30 分（classifier.go:224-242）
+- 站点级覆盖不提供自动封禁参数的独立取值，封禁阈值只有全局一处真值（build.go:707-768）
+
+**章节来源**
+- [internal/waf/bot/bot.go:750-767](file://internal/waf/bot/bot.go#L750-L767)
+- [internal/dataplane/handler.go:225](file://internal/dataplane/handler.go#L225)
+- [internal/visitorfusion/classifier.go:224-242](file://internal/visitorfusion/classifier.go#L224-L242)
+- [internal/snapshot/build.go:707-768](file://internal/snapshot/build.go#L707-L768)
 
 ## 依赖关系分析
+- `ipReputationPhase` 同时依赖快照的站点名单与 `IPReputation`，前者为空时阶段仍可工作
+- `IPReputation` 不依赖快照、不依赖数据库，纯内存对象，便于单测与替换
+- `bot` 依赖 `iprep` 是单向的，`iprep` 不引用 `bot`
+- 数据面只消费 `action.Result`，不直接调用 `Check`
 
-### 组件耦合度
+| 依赖方 | 被依赖方 | 注入方式 | 缺失时行为 |
+|---|---|---|---|
+| `Engine` | `*iprep.IPReputation` | 构造参数 | nil 则整阶段不入链 |
+| `ipReputationPhase` | 站点名单切片 | 快照 | 空切片即跳过站点判定 |
+| `botPhase` | `*iprep.IPReputation` | 构造参数 | nil 则声誉模块恒 0 分 |
+| `RecordViolation` | 白名单状态 | 内部 | 白名单 IP 不计数 |
+| 管理接口 | `reload` 回调 | 参数 | nil 时仍需重启才生效 |
+
+外部依赖：GORM（名单持久化）、Redis（可选，威胁情报与会话侧），均不进入判定热路径。
+
 ```mermaid
-graph TB
-subgraph "核心依赖"
-A[IPReputation]
-B[IPListEntry]
-C[IPDecision]
-end
-subgraph "存储依赖"
-D[IPListRepo]
-E[IPListEntry 模型]
-end
-subgraph "管理依赖"
-F[Handler_IPList]
-G[前端界面]
-end
-subgraph "安全依赖"
-H[ResolveClientIP]
-I[Site 配置]
-end
-subgraph "引擎依赖"
-J[Engine]
-K[Rules Phase]
-end
-A --> B
-A --> C
-D --> E
-F --> D
-H --> A
-J --> A
-K --> A
+graph LR
+REPO["IPListRepo"] --> LOADG["loadIPLists"]
+REPO --> LOADS["loadSiteIPLists"]
+LOADG --> REP["IPReputation"]
+LOADS --> RT["SiteRuntime"]
+PROT["ProtectionConfig auto_ban_*"] --> CFG["ConfigureAutoBan"]
+CFG --> REP
+RT --> PH["ipReputationPhase"]
+REP --> PH
+REP --> BOTP["botPhase"]
+PH --> RES["action.Result"]
+BOTP --> RES
+BOTP -->|"RecordViolation"| REP
 ```
 
 **图表来源**
-- [engine.go:37-74](file://internal/core/engine/engine.go#L37-L74)
-- [phases.go:200-240](file://internal/core/rules/phases.go#L200-L240)
-
-### 外部依赖
-系统对外部组件的依赖关系：
-- **net 包**：网络地址解析和 CIDR 操作
-- **sync 包**：并发安全的数据结构
-- **time 包**：时间戳管理和定时任务
-- **gorm**：数据库 ORM 映射
+- [internal/app/server.go:392-393](file://internal/app/server.go#L392-L393)
+- [internal/app/server.go:1331-1352](file://internal/app/server.go#L1331-L1352)
+- [internal/snapshot/build.go:463-464](file://internal/snapshot/build.go#L463-L464)
+- [internal/core/rules/phases.go:561-564](file://internal/core/rules/phases.go#L561-L564)
 
 **章节来源**
-- [engine.go:1-308](file://internal/core/engine/engine.go#L1-L308)
-- [phases.go:1-800](file://internal/core/rules/phases.go#L1-L800)
+- [internal/core/engine/engine.go:479-481](file://internal/core/engine/engine.go#L479-L481)
+- [internal/core/engine/engine.go:503-510](file://internal/core/engine/engine.go#L503-L510)
 
 ## 性能考虑
-
-### 时间复杂度分析
-- **IP 匹配操作**：O(n) - 需要遍历黑白名单数组
-- **自动封禁检查**：O(1) - 使用 sync.Map 进行快速查找
-- **内存清理**：O(m) - m 为当前活跃违规记录数量
-
-### 内存使用优化
-1. **懒加载机制**：违规记录仅在需要时创建
-2. **智能清理**：定期清理过期记录，防止内存泄漏
-3. **原子操作**：使用原子类型减少锁竞争
-4. **并发安全**：使用 RWMutex 实现读写分离
-
-### 并发安全性
-系统采用多层次的并发保护：
-- **读写分离**：黑白名单使用 RWMutex
-- **原子操作**：配置参数使用原子类型
-- **互斥锁**：违规计数器使用 Mutex
-- **无锁数据结构**：sync.Map 提供高性能并发访问
-
-## 故障排除指南
-
-### 常见问题诊断
-
-#### 1. IP 匹配不生效
-**可能原因**：
-- IP 地址格式错误
-- CIDR 范围配置不当
-- 过期条目被忽略
-
-**解决方法**：
-- 使用 `ParseIPListEntry` 函数验证格式
-- 检查 `ExpireAt` 字段是否正确设置
-- 确认 IP 地址与目标网络匹配
-
-#### 2. 自动封禁不工作
-**可能原因**：
-- 自动封禁功能未启用
-- 配置参数设置不当
-- 违规计数器异常
-
-**解决方法**：
-- 检查 `ConfigureAutoBan` 方法调用
-- 验证阈值、窗口和持续时间设置
-- 查看 `ActiveBans()` 方法输出
-
-#### 3. 内存泄漏问题
-**症状**：系统运行时间越长，内存占用越大
-
-**解决方法**：
-- 检查清理器是否正常运行
-- 验证过期时间设置是否合理
-- 监控 `ActiveBans()` 输出确认记录清理
+- 名单匹配是线性扫描，单条 O(1) 但总体 O(n)；高频命中项放前部比加长机器更有效（iprep.go:105-137）
+- 读路径只取一次读锁，命中即释放，未命中才继续查封禁表，避免锁升级（iprep.go:110-123）
+- 违规计数用 `sync.Map` + 每 IP 独立互斥锁，热点 IP 之间不互相阻塞（iprep.go:24、35-40、153-156）
+- 配置项全部走原子量，`ConfigureAutoBan` 可在不停协程的情况下热调（iprep.go:72-83）
+- 清理周期固定 5 分钟，回收条件带 1 小时静默门槛，避免抖动型封禁记录反复创建删除（iprep.go:249-271）
+- 名单变更会触发一次快照重建，属于控制面开销，不应放进高频脚本
 
 **章节来源**
-- [iprep.go:209-231](file://internal/waf/iprep/iprep.go#L209-L231)
-- [iprep_test.go:1-21](file://internal/waf/iprep/iprep_test.go#L1-L21)
+- [internal/waf/iprep/iprep.go:105-137](file://internal/waf/iprep/iprep.go#L105-L137)
+- [internal/waf/iprep/iprep.go:144-167](file://internal/waf/iprep/iprep.go#L144-L167)
+- [internal/waf/iprep/iprep.go:249-271](file://internal/waf/iprep/iprep.go#L249-L271)
+
+## 故障排查指南
+| 症状 | 可能原因 | 验证方式 |
+|---|---|---|
+| 名单加了不生效 | 条目作用域写错（站点 vs 全局） | 查 `site_id` 是否为 NULL；两条装配管道互不相通 |
+| 条目被静默丢弃 | `value` 非法 | 看快照诊断 `invalid_ip_or_cidr` / `empty_value` |
+| 白名单 IP 仍被拦 | 站点白名单不短路，后续阶段仍可拦 | 查 `SecurityEvent.phase` 是否为其它阶段 |
+| 自动封禁不触发 | `auto_ban_enabled` 默认是 `false` | 全局保护配置里显式开启 |
+| 封禁不生效 | 违规从未被记录 | 三处调用方都有豁免条件，先确认动作档位与挑战失败计数是否真的发生 |
+| 阈值改了没反应 | 传入非正数被忽略 | `ConfigureAutoBan` 只接受正数 |
+| 内存持续增长 | 清理未运行或条目一直活跃 | 查 `ActiveBans()` 与重启后是否清空 |
+| 想要临时封禁 | 存储层没有过期列 | 用 `enabled` 开关或定时任务删除条目 |
+| Drop 名单不生效 | `action` 被归一化 | 只有 `drop` / `block` 会升级为 Drop |
+
+**章节来源**
+- [internal/waf/iprep/iprep.go:72-95](file://internal/waf/iprep/iprep.go#L72-L95)
+- [internal/waf/iprep/iprep.go:144-167](file://internal/waf/iprep/iprep.go#L144-L167)
+- [internal/waf/iprep/iprep.go:194-271](file://internal/waf/iprep/iprep.go#L194-L271)
+- [internal/core/rules/phases.go:374-432](file://internal/core/rules/phases.go#L374-L432)
+- [internal/snapshot/build.go:1607-1630](file://internal/snapshot/build.go#L1607-L1630)
+- [internal/store/protection.go:172-176](file://internal/store/protection.go#L172-L176)
+- [internal/admin/system/iplist/iplist.go:172-193](file://internal/admin/system/iplist/iplist.go#L172-L193)
 
 ## 结论
-IP 信誉系统通过精心设计的架构和算法，提供了高效、可靠的 IP 地址管理能力。系统的主要优势包括：
+IP 信誉系统把「确定性阻断」和「概率性止损」分得很开：名单是确定性的，封禁是统计性的，二者共用同一套条目匹配语义但生命周期完全不同。双层作用域（全局短路 / 站点不短路）是设计选择而非实现巧合，理解这一点才能解释「加了白名单还是被拦」。
 
-1. **多层决策机制**：白名单优先、黑名单阻断、自动封禁的三层防护
-2. **灵活的配置选项**：支持多种 IP 地址格式和动态配置更新
-3. **智能内存管理**：自动清理过期记录，防止内存泄漏
-4. **高并发性能**：采用原子操作和并发安全的数据结构
-5. **完整的生命周期管理**：从创建到销毁的完整管理流程
+待改进项：自动封禁状态不持久，多实例部署时各节点独立计数；封禁计数与威胁情报写入之间没有速率护栏，恶意源可通过高频违规放大内存占用。建议后续把封禁状态快照进 Redis，并在 `RecordViolation` 上加站点级总量上限。
 
-该系统为 OpenWAF 提供了坚实的安全基础，能够有效应对各种网络威胁和攻击场景。
+**章节来源**
+- [本节为总结，无需特定文件来源]
 
 ## 附录
 
-### 配置最佳实践
+### 配置项速查
 
-#### 自动封禁配置建议
-| 使用场景 | 阈值 | 窗口(秒) | 持续时间(秒) | 说明 |
-|----------|------|----------|--------------|------|
-| 开发环境 | 3-5 | 60 | 300 | 快速响应，便于测试 |
-| 生产环境 | 10-20 | 60-120 | 3600-7200 | 平衡安全性和用户体验 |
-| 高风险环境 | 5-10 | 30-60 | 7200-14400 | 更严格的防护策略 |
+| 字段 | 默认 | 载体 | 热更新 |
+|---|:--:|---|:--:|
+| `auto_ban_enabled` | `false` | `protection` | 是 |
+| `auto_ban_threshold` | 10 | `protection` | 是 |
+| `auto_ban_window` | 60 秒 | `protection` | 是 |
+| `auto_ban_duration` | 3600 秒 | `protection` | 是 |
+| `auto_ban_action` | `intercept` | `protection` | 是 |
+| 全局名单 | — | `ip_list_entries` | 是（reload） |
+| 站点名单 | — | `ip_list_entries.site_id` | 是（快照重建） |
 
-#### IP 地址管理建议
-1. **白名单配置**：
-   - 仅包含受信任的源 IP
-   - 使用最小权限原则
-   - 定期审查和更新
-
-2. **黑名单配置**：
-   - 基于威胁情报更新
-   - 包含已知恶意 IP 和网段
-   - 设置合理的过期时间
-
-3. **CIDR 使用建议**：
-   - 优先使用更精确的网段
-   - 避免使用过于宽泛的网段
-   - 定期优化网段范围
-
-### API 使用示例
-
-#### 基本使用流程
-```go
-// 创建 IP 信誉实例
-rep := NewIPReputation()
-defer rep.Close()
-
-// 配置自动封禁
-rep.ConfigureAutoBan(true, 10, 60, 3600)
-
-// 设置黑白名单
-rep.SetLists(blacklist, whitelist)
-
-// 检查 IP
-decision := rep.Check(clientIP)
-if !decision.Allowed {
-    // 处理拒绝逻辑
-}
-
-// 记录违规
-rep.RecordViolation(clientIP)
-```
-
-#### 配置管理
-```go
-// 通过 API 管理 IP 列表
-repo := NewIPListRepo(db)
-entries, total, err := repo.List(offset, limit, kind)
-```
+证据：protection.go:37-40、protection.go:54、protection.go:172-176、server.go:392-393、server.go:640-641。
 
 **章节来源**
-- [iprep.go:41-55](file://internal/waf/iprep/iprep.go#L41-L55)
-- [iplist.go:15-29](file://internal/admin/system/iplist.go#L15-L29)
+- [internal/store/protection.go:37-54](file://internal/store/protection.go#L37-L54)
+- [internal/app/server.go:392-393](file://internal/app/server.go#L392-L393)
+- [internal/app/server.go:640-641](file://internal/app/server.go#L640-L641)
+- [frontend/lib/types.ts:853-875](file://frontend/lib/types.ts#L853-L875)
 
-### 动态更新机制和热重载
-系统支持实时的配置更新和热重载机制：
-
-```mermaid
-sequenceDiagram
-participant Admin as 管理员
-participant API as 管理 API
-participant Srv as 服务端
-participant Repo as IPListRepo
-participant Rep as IPReputation
-Admin->>API : 创建/更新/删除 IP 列表项
-API->>Repo : 持久化操作
-API->>Srv : 触发 reload()
-Srv->>Srv : 提升配置版本/重载快照
-Srv->>Repo : 查询所有启用的条目
-Repo-->>Srv : 返回条目列表
-Srv->>Rep : SetLists(解析后的黑白名单)
-Srv-->>Admin : 完成重载
-```
-
-**图表来源**
-- [IP 信誉检查阶段.md:251-266](file://docs/WAF 引擎系统/处理阶段详解/IP 信誉检查阶段.md#L251-L266)
-
-动态更新特点：
-- **实时生效**：管理员操作后立即生效
-- **数据持久化**：所有变更都保存到数据库
-- **配置版本控制**：通过版本提升确保一致性
-- **跨节点同步**：通过 Redis Pub/Sub 同步到其他节点
+### 术语
+- **作用域**：条目归属全局还是站点，由 `site_id` 是否为 NULL 决定
+- **短路（stop）**：为 true 时阶段链立即结束；站点白名单是唯一「放行但不短路」的结果
+- **封禁到期**：`BanEntry.BannedTil`，unix 秒；条目级过期 `ExpireAt` 只在运行时结构体存在
+- **违规记录**：`violationCounter`，一个 IP 一条，窗口内累加
 
 **章节来源**
-- [IP 信誉检查阶段.md:240-266](file://docs/WAF 引擎系统/处理阶段详解/IP 信誉检查阶段.md#L240-L266)
-- [iplist.go:47-77](file://internal/admin/system/iplist.go#L47-L77)
-- [iplist.go:80-114](file://internal/admin/system/iplist.go#L80-L114)
-- [iplist.go:128-145](file://internal/admin/system/iplist.go#L128-L145)
+- [internal/waf/iprep/iprep.go:11-17](file://internal/waf/iprep/iprep.go#L11-L17)
+- [internal/waf/iprep/iprep.go:169-173](file://internal/waf/iprep/iprep.go#L169-L173)
+
+### 相关文档
+- 名单如何影响评分：[机器人检测](机器人检测.md)
+- 按国家维度的准入：[地理位置阻断](地理位置阻断.md)
+- 规则型 IP 阻断：[ACL 规则引擎](ACL 规则引擎.md)
+- 断连执行细节：[阻断机制](阻断机制.md)
+- REST 契约：[IP 黑白名单管理 API](../管理 API 系统/IP 黑白名单管理 API.md)
+
+**章节来源**
+- [本节为总结，无需特定文件来源]

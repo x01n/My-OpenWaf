@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"My-OpenWaf/internal/observability"
+
+	"My-OpenWaf/internal/dataplane/logredact"
 	"My-OpenWaf/internal/store"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -22,7 +24,7 @@ func (panicResponseBodyReader) Read(_ []byte) (int, error) {
 }
 
 func TestSanitizeQueryStringRedactsSensitiveValues(t *testing.T) {
-	got := sanitizeQueryString("page=1&token=abc123&password=secret&name=alice")
+	got := logredact.SanitizeQueryString("page=1&token=abc123&password=secret&name=alice")
 	if strings.Contains(got, "abc123") || strings.Contains(got, "secret") {
 		t.Fatalf("sensitive query values leaked: %s", got)
 	}
@@ -35,7 +37,7 @@ func TestSanitizeQueryStringRedactsSensitiveValues(t *testing.T) {
 }
 
 func TestSanitizeQueryStringRedactsMalformedEncodedSensitiveKey(t *testing.T) {
-	got := sanitizeQueryString("pass%77ord=secret&bad=%zz")
+	got := logredact.SanitizeQueryString("pass%77ord=secret&bad=%zz")
 	if strings.Contains(got, "secret") {
 		t.Fatalf("malformed query leaked sensitive value: %s", got)
 	}
@@ -63,7 +65,7 @@ func TestRequestBodyPreviewRedactsJSONAndFormSecrets(t *testing.T) {
 	if strings.Contains(preview, "secret") || strings.Contains(preview, "token=token") {
 		t.Fatalf("form body secret leaked: %s", preview)
 	}
-	if got := sanitizeQueryString("pass%77ord=secret&bad=%zz"); got != "[redacted]" {
+	if got := logredact.SanitizeQueryString("pass%77ord=secret&bad=%zz"); got != "[redacted]" {
 		t.Fatalf("malformed form = %q, want [redacted]", got)
 	}
 }
@@ -147,7 +149,7 @@ func TestRequestBodyPreviewRedactsMalformedNestedEnv(t *testing.T) {
 
 func TestDynamicProtectionRequestBodyPreviewRedactsTicketKeyAndEnv(t *testing.T) {
 	ctx := app.NewContext(0)
-	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.SetRequestURI(logredact.GroupKeyPath)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	ctx.Request.SetBody([]byte(`{"ticket":"ticket-secret","key":"key-secret","env":{"nested":{"fingerprint":"env-secret"}},"票据":"unicode-secret"}`))
 
@@ -170,7 +172,7 @@ func TestDynamicProtectionRequestBodyPreviewRedactsTicketKeyAndEnv(t *testing.T)
 
 func TestDynamicProtectionMalformedRequestBodyPreviewRedactsTicketAndEnv(t *testing.T) {
 	ctx := app.NewContext(0)
-	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.SetRequestURI(logredact.GroupKeyPath)
 	ctx.Request.Header.Set("Content-Type", "text/plain")
 	ctx.Request.SetBody([]byte(`{"ticket":"ticket-secret","env":{"nested":"env-secret"}`))
 
@@ -190,7 +192,7 @@ func TestDynamicProtectionMalformedRequestBodyPreviewRedactsTicketAndEnv(t *test
 
 func TestRecordDynamicProtectionAccessLogPersistsRedactedBody(t *testing.T) {
 	ctx := app.NewContext(0)
-	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.SetRequestURI(logredact.GroupKeyPath)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	ctx.Request.SetBody([]byte(`{"ticket":"ticket-secret","key":"key-secret","env":{"fingerprint":"env-secret"}}`))
 
@@ -333,7 +335,7 @@ func TestRecordSecurityEventRedactsPrefilledHeaderLikePlaintext(t *testing.T) {
 
 func TestDynamicProtectionTruncatedJSONRequestBodyPreviewRedactsWholeBody(t *testing.T) {
 	ctx := app.NewContext(0)
-	ctx.Request.SetRequestURI(dynamicProtectionKeyPath)
+	ctx.Request.SetRequestURI(logredact.GroupKeyPath)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	body := `{"ticket":"ticket-secret","key":"key-secret","env":{"nested":"env-secret"},` + strings.Repeat("x", logBodyPreviewLimit)
 	ctx.Request.SetBody([]byte(body))
@@ -358,7 +360,7 @@ func TestDynamicProtectionTruncatedJSONRequestBodyPreviewRedactsWholeBody(t *tes
 func TestBuildAccessLogEntryRedactsPrefilledDynamicProtectionBody(t *testing.T) {
 	ctx := app.NewContext(0)
 	entry := buildAccessLogEntry(ctx, accessLogInfo{
-		Path:               dynamicProtectionKeyPath,
+		Path:               logredact.GroupKeyPath,
 		RequestBodyPreview: `{"ticket":"ticket-secret","key":"key-secret","env":{"nested":"env-secret"}}`,
 		RequestSize:        1,
 		WAFAction:          "dynamic_key_error",

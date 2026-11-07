@@ -127,7 +127,7 @@ func TestFullwidthShouldScanGateEquiv(t *testing.T) {
 		s := b.String()
 		signals := sqliPatternSignals{containsFullwidthS: fullwidthS(s)}
 		for _, p := range []*owaspPattern{pat049, pat053} {
-			got := shouldScanSQLiPatternWithSignals(s, *p, signals)
+			got := shouldScanSQLiPatternWithSignals(s, *p, signals, nil)
 			want := refShouldScan(s, p)
 			if got != want {
 				t.Fatalf("第 %d 串 %q 规则 %s: 门扫描判定=%v 原判定=%v", i, s, p.id, got, want)

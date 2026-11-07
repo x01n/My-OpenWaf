@@ -148,6 +148,9 @@ func loadOWASPReadSnapshot(db *gorm.DB, policyID uint) (owaspReadSnapshot, error
 			if config.CaptchaType != nil {
 				view.CaptchaType = *config.CaptchaType
 			}
+			if config.CiscoASAMode != nil {
+				view.CiscoASAMode = *config.CiscoASAMode
+			}
 			if config.Whitelist != nil && *config.Whitelist != "" {
 				_ = json.Unmarshal([]byte(*config.Whitelist), &view.Whitelist)
 			}

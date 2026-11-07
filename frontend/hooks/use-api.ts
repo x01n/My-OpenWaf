@@ -75,6 +75,8 @@ import type {
   BotScoreListResponse,
   BotScoreStats,
   BotSettings,
+  ImageTransformConfig,
+  ImageTransformConfigUpdate,
 } from "@/lib/types"
 
 /**
@@ -1559,4 +1561,29 @@ export function useHTTP2ConfigUpdate() {
 
 export function useCipherSuites() {
   return useApiQuery(["cipher-suites"], () => settingsApi.getCipherSuites())
+}
+
+/**
+ * 图像转换全局配置查询。
+ *
+ * 对应后端 GET /api/v1/image-transform（internal/admin/system/imagery.go）。
+ */
+export function useImageTransformConfig(enabled = true) {
+  return useApiQuery<ImageTransformConfig>(
+    enabled ? ["image-transform"] : null,
+    () => settingsApi.getImageTransform()
+  )
+}
+
+/**
+ * 图像转换全局配置更新。
+ *
+ * 后端按「局部合并」语义处理：请求体中缺席的字段保留既有值。
+ */
+export function useImageTransformConfigUpdate() {
+  return useMutation(
+    async (data: ImageTransformConfigUpdate) =>
+      settingsApi.updateImageTransform(data),
+    { invalidateKeys: ["image-transform"] }
+  )
 }

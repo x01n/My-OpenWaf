@@ -205,18 +205,27 @@ func TestProtocolGuardNilContextNeverRSTs(t *testing.T) {
 }
 
 /**
- * TestProtocolGuardUnknownProtocolNeverRSTs 覆盖未知/缺失协议值：宁可放弃
- * RST，也不闭错连接。
+ * TestProtocolGuardUnknownProtocolClosesConn 覆盖未知/缺失协议值。
+ *
+ * 旧实现「宁可放弃 RST 也不闭错连接」，但放弃终止会让已判定的 drop
+ * 退化成 200 空响应。guard 捕获的连接一定来自当前请求，因此未知协议
+ * 下关闭它比伪成功更安全；这里锁定该语义。
  */
-func TestProtocolGuardUnknownProtocolNeverRSTs(t *testing.T) {
+func TestProtocolGuardUnknownProtocolClosesConn(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
-	_ = client
 	c := &app.RequestContext{}
 	c.Request.Header.SetProtocol("")
 	c.SetConn(&fixURIHertzConn{Conn: server})
 	g := NewInboundProtocolGuard(c)
-	if g.tcpDropTarget() != nil || g.CloseForDrop() {
-		t.Fatalf("unknown protocol must not apply connection-level RST")
+	if g.IsStreamMultiplexed() {
+		t.Fatalf("unknown protocol must not be treated as multiplexed")
+	}
+	if !g.CloseForDrop() {
+		t.Fatalf("unknown protocol must fall back to closing the captured connection")
+	}
+	client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := client.Read(make([]byte, 1)); err == nil {
+		t.Errorf("peer should observe connection close for unknown protocol drop")
 	}
 }
 
@@ -314,11 +323,17 @@ func TestProtocolGuardDisabledExecutorStillRSTs(t *testing.T) {
 }
 
 /**
- * TestProtocolGuardNilExecuteEqualsMockConnClose 锁定惰性 guard 的语义契约:
- * nil guard + enabled executor 等价旧版「dropExec.Enabled 时对 mock 连接
- * Close 空操作」;对真实 *net.TCPConn 则 1.1 语义输出(Close 幂等)。
+ * TestProtocolGuardNilExecuteFailsClosed 锁定 nil 守卫的返回值契约。
+ *
+ * nil 守卫表示 handler 入口拿不到 RequestContext（因此也拿不到连接）。
+ * 旧实现在这里返回 true 并什么都不做，handler 会把这次判定记成 drop 且
+ * 不写任何响应，客户端实际收到 200 空响应、连接继续 keep-alive——drop
+ * 语义形同虚设。
+ *
+ * 现在必须返回 false，调用方据此记录告警，但响应阶段仍不得写入任何
+ * 拦截内容。
  */
-func TestProtocolGuardNilExecuteEqualsMockConnClose(t *testing.T) {
+func TestProtocolGuardNilExecuteFailsClosed(t *testing.T) {
 	server, client, _ := testRawTCPConn(t)
 	if _, err := server.Write([]byte("k")); err != nil {
 		t.Fatalf("warm write: %v", err)
@@ -327,13 +342,11 @@ func TestProtocolGuardNilExecuteEqualsMockConnClose(t *testing.T) {
 	if _, err := client.Read(make([]byte, 1)); err != nil {
 		t.Fatalf("warm read: %v", err)
 	}
-	// httptest 两端的 *net.TCPConn:旧语义 = 直接 Close,新 nil 语义 = 无操作,
-	// 对端仍应读到后续写入。验证方式：nil guard Execute 之后 server 再写
-	// 一字节给 client，client 能读到即证明连接未被 closed。
 	guard := (*InboundProtocolGuard)(nil)
-	if !guard.Execute(dropExecutorForTest(), dropReasonForTest("bot")) {
-		t.Fatalf("nil guard with executor must report true (connections-only allocation offline)")
+	if guard.Execute(dropExecutorForTest(), dropReasonForTest("bot")) {
+		t.Fatalf("nil guard must report false because no protocol-level abort is possible")
 	}
+	// 拿不到连接时无法关闭它，只要求不误报成功；连接本身仍可写。
 	if _, err := server.Write([]byte("o")); err != nil {
 		t.Fatalf("nil guard must leave server conn writable: %v", err)
 	}

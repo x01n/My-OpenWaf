@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 
 	"My-OpenWaf/internal/appresource"
+	"My-OpenWaf/internal/core/configoverride"
+	"My-OpenWaf/internal/imagery"
 	"My-OpenWaf/internal/pkg/schemealias"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/store/access"
@@ -162,6 +164,24 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	}
 	dynamicProtection.EncryptionKeyBase = append([]byte(nil), dynamicKeyBase...)
 	excludeRecordHeaders := parseExcludeRecordHeaders(botSettingsJSON)
+	htmlToMarkdownEnabled := parseHTMLToMarkdownEnabled(botSettingsJSON)
+
+	// 图像转换全局配置。配置写坏时不让整次快照构建失败：记录诊断并退回默认
+	// （关闭）状态，避免一个可选能力的配置错误把整个控制面拖垮。
+	imageTransform, imageTransformErr := imagery.LoadConfig(settingsMap[imagery.SettingKey])
+	var imageTransformDiagnostics []SnapshotConfigDiagnostic
+	if imageTransformErr != nil {
+		imageTransform = imagery.DefaultConfig()
+		imageTransformDiagnostics = append(imageTransformDiagnostics, SnapshotConfigDiagnostic{
+			Source:           DiagnosticSourceSites,
+			Field:            imagery.SettingKey,
+			Error:            "invalid_config_json",
+			HandlingStrategy: DiagnosticHandlingSkipInvalidField,
+			Kind:             "image_transform",
+			Reason:           "invalid_config_json",
+		})
+	}
+	imageTransform.ApplyGateLimit()
 
 	// 加载各站点的访问控制配置。
 	accessControlBySite, err := loadAccessControlConfigs(db)
@@ -449,6 +469,8 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 				ResponseCompressionZstdEnabled:    responseCompressionZstdEnabled,
 				ResponseCompressionMinBytes:       responseCompressionMinBytes,
 				BrotliEnabled:                     brotliEnabled,
+				HTMLToMarkdownEnabled:             htmlToMarkdownEnabled,
+				ImageTransform:                    imageTransform,
 			}
 			if err := registerSiteKeys(siteMap, &rt); err != nil {
 				return nil, err
@@ -471,6 +493,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		rt.AntiReplayEnabled = ep.AntiReplayEnabled
 		rt.AntiReplayCookieMode = NormalizeAntiReplayCookieMode(ep.AntiReplayCookieMode)
 		rt.EffectiveProtection = &ep
+		rt.ProtectionDerived = CompileProtectionDerived(&ep)
 	}
 
 	// 自定义 Lua 策略：在此编译，语法错误在 reload 时即暴露。
@@ -487,11 +510,12 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 	configDiagnostics := make(
 		[]SnapshotConfigDiagnostic,
 		0,
-		len(owaspDiagnostics)+len(ipListDiagnostics)+len(certificateDiagnostics),
+		len(owaspDiagnostics)+len(ipListDiagnostics)+len(certificateDiagnostics)+len(imageTransformDiagnostics),
 	)
 	configDiagnostics = append(configDiagnostics, owaspDiagnostics...)
 	configDiagnostics = append(configDiagnostics, ipListDiagnostics...)
 	configDiagnostics = append(configDiagnostics, certificateDiagnostics...)
+	configDiagnostics = append(configDiagnostics, imageTransformDiagnostics...)
 
 	return &Snapshot{
 		LuaPlugins:                        luaScripts,
@@ -510,6 +534,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		SiteTLSCertBySNI:                  sniCerts,
 		SiteTLSCertStateBySNI:             sniCertStates,
 		Protection:                        protection,
+		ProtectionDerived:                 CompileProtectionDerived(&protection),
 		HTTP2Config:                       http2Config,
 		HSTSEnabled:                       hstsEnabled,
 		XSSProtectionEnabled:              xssProtectionEnabled,
@@ -525,6 +550,7 @@ func Build(db *gorm.DB, rev uint64, dynamicKeyBase []byte) (*Snapshot, error) {
 		ResponseCompressionZstdEnabled:    responseCompressionZstdEnabled,
 		ResponseCompressionMinBytes:       responseCompressionMinBytes,
 		BrotliEnabled:                     brotliEnabled,
+		HTMLToMarkdownEnabled:             htmlToMarkdownEnabled,
 		ExcludeRecordHeaders:              excludeRecordHeaders,
 	}, nil
 }
@@ -550,6 +576,9 @@ func loadPolicyOWASPConfigs(db *gorm.DB) (map[uint]string, []SnapshotConfigDiagn
 		}
 		if config.Sensitivity != nil {
 			override.Sensitivity = *config.Sensitivity
+		}
+		if config.CiscoASAMode != nil {
+			override.CiscoASAMode = *config.CiscoASAMode
 		}
 		if config.StatusCode != nil {
 			override.StatusCode = *config.StatusCode
@@ -913,7 +942,7 @@ func compileRules(rs []store.Rule) []CompiledRule {
  *
  * 规则表单的「时间窗口（秒）+ 请求次数」是规则级频次限制：窗口内命中本条
  * 条件的请求达到阈值后执行本规则的 Action。它与 CC 防护页的 cc_rules 使用
- * 同一个 ccRateMatcher（计数键为 clientIP|host，见 internal/core/rules/matcher.go），
+ * 同一个 ccRateMatcher（计数键为 bind+siteID+规范化 Host+客户端 IP，见 internal/core/rules/matcher.go），
  * 区别只在条件来源——这里是规则自身的 pattern。
  *
  * WindowSeconds 与 RequestCount 必须同时大于 0 才生效；任一为 0 或负数
@@ -1223,13 +1252,45 @@ func tlsDefaultsFromMap(m map[string]string) TLSDefaults {
 	return LoadTLSDefaults(v)
 }
 
+/**
+ * applyConfigOverrideBase 把「逐键三态覆盖表」里与全局保护配置相关的键应用到默认值上。
+ *
+ * @param m        预加载的 settings map（含 runtime_config_overrides 行）。
+ * @param fallback 无覆盖时使用的内置默认保护配置。
+ * @return 应用覆盖后的保护配置默认值。
+ */
+func applyConfigOverrideBase(m map[string]string, fallback store.ProtectionConfig) store.ProtectionConfig {
+	raw := strings.TrimSpace(m[store.SettingKeyRuntimeConfigOverrides])
+	if raw == "" {
+		return fallback
+	}
+	var warns []string
+	overrides := configoverride.ParseStoredOverrides(raw, &warns)
+	if len(overrides) == 0 {
+		return fallback
+	}
+	// 逐键按指针式判定：表里没有的键保留内置默认值，避免局部覆盖把其余开关
+	// 一并按零值写下去。
+	if value, ok := overrides["cve_enabled"].(bool); ok {
+		fallback.CVEEnabled = value
+	}
+	if value, ok := overrides["cve_auto_drop_critical"].(bool); ok {
+		fallback.CVEAutoDropCritical = value
+	}
+	if value, ok := overrides["cve_auto_drop_high"].(bool); ok {
+		fallback.CVEAutoDropHigh = value
+	}
+	return fallback
+}
+
 // protectionConfigFromMap 从预加载的 settings map 中读取 protection 配置。
 func protectionConfigFromMap(m map[string]string) (store.ProtectionConfig, error) {
+	fallback := applyConfigOverrideBase(m, store.DefaultProtectionConfig())
 	v, ok := m["protection"]
 	if !ok || v == "" {
-		return store.DefaultProtectionConfig(), nil
+		return fallback, nil
 	}
-	cfg := store.DefaultProtectionConfig()
+	cfg := fallback
 	if err := json.Unmarshal([]byte(v), &cfg); err != nil {
 		return store.ProtectionConfig{}, fmt.Errorf("invalid protection config JSON: %w", err)
 	}
@@ -1277,6 +1338,23 @@ func parseDynamicProtection(raw string) dynamic.ProtectionConfig {
 		ImageWatermarkPaths:       bs.ImageWatermarkPaths,
 		WatermarkText:             bs.WatermarkText,
 	}
+}
+
+// parseHTMLToMarkdownEnabled 从 bot_settings JSON 字符串解析 HTML→Markdown 协商开关。
+//
+// 开关与动态保护共用同一份配置载体，但不依赖 dynamic_protection_enabled：
+// HTML→Markdown 是响应表示协商，不属于动态保护能力，主开关关闭时仍可独立生效。
+func parseHTMLToMarkdownEnabled(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	var bs struct {
+		HTMLToMarkdownEnabled bool `json:"html_to_markdown_enabled"`
+	}
+	if err := json.Unmarshal([]byte(raw), &bs); err != nil {
+		return false
+	}
+	return bs.HTMLToMarkdownEnabled
 }
 
 // buildSiteDynamicProtection 基于全局动态保护配置，合并站点级覆盖字段。

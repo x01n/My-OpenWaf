@@ -5,25 +5,42 @@
 <cite>
 **本文档引用的文件**
 - [websocket.go](file://internal/dataplane/websocket.go)
+- [h2_websocket.go](file://internal/dataplane/h2_websocket.go)
 - [handler.go](file://internal/dataplane/handler.go)
-- [server.go](file://internal/app/server.go)
+- [handler_support.go](file://internal/dataplane/handler_support.go)
+- [request_ctx.go](file://internal/dataplane/request_ctx.go)
+- [access_log.go](file://internal/dataplane/access_log.go)
+- [logredact/sanitize.go](file://internal/dataplane/logredact/sanitize.go)
+- [reqid/reqid.go](file://internal/dataplane/reqid/reqid.go)
+- [stream/stream_close_notify.go](file://internal/dataplane/stream/stream_close_notify.go)
+- [metrics/metrics.go](file://internal/dataplane/metrics/metrics.go)
+- [inbound_conn.go](file://internal/dataplane/inbound_conn.go)
 - [engine.go](file://internal/core/engine/engine.go)
-- [metrics.go](file://internal/dataplane/metrics.go)
-- [proxy.go](file://internal/proxy/proxy.go)
+- [action.go](file://internal/core/action/action.go)
+- [pool.go](file://internal/core/pipeline/pool.go)
 - [drop.go](file://internal/waf/drop/drop.go)
 - [block.go](file://internal/waf/pages/block.go)
-- [lifecycle.go](file://internal/core/lifecycle/lifecycle.go)
+- [proxy.go](file://internal/proxy/proxy.go)
+- [transport/transport.go](file://internal/proxy/transport/transport.go)
+- [upstream/transport.go](file://internal/upstream/transport.go)
+- [upstream/health.go](file://internal/upstream/health.go)
+- [upstream/scheme_alias.go](file://internal/upstream/scheme_alias.go)
+- [security/outbound.go](file://internal/security/outbound.go)
+- [snapshot/snapshot.go](file://internal/snapshot/snapshot.go)
+- [store/site.go](file://internal/store/site.go)
+- [server.go](file://internal/app/server.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
-4. [架构概览](#架构概览)
+4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
 7. [性能考虑](#性能考虑)
-8. [故障排除指南](#故障排除指南)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
@@ -33,45 +50,58 @@
 
 ## 项目结构
 
-My-OpenWaf 采用模块化架构设计，WebSocket 功能主要分布在以下关键模块中：
+WebSocket 能力由两条转发路径与一组支撑件构成，模块清单如下：
+
+| 模块 | 路径 | 职责 | 核心符号 | 规模(行) | 测试 |
+|------|------|------|----------|:--------:|:----:|
+| 升级检测与隧道 | `internal/dataplane/websocket.go` | HTTP/1.1 升级识别、Raw TCP 双向透传与帧检视 | `ForwardWebSocket`（L127） | 722 | 有 |
+| h2 扩展 CONNECT | `internal/dataplane/h2_websocket.go` | RFC 8441 CONNECT 桥接与 h2c 帧层直通 | `ForwardH2ExtendedConnectWebSocket`（L62） | 1065 | 有 |
+| 分支注册 | `internal/dataplane/handler.go` | 转发分支顺序与入站流登记 | `registerH2WSInboundStream`（L1122） | 1280 | 有 |
+| 上游拨号 TLS | `internal/upstream/transport.go` | 客户端 TLS 配置与 legacy 套件补齐 | `HTTPSClientTLSConfigWithClientCert`（L27） | 194 | 有 |
+| 协议别名 | `internal/upstream/scheme_alias.go` | `grpc`/`tls`/`grpcs` 折叠为传输 scheme | `RPCUpstreamAliasForURL`（L43） | 56 | 有 |
+| 判决复用 | `internal/core/engine/engine.go` | 帧载荷复检复用同一引擎 | `Process`（L551） | 646 | 有 |
+| 连接丢弃 | `internal/waf/drop/drop.go` | Drop 动作直接关闭连接 | `DropExecutor`（L19） | 113 | 部分 |
 
 ```mermaid
 graph TB
 subgraph "应用层"
-Main[main.go]
-Server[server.go]
+Main["cmd/main.go"]
+Server["app/server.go"]
 end
 subgraph "数据平面"
-Handler[handler.go]
-WS[websocket.go]
-Proxy[proxy.go]
-Metrics[metrics.go]
+Handler["handler.go"]
+WS["websocket.go"]
+H2WS["h2_websocket.go"]
+UP["upstream/transport.go"]
+Metrics["metrics/metrics.go"]
 end
 subgraph "核心引擎"
-Engine[engine.go]
-Drop[drop.go]
-Block[block.go]
-end
-subgraph "生命周期管理"
-Life[lifecycle.go]
+Engine["core/engine/engine.go"]
+Drop["waf/drop/drop.go"]
+Block["waf/pages/block.go"]
 end
 Main --> Server
 Server --> Handler
 Handler --> WS
-Handler --> Proxy
-Handler --> Engine
-WS --> Drop
-WS --> Block
-Server --> Life
+Handler --> H2WS
+WS --> UP
+H2WS --> WS
+WS --> Engine
+Engine --> Drop
+Engine --> Block
+Handler --> Metrics
 ```
 
 **图表来源**
-- [server.go:488-526](file://internal/app/server.go#L488-L526)
-- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
+- [internal/app/server.go:1620-1645](file://internal/app/server.go#L1620-L1645)
+- [internal/dataplane/handler.go:1119-1132](file://internal/dataplane/handler.go#L1119-L1132)
+- [internal/dataplane/websocket.go:127-145](file://internal/dataplane/websocket.go#L127-L145)
+- [internal/dataplane/h2_websocket.go:62-69](file://internal/dataplane/h2_websocket.go#L62-L69)
 
 **章节来源**
-- [server.go:52-396](file://internal/app/server.go#L52-L396)
-- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
+- [internal/upstream/scheme_alias.go:21-56](file://internal/upstream/scheme_alias.go#L21-L56)
+- [internal/waf/drop/drop.go:19-45](file://internal/waf/drop/drop.go#L19-L45)
+- [internal/dataplane/metrics/metrics.go:13-46](file://internal/dataplane/metrics/metrics.go#L13-L46)
 
 ## 核心组件
 
@@ -91,7 +121,12 @@ IsWS --> End
 ```
 
 **图表来源**
-- [websocket.go:25-29](file://internal/dataplane/websocket.go#L25-L29)
+- [internal/dataplane/websocket.go:36-39](file://internal/dataplane/websocket.go#L36-L39)
+- [internal/dataplane/websocket.go:62-77](file://internal/dataplane/websocket.go#L62-L77)
+
+**章节来源**
+- [internal/dataplane/websocket.go:36-77](file://internal/dataplane/websocket.go#L36-L77)
+- [internal/dataplane/handler.go:1122-1131](file://internal/dataplane/handler.go#L1122-L1131)
 
 ### WebSocket 连接隧道转发器
 
@@ -99,36 +134,65 @@ WebSocket 连接隧道转发器实现了完整的双向数据传输机制：
 
 ```mermaid
 sequenceDiagram
-participant Client as 客户端
-participant Handler as 数据平面处理器
-participant WS as WebSocket转发器
-participant Upstream as 上游服务器
-participant TLS as TLS处理器
-Client->>Handler : HTTP 请求 (Upgrade : websocket)
-Handler->>WS : ForwardWebSocket()
-WS->>WS : 解析目标URL
-WS->>TLS : 建立TLS连接 (如需要)
-TLS-->>WS : 返回上游连接
-WS->>Upstream : 发送HTTP/1.1升级请求
-Upstream-->>WS : 升级成功响应
-WS->>Client : 完成握手
-par 双向数据传输
-Client->>WS : 客户端数据
-WS->>Upstream : 转发到上游
-Upstream->>WS : 上游数据
-WS->>Client : 转发到客户端
+participant Client as "客户端"
+participant Handler as "数据平面处理器"
+participant WS as "WebSocket 转发器"
+participant Dial as "拨号与 TLS"
+participant Upstream as "上游服务器"
+Client->>Handler : "HTTP 请求（Upgrade : websocket）"
+Handler->>WS : "ForwardWebSocket(ctx, reqID, c, rt, base, ip, eng)"
+WS->>WS : "normalizeWebSocketUpstreamTarget 改写 scheme"
+WS->>Dial : "wss 走 tlsDialWebSocketUpstream，否则 net.Dialer"
+Dial->>Upstream : "建立 TCP/TLS 连接（超时 10s）"
+WS->>Upstream : "写出重建后的 HTTP/1.1 升级请求"
+Upstream-->>WS : "101 响应头"
+WS->>WS : "sanitizeWebSocketUpgradeResponseHeaders 校验并剥逐跳头"
+WS-->>Client : "原样写回状态行与响应头"
+par 上游 → 客户端
+Upstream-->>WS : "原始字节"
+WS->>Client : "io.Copy 写回"
+and 客户端 → 上游（带检视）
+Client->>WS : "WS 帧"
+WS->>WS : "readWSFrame 解掩码并抽样送检"
+WS->>Upstream : "透传原始帧字节"
+and 保活
+WS->>Upstream : "每 30s 空载荷 ping"
 end
-WS->>WS : 等待任一方向完成
-WS-->>Handler : 连接关闭
+WS-->>Handler : "三路 copyErr 收齐后返回"
 ```
 
 **图表来源**
-- [websocket.go:32-93](file://internal/dataplane/websocket.go#L32-L93)
+- [internal/dataplane/websocket.go:92-108](file://internal/dataplane/websocket.go#L92-L108)
+- [internal/dataplane/websocket.go:127-222](file://internal/dataplane/websocket.go#L127-L222)
+- [internal/dataplane/websocket.go:269-274](file://internal/dataplane/websocket.go#L269-L274)
+- [internal/dataplane/websocket.go:344-397](file://internal/dataplane/websocket.go#L344-L397)
+- [internal/dataplane/websocket.go:452-497](file://internal/dataplane/websocket.go#L452-L497)
+
+握手与隧道建立的流程步骤如下：
+
+| 步 | 动作 | 执行位置 | 输入 | 输出 | 失败分支 | 可观测点 |
+|:--:|------|----------|------|------|----------|----------|
+| 1 | 升级识别 | `websocket.go:36` | Upgrade/Connection 头 | true/false | 走普通 HTTP | 转发分支日志 |
+| 2 | 目标 URL 归一 | `websocket.go:92` | 上游 base | ws/wss 目标 | h3 不归一 | debug 日志 |
+| 3 | 主机与端口推导 | `websocket.go:697` | 目标串 | host:port | 拨号错误 → 502 | 上游错误计数 |
+| 4 | 连接建立 | `websocket.go:140`、`websocket.go:269` | 目标 host | `net.Conn` | 超时/拒绝 | 错误返回 handler |
+| 5 | 握手头重建 | `websocket.go:276` | 原始头 + 转发参数 | 请求文本 | Host 模板解析失败 | 出站头 |
+| 6 | 响应头校验 | `websocket.go:344`、`websocket.go:639` | 101 响应 | 清洗后头 | 缺 Upgrade/Connection 报错 | 错误文本 |
+| 7 | 写回客户端 | `websocket.go:167-173` | 状态行与头 | 协议切换 | 写失败 | `X-Request-ID` |
+| 8 | 双向透传 | `websocket.go:197-214` | 两端连接 | 字节流 | EOF/连接重置 | copyErr 汇总 |
+| 9 | 帧检视送检 | `websocket.go:452`、`websocket.go:499` | 帧载荷 | 判决结果 | 命中即双端关闭 | 安全事件 |
+| 10 | 收尾 | `handler.go:1215` | 上游错误 | `Mark(base, err)` | — | 上游状态位 |
 
 **章节来源**
-- [websocket.go:25-127](file://internal/dataplane/websocket.go#L25-L127)
+- [internal/dataplane/websocket.go:36-108](file://internal/dataplane/websocket.go#L36-L108)
+- [internal/dataplane/websocket.go:127-222](file://internal/dataplane/websocket.go#L127-L222)
+- [internal/dataplane/websocket.go:276-397](file://internal/dataplane/websocket.go#L276-L397)
+- [internal/dataplane/websocket.go:452-521](file://internal/dataplane/websocket.go#L452-L521)
+- [internal/dataplane/websocket.go:639-712](file://internal/dataplane/websocket.go#L639-L712)
+- [internal/dataplane/handler.go:1215-1216](file://internal/dataplane/handler.go#L1215-L1216)
+- [internal/security/outbound.go:33-56](file://internal/security/outbound.go#L33-L56)
 
-## 架构概览
+## 架构总览
 
 My-OpenWaf 的 WebSocket 处理架构采用分层设计，确保了高性能和可扩展性：
 
@@ -151,7 +215,7 @@ BlockRenderer[阻断渲染器]
 end
 subgraph "存储层"
 Snapshot[快照管理]
-EventWriter[事件写入器]
+UnifiedWriter[统一写入器]
 end
 Hertz --> TLS
 TLS --> Handler
@@ -164,12 +228,13 @@ WSDetector --> BlockRenderer
 Engine --> DropExecutor
 Engine --> BlockRenderer
 Handler --> Snapshot
-Handler --> EventWriter
+Handler --> UnifiedWriter
 ```
 
 **图表来源**
-- [server.go:488-526](file://internal/app/server.go#L488-L526)
-- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
+- [internal/app/server.go:1513-1657](file://internal/app/server.go#L1513-L1657)
+- [internal/dataplane/handler.go:39-145](file://internal/dataplane/handler.go#L39-L145)
+- [internal/dataplane/handler.go:1101-1132](file://internal/dataplane/handler.go#L1101-L1132)
 
 ## 详细组件分析
 
@@ -179,62 +244,26 @@ WebSocket 协议升级是整个连接处理流程的关键起点。系统通过�
 
 #### 升级头部验证机制
 
-协议升级验证包含两个核心条件：
-1. **Upgrade 头部验证**：必须包含 "websocket" 值（大小写不敏感）
-2. **Connection 头部验证**：必须包含 "upgrade" 值（大小写不敏感）
+协议升级验证由两个条件组成，二者都必须成立才判为升级请求：
 
-```mermaid
-classDiagram
-class WebSocketDetector {
-+IsWebSocketUpgrade(c) bool
--validateUpgradeHeader() bool
--validateConnectionHeader() bool
-}
-class RequestContext {
-+GetHeader(name) string
-+Method() Method
-+Path() []byte
-+URI() URI
-+GetConn() net.Conn
-}
-class UpgradeValidator {
-+strings.EqualFold() bool
-+strings.Contains() bool
-+toLowerCase() string
-}
-WebSocketDetector --> RequestContext : 使用
-WebSocketDetector --> UpgradeValidator : 调用
-```
+| 条件 | 判定语义 | 实现 |
+|------|----------|------|
+| `Upgrade` 头 | 与 `websocket` **等值**（大小写无关），非「包含」 | `strings.EqualFold`（`websocket.go:37`） |
+| `Connection` 头 | 逗号分隔 token 列表中**含** `upgrade` | `headerContainsToken`（`websocket.go:62`） |
 
-**图表来源**
-- [websocket.go:25-29](file://internal/dataplane/websocket.go#L25-L29)
+`IsWebSocketUpgrade` 因此不会把 `Upgrade: websocket, foo` 这类畸形值判为升级。扩展 CONNECT 走另一条判定：方法必须是 `CONNECT` 且 `: protocol` 伪头非空（`websocket.go:46`）。
+
+**章节来源**
+- [internal/dataplane/websocket.go:36-77](file://internal/dataplane/websocket.go#L36-L77)
 
 #### 目标URL解析和转换
 
-WebSocket 目标URL的解析和转换是连接建立的重要步骤：
-
-```mermaid
-flowchart LR
-Input[输入URL] --> TrimRight[去除尾部斜杠]
-TrimRight --> ExtractPath[提取路径部分]
-ExtractPath --> CheckProtocol{检查协议前缀}
-CheckProtocol --> |http://| ConvertToWS[转换为 ws://]
-CheckProtocol --> |https://| ConvertToWSS[转换为 wss://]
-ConvertToWS --> BuildTarget[构建完整目标URL]
-ConvertToWSS --> BuildTarget
-BuildTarget --> ParseHost[解析主机名和端口]
-ParseHost --> AddPort{检查端口存在}
-AddPort --> |无端口| AddDefaultPort[添加默认端口]
-AddPort --> |有端口| UseExistingPort[使用现有端口]
-AddDefaultPort --> Output[输出目标URL]
-UseExistingPort --> Output
-```
-
-**图表来源**
-- [websocket.go:32-40](file://internal/dataplane/websocket.go#L32-L40)
+目标串由「上游 base 去尾斜杠 + 请求 path + query」拼成，再做 scheme 归一：`http→ws`、`https→wss`、`h2c→ws`，RPC 别名 `tls`/`grpcs`/`grpc+tls`/`grpc+https → wss`、`grpc → ws`。别名必须先于通用前缀替换处理，否则 `grpc+https://` 会被误改成 `grpc+wss://`。`h3` 明确排除在归一之外——QUIC 无法承载 HTTP/1.1 明文握手。主机名与端口由 `hostFromURL` 推导，缺省时 `wss` 补 443、`ws` 补 80（`websocket.go:92-108`、`websocket.go:697-711`）。
 
 **章节来源**
-- [websocket.go:25-95](file://internal/dataplane/websocket.go#L25-L95)
+- [internal/dataplane/websocket.go:92-133](file://internal/dataplane/websocket.go#L92-L133)
+- [internal/dataplane/websocket.go:697-722](file://internal/dataplane/websocket.go#L697-L722)
+- [internal/upstream/scheme_alias.go:21-30](file://internal/upstream/scheme_alias.go#L21-L30)
 
 ### 连接建立和握手验证
 
@@ -242,27 +271,12 @@ WebSocket 连接建立过程涉及多个验证步骤和安全检查：
 
 #### TLS 连接建立
 
-对于 wss:// 协议，系统会建立安全的 TLS 连接：
+对 `wss://` 目标，拨号分两条路径（`websocket.go:140-144`、`websocket.go:269-274`）：站点配置了上游客户端证书时，取按「SNI + 跳过校验 + 证书指纹」键控的 `tls.Config` 缓存并调用 `tls.DialWithDialer`；未配置时走 `upstream.TLSDialWithDialer`。两条路径都受 10 秒拨号超时约束，命中的缓存配置自带 32 容量的会话缓存，可走恢复握手。证书读取失败只降级为「不带客户端证书」并告警，不让站点整体不可用。
 
-```mermaid
-sequenceDiagram
-participant WS as WebSocket转发器
-participant Dialer as 网络拨号器
-participant TLS as TLS配置
-participant Upstream as 上游服务器
-WS->>Dialer : 创建带超时的拨号器
-WS->>TLS : 配置TLS参数
-TLS->>TLS : 设置ServerName
-TLS->>TLS : 设置InsecureSkipVerify
-TLS->>TLS : 设置最小TLS版本
-WS->>Dialer : tls.DialWithDialer()
-Dialer->>Upstream : 建立TCP连接
-Upstream-->>Dialer : 返回连接
-Dialer-->>WS : 返回TLS连接
-```
-
-**图表来源**
-- [websocket.go:41-54](file://internal/dataplane/websocket.go#L41-L54)
+**章节来源**
+- [internal/dataplane/websocket.go:135-148](file://internal/dataplane/websocket.go#L135-L148)
+- [internal/dataplane/websocket.go:224-274](file://internal/dataplane/websocket.go#L224-L274)
+- [internal/upstream/transport.go:14-40](file://internal/upstream/transport.go#L14-L40)
 
 #### HTTP/1.1 升级请求发送
 
@@ -270,21 +284,29 @@ Dialer-->>WS : 返回TLS连接
 
 ```mermaid
 flowchart TD
-CreateRequest[创建HTTP/1.1请求行] --> BuildHeaders[构建请求头]
-BuildHeaders --> SendRequest[发送升级请求]
-SendRequest --> WaitResponse[等待升级响应]
-WaitResponse --> CheckResponse{检查响应状态}
-CheckResponse --> |101 Switching Protocols| UpgradeSuccess[升级成功]
-CheckResponse --> |其他状态| UpgradeFailed[升级失败]
-UpgradeSuccess --> StartTunnel[开始隧道传输]
-UpgradeFailed --> HandleError[处理错误]
+CreateRequest["构造请求行 method + target + HTTP/1.1"] --> BuildHeaders["复制头并剔除 host/connection/te/trailer/transfer-encoding/x-forwarded-*"]
+BuildHeaders --> HostLine["写入解析后的 Host 与 Connection: Upgrade"]
+HostLine --> XFHDR["重建 X-Forwarded-For/Host/Proto"]
+XFHDR --> SendRequest["io.WriteString 发送"]
+SendRequest --> WaitResponse["readHTTPResponseHead 限 1 MiB"]
+WaitResponse --> CheckResponse{"状态是否 101？"}
+CheckResponse --> |否| UpgradeFailed["报错并结束"]
+CheckResponse --> |是| Sanitize["sanitize 校验 Upgrade 与 Connection"]
+Sanitize --> |缺失| UpgradeFailed
+Sanitize --> |通过| StartTunnel["写回客户端并开始隧道"]
+UpgradeFailed --> HandleError["返回 err 给 handler"]
 ```
 
 **图表来源**
-- [websocket.go:60-76](file://internal/dataplane/websocket.go#L60-L76)
+- [internal/dataplane/websocket.go:150-173](file://internal/dataplane/websocket.go#L150-L173)
+- [internal/dataplane/websocket.go:276-324](file://internal/dataplane/websocket.go#L276-L324)
+- [internal/dataplane/websocket.go:344-397](file://internal/dataplane/websocket.go#L344-L397)
+- [internal/dataplane/websocket.go:639-687](file://internal/dataplane/websocket.go#L639-L687)
 
 **章节来源**
-- [websocket.go:32-69](file://internal/dataplane/websocket.go#L32-L69)
+- [internal/dataplane/websocket.go:135-222](file://internal/dataplane/websocket.go#L135-L222)
+- [internal/dataplane/websocket.go:276-397](file://internal/dataplane/websocket.go#L276-L397)
+- [internal/dataplane/websocket.go:639-687](file://internal/dataplane/websocket.go#L639-L687)
 
 ### 双向数据传输机制
 
@@ -292,40 +314,47 @@ WebSocket 连接的核心特性是双向实时通信，系统通过 goroutine �
 
 #### 双向复制架构
 
+隧道由三路 goroutine 组成，而不是简单的双向 `io.Copy`：客户端字节先进入 `net.Pipe` 的一端，由检视协程逐帧解析后再写向上游，因此客户端方向可被 WAF 复检。
+
 ```mermaid
 graph TB
-subgraph "WebSocket隧道"
-ClientConn[客户端连接]
-UpstreamConn[上游连接]
-subgraph "数据传输通道"
-ClientToUpstream[客户端→上游]
-UpstreamToClient[上游→客户端]
-end
-ClientConn --> ClientToUpstream
-UpstreamConn --> UpstreamToClient
-ClientToUpstream --> UpstreamConn
-UpstreamToClient --> ClientConn
+subgraph "WebSocket 隧道"
+ClientConn["客户端连接"]
+UpstreamConn["上游连接"]
+Pipe["net.Pipe 分流端"]
+Inspector["帧检视协程"]
 end
 subgraph "同步机制"
-DoneChan[完成信号通道]
-ClientToUpstream -.-> DoneChan
-UpstreamToClient -.-> DoneChan
+CopyErr["copyErr 缓冲通道（容量 3）"]
+Ticker["30s ping 定时器"]
 end
+ClientConn -->|"io.Copy → pipeUpstream"| Pipe
+Pipe --> Inspector
+Inspector -->|"原始帧字节"| UpstreamConn
+UpstreamConn -->|"io.Copy ← upReader"| ClientConn
+Ticker --> UpstreamConn
+Pipe -.-> CopyErr
+Inspector -.-> CopyErr
+UpstreamConn -.-> CopyErr
 ```
 
 **图表来源**
-- [websocket.go:78-85](file://internal/dataplane/websocket.go#L78-L85)
+- [internal/dataplane/websocket.go:178-195](file://internal/dataplane/websocket.go#L178-L195)
+- [internal/dataplane/websocket.go:197-221](file://internal/dataplane/websocket.go#L197-L221)
+- [internal/dataplane/websocket.go:452-497](file://internal/dataplane/websocket.go#L452-L497)
 
 #### 数据传输优化
 
-系统采用高效的 io.Copy 实现零拷贝数据传输，同时使用缓冲区优化内存使用：
-
-- **缓冲区大小**：4KB 缓冲区进行批量读取
-- **并发处理**：两个独立 goroutine 并行处理双向数据流
-- **完成同步**：使用带缓冲的 channel 确保优雅关闭
+- **抽样上限**：帧载荷最多缓冲 4096 字节送检（`wsInspectFrameLimit`），超出部分用 `io.CopyN` 直补，不做二次拷贝
+- **并发处理**：三路 goroutine（客户端→pipe、上游→客户端、pipe→上游检视），`copyErr` 容量 3
+- **完成同步**：`for range 3 { <-copyErr }` 收齐后才返回，任一方向出错即关闭对应连接
+- **保活合规**：向下游发的 ping 为空载荷且带掩码位（RFC 6455 要求客户端侧掩码），对端 ping 由检视协程原样回 pong
 
 **章节来源**
-- [websocket.go:62-93](file://internal/dataplane/websocket.go#L62-L93)
+- [internal/dataplane/websocket.go:32-33](file://internal/dataplane/websocket.go#L32-L33)
+- [internal/dataplane/websocket.go:178-221](file://internal/dataplane/websocket.go#L178-L221)
+- [internal/dataplane/websocket.go:452-497](file://internal/dataplane/websocket.go#L452-L497)
+- [internal/dataplane/websocket.go:531-637](file://internal/dataplane/websocket.go#L531-L637)
 
 ### 连接生命周期管理
 
@@ -337,141 +366,148 @@ WebSocket 连接的生命周期管理包括连接建立、状态维护和异常�
 
 ```mermaid
 stateDiagram-v2
-[*] --> Established
-Established --> Active : 开始数据传输
-Active --> Closing : 任一方向关闭
-Closing --> Closed : 双向完成
-Closed --> [*]
-Active --> Error : 发生错误
-Error --> Closing : 触发清理
-```
-
-#### 异常断开恢复
-
-当连接异常断开时，系统提供自动恢复机制：
-
-- **错误检测**：通过 io.Copy 返回的错误判断连接状态
-- **资源清理**：确保上游连接正确关闭
-- **状态同步**：使用完成信号确保所有传输通道正确终止
-
-**章节来源**
-- [websocket.go:78-93](file://internal/dataplane/websocket.go#L78-L93)
-
-### 与 WAF 引擎的集成
-
-WebSocket 连接处理与 WAF 引擎深度集成，提供实时威胁检测和动态阻断能力：
-
-#### WAF 规则链处理
-
-```mermaid
-flowchart LR
-Request[WebSocket请求] --> SiteResolution[站点解析]
-SiteResolution --> MaintenanceCheck{维护模式检查}
-MaintenanceCheck --> |启用| MaintenanceResponse[维护响应]
-MaintenanceCheck --> |禁用| WAFProcessing[WAF处理]
-WAFProcessing --> IPReputation[IP信誉检查]
-IPReputation --> BotDetection[机器人检测]
-BotDetection --> RateLimiting[速率限制]
-RateLimiting --> OWASP[OWASP规则]
-OWASP --> CVEDetection[CVE检测]
-CVEDetection --> SignatureMatching[签名匹配]
-SignatureMatching --> CustomRules[自定义规则]
-CustomRules --> Decision{决策}
-Decision --> |允许| Forward[转发到上游]
-Decision --> |阻断| Block[阻断响应]
-Decision --> |丢弃| Drop[TCP丢弃]
+[*] --> 待升级 : 收到 Upgrade 请求
+待升级 --> 拨号中 : 归一目标并拨号
+拨号中 --> 握手失败 : 超时或非 101
+待升级 --> 握手失败 : 头校验不通过
+握手失败 --> [*] : 返回错误并 Mark
+拨号中 --> 已建立 : 收到并校验 101
+已建立 --> 透传中 : 三路协程启动
+透传中 --> 送检阻断 : 帧载荷命中终止动作
+透传中 --> 关闭中 : 任一端 EOF 或重置
+送检阻断 --> 关闭中 : 双端 Close
+关闭中 --> 已关闭 : copyErr 收齐三路
+已关闭 --> [*]
 ```
 
 **图表来源**
-- [engine.go:161-197](file://internal/core/engine/engine.go#L161-L197)
+- [internal/dataplane/websocket.go:127-222](file://internal/dataplane/websocket.go#L127-L222)
+- [internal/dataplane/websocket.go:452-497](file://internal/dataplane/websocket.go#L452-L497)
+- [internal/dataplane/websocket.go:639-661](file://internal/dataplane/websocket.go#L639-L661)
+
+#### 异常断开恢复
+
+当连接异常断开时，系统的处理策略是「显式关闭 + 幂等收尾」，不做自动重连：
+
+- **错误检测**：`io.Copy` 返回错误，`isNetClosed` 过滤 `closed`/`reset by peer` 视为正常结束
+- **资源清理**：`upConn`、`pipeClient`、`pipeUpstream`、`clientConn` 四处 Close 分散在各协程，均可重复调用
+- **状态同步**：`copyErr` 容量 3，主协程收齐三次结果后才返回，避免遗留 goroutine
+
+**章节来源**
+- [internal/dataplane/websocket.go:197-222](file://internal/dataplane/websocket.go#L197-L222)
+- [internal/dataplane/websocket.go:689-695](file://internal/dataplane/websocket.go#L689-L695)
+
+### RFC 8441 扩展 CONNECT 路径
+
+HTTP/2 与 h2c 上的 WebSocket 不走 `Upgrade` 头，而是 `CONNECT` 方法加 `: protocol` 伪头。`IsH2ExtendedWebSocketConnect` 据此识别（`websocket.go:46`），`registerH2WSInboundStream` 在进入转发分支前把入站流端点登记到请求上下文（`handler.go:1122`）。
+
+两条子路径由上游 scheme 决定：
+
+| 上游形态 | 判定 | 路径 | 握手超时 |
+|----------|------|------|:--------:|
+| `h2c://` 或 `grpc://` 别名 | `IsH2WebSocketDirectUpstream`（L33） | 帧层直通，不降级为 HTTP/1.1 | 5 秒 |
+| `http(s)://`、`tls://`、`grpcs://` 等 | 同上为 false | 桥接为 HTTP/1.1 升级隧道 | 5 秒 |
+
+```mermaid
+flowchart TD
+A["CONNECT + :protocol=websocket"] --> B{"registerH2WSInboundStream 已登记入站流？"}
+B --> |否| E["返回错误：流未注册"]
+B --> |是| C{"IsH2WebSocketDirectUpstream(base)？"}
+C --> |是| D["forwardH2ExtendedConnectDirect：帧层直通"]
+C --> |否| F["bridgeH2ExtendedConnectToWebSocket：转 h1 握手"]
+D --> G["双向 DATA 帧透传"]
+F --> H["复用 WS 隧道与帧检视"]
+G --> I["END_STREAM 或 RESET 结束"]
+H --> I
+```
+
+**图表来源**
+- [internal/dataplane/h2_websocket.go:33-40](file://internal/dataplane/h2_websocket.go#L33-L40)
+- [internal/dataplane/h2_websocket.go:62-69](file://internal/dataplane/h2_websocket.go#L62-L69)
+- [internal/dataplane/h2_websocket.go:84-120](file://internal/dataplane/h2_websocket.go#L84-L120)
+- [internal/dataplane/websocket.go:46-59](file://internal/dataplane/websocket.go#L46-L59)
+- [internal/dataplane/handler.go:1122-1127](file://internal/dataplane/handler.go#L1122-L1127)
+
+**章节来源**
+- [internal/dataplane/h2_websocket.go:27-31](file://internal/dataplane/h2_websocket.go#L27-L31)
+- [internal/dataplane/h2_websocket.go:41-59](file://internal/dataplane/h2_websocket.go#L41-L59)
+- [internal/upstream/scheme_alias.go:21-30](file://internal/upstream/scheme_alias.go#L21-L30)
+
+### 与 WAF 引擎的集成
+
+WebSocket 连接处理与 WAF 引擎共用同一条阶段链：升级请求先经站点解析与维护检查，再由 `Engine.Process` 走完 IP 信誉、防重放、ACL、OWASP、CVE、机器人、限流、签名与自定义阶段；放行后建立隧道，隧道内每个文本/二进制帧再单独送检一次（阶段顺序详见[请求处理流程](请求处理流程.md)）。
 
 #### 实时威胁检测
 
-WAF 引擎在 WebSocket 连接建立过程中执行多阶段安全检查：
+WAF 引擎在 WebSocket 帧层面复用同一套阶段链：`inspectWebSocketPayload` 从 `sync.Pool` 取 `RequestCtx`，把帧载荷作为 Body、内容类型置为 `application/octet-stream`，并回填请求 ID、站点、客户端 IP 与 TLS 指纹后调用 `eng.Process`（`websocket.go:499-521`）。命中终止动作时立刻关闭两端连接，不写业务响应。
 
-1. **IP信誉检查**：快速识别已知恶意IP
-2. **机器人检测**：基于行为特征识别自动化工具
-3. **速率限制**：防止滥用和DDoS攻击
-4. **OWASP规则**：应用标准安全规则集
-5. **CVE检测**：识别已知漏洞利用尝试
-6. **自定义规则**：执行站点特定的安全策略
+| 复检字段 | 来源 | 说明 |
+|----------|------|------|
+| `Body` | WS 帧载荷 | 仅 opcode 0x1/0x2 且非空时送检 |
+| `ContentType` | 固定 `application/octet-stream` | 避免误按表单解析 |
+| `Path` / `RawQuery` | 握手请求 | 与升级请求一致 |
+| `TLS` | 请求上下文指纹 | 由 tlsfp 监听器注入 |
+| `AntiReplayTTL` | 站点配置 | 与其它请求路径同源 |
 
 **章节来源**
-- [engine.go:161-197](file://internal/core/engine/engine.go#L161-L197)
+- [internal/dataplane/websocket.go:463-470](file://internal/dataplane/websocket.go#L463-L470)
+- [internal/dataplane/websocket.go:499-521](file://internal/dataplane/websocket.go#L499-L521)
+- [internal/core/engine/engine.go:551-573](file://internal/core/engine/engine.go#L551-L573)
+- [internal/core/pipeline/pool.go:20-60](file://internal/core/pipeline/pool.go#L20-L60)
+- [internal/waf/drop/drop.go:19-45](file://internal/waf/drop/drop.go#L19-L45)
 
 ### 性能优化策略
 
 系统采用了多种性能优化技术来确保 WebSocket 连接的高效运行：
 
-#### 连接池管理
+#### 上游 TLS 配置缓存
+
+WebSocket 走 Raw TCP 隧道，不经过 `http.Transport` 连接池；其复用点是按「SNI + 跳过校验 + 客户端证书指纹」键控的 `tls.Config` 缓存，命中的配置自带 32 容量的会话缓存。
 
 ```mermaid
 classDiagram
-class TransportPool {
-+MaxIdleConns int
-+MaxIdleConnsPerHost int
-+IdleConnTimeout time.Duration
-+ForceAttemptHTTP2 bool
-+TLSClientConfig *tls.Config
-+Get(key) *http.Transport
-+Put(key, transport)
+class wsUpstreamTLSConfigMap {
++map~wsUpstreamTLSConfigKey,tls.Config~ 缓存
++RWMutex 保护
++按指纹键复用
 }
-class TransportKey {
-+tlsServerName string
-+tlsSkipVerify bool
-+isHTTPS bool
+class wsUpstreamTLSConfigKey {
++string serverName
++bool skipVerify
++string clientCertFP
 }
-TransportPool --> TransportKey : 使用
+class tlsConfig {
++string ServerName
++bool InsecureSkipVerify
++Certificates mTLS
++LRUClientSessionCache 32
+}
+class SharedUpstreamTransport {
++MaxIdleConns 256
++MaxIdleConnsPerHost 32
++IdleConnTimeout 30s
++MaxConnsPerHost 256
+}
+wsUpstreamTLSConfigMap --> wsUpstreamTLSConfigKey : 键控
+wsUpstreamTLSConfigMap --> tlsConfig : 值
+SharedUpstreamTransport ..> tlsConfig : "仅 HTTP/SSE 路径共用 TLS 语义"
 ```
 
 **图表来源**
-- [proxy.go:35-83](file://internal/proxy/proxy.go#L35-L83)
+- [internal/dataplane/websocket.go:224-267](file://internal/dataplane/websocket.go#L224-L267)
+- [internal/upstream/transport.go:14-40](file://internal/upstream/transport.go#L14-L40)
+- [internal/proxy/transport/transport.go:137-205](file://internal/proxy/transport/transport.go#L137-L205)
 
 #### 指标监控和统计
 
-系统提供全面的性能指标收集：
-
-```mermaid
-classDiagram
-class Metrics {
-+RequestsTotal atomic.Int64
-+Status2xx atomic.Int64
-+Status4xx atomic.Int64
-+Status5xx atomic.Int64
-+WAFBlocks atomic.Int64
-+WAFObserves atomic.Int64
-+BuiltinHits atomic.Int64
-+RecordRequest()
-+RecordStatus(code)
-+RecordWAFBlock()
-+RecordWAFObserve()
-+RecordBuiltinHit()
-+QPS(windowSec) float64
-+Summary() Summary
-}
-class Summary {
-+QPS1s float64
-+QPS5s float64
-+ReqTotal int64
-+Status2xx int64
-+Status4xx int64
-+Status5xx int64
-+WAFBlocks int64
-+WAFObserves int64
-+BuiltinHits int64
-+UptimeSec int64
-+UniqueIPs int64
-+AttackIPs int64
-}
-Metrics --> Summary : 生成
-```
-
-**图表来源**
-- [metrics.go:8-133](file://internal/dataplane/metrics.go#L8-L133)
+指标只覆盖「请求与状态码」两个维度：隧道建立计入 `RecordRequest`，握手后的最终状态计入 `RecordStatus`，帧复检命中计入 `RecordWAFBlock`。数据面计数器的完整清单见[性能监控与调优](性能监控与调优.md)。
 
 **章节来源**
-- [proxy.go:35-83](file://internal/proxy/proxy.go#L35-L83)
-- [metrics.go:8-133](file://internal/dataplane/metrics.go#L8-L133)
+- [internal/dataplane/websocket.go:224-267](file://internal/dataplane/websocket.go#L224-L267)
+- [internal/dataplane/metrics/metrics.go:13-46](file://internal/dataplane/metrics/metrics.go#L13-L46)
+- [internal/dataplane/metrics/metrics.go:48-161](file://internal/dataplane/metrics/metrics.go#L48-L161)
+- [internal/proxy/transport/transport.go:153-195](file://internal/proxy/transport/transport.go#L153-L195)
+- [internal/upstream/health.go:40-56](file://internal/upstream/health.go#L40-L56)
 
 ## 依赖关系分析
 
@@ -513,20 +549,23 @@ Dataplane --> HandlerInterface
 ```
 
 **图表来源**
-- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
-- [server.go:488-526](file://internal/app/server.go#L488-L526)
+- [internal/dataplane/handler.go:14-36](file://internal/dataplane/handler.go#L14-L36)
+- [internal/dataplane/websocket.go:20-30](file://internal/dataplane/websocket.go#L20-L30)
+- [internal/dataplane/h2_websocket.go:19-25](file://internal/dataplane/h2_websocket.go#L19-L25)
+- [internal/app/server.go:1596-1616](file://internal/app/server.go#L1596-L1616)
 
 ### 关键依赖关系
 
-1. **Hertz 框架集成**：WebSocket 处理完全基于 Hertz 的中间件机制
-2. **TLS 终止支持**：内置 TLS 证书管理和安全连接建立
-3. **WAF 引擎集成**：实时威胁检测和动态阻断能力
-4. **连接池优化**：HTTP 传输连接复用减少资源消耗
-5. **指标监控**：完整的性能指标收集和统计
+1. **Hertz 框架集成**：升级判定与原始连接（`GetConn`）都来自 Hertz 请求上下文
+2. **TLS 终止支持**：入站 TLS 由监听器承担，出站 TLS 由 `wsUpstreamTLSConfig` 承担
+3. **WAF 引擎集成**：帧载荷复检复用同一 `Engine.Process` 与上下文池
+4. **协议别名收敛**：`grpc`/`tls`/`grpcs` 等前缀在归一时折叠为传输 scheme，避免误判
+5. **指标监控**：仅统计请求与状态码，隧道字节量不进入计数器
 
 **章节来源**
-- [handler.go:69-744](file://internal/dataplane/handler.go#L69-L744)
-- [server.go:488-526](file://internal/app/server.go#L488-L526)
+- [internal/dataplane/handler.go:1122-1131](file://internal/dataplane/handler.go#L1122-L1131)
+- [internal/upstream/scheme_alias.go:21-56](file://internal/upstream/scheme_alias.go#L21-L56)
+- [internal/dataplane/websocket.go:119-124](file://internal/dataplane/websocket.go#L119-L124)
 
 ## 性能考虑
 
@@ -534,192 +573,162 @@ Dataplane --> HandlerInterface
 
 系统采用多种技术优化内存使用：
 
-- **对象池**：请求上下文使用对象池减少GC压力
-- **缓冲区复用**：固定大小缓冲区避免频繁分配
-- **连接复用**：HTTP 传输连接池避免重复建立连接
+- **对象池**：帧复检的 `RequestCtx` 来自 `sync.Pool`，`defer ReleaseCtx` 保证归还
+- **抽样缓冲**：帧头 + 至多 4096 字节进入一次连续分配，剩余载荷用 `io.CopyN` 直补，避免整帧驻留
+- **配置缓存**：上游 TLS 配置按指纹键缓存，跨站点共享同一份 `tls.Config`
+
+**章节来源**
+- [internal/core/pipeline/pool.go:11-60](file://internal/core/pipeline/pool.go#L11-L60)
+- [internal/dataplane/websocket.go:489-496](file://internal/dataplane/websocket.go#L489-L496)
+- [internal/dataplane/websocket.go:567-637](file://internal/dataplane/websocket.go#L567-L637)
 
 ### 并发处理优化
 
 ```mermaid
 flowchart TD
-RequestArrival[请求到达] --> GoroutineCreation[创建goroutine]
-GoroutineCreation --> DataCopy[数据复制操作]
-DataCopy --> ChannelSync[通道同步]
-ChannelSync --> ResourceCleanup[资源清理]
-ResourceCleanup --> GoroutineExit[goroutine退出]
+RequestArrival["升级请求到达"] --> Dial["拨号并写握手（主协程）"]
+Dial --> Spawn["启动三路协程"]
+Spawn --> CopyUp["协程一：客户端 → pipe"]
+Spawn --> CopyDown["协程二：上游 → 客户端"]
+Spawn --> Inspect["协程三：pipe → 检视 → 上游"]
+CopyUp --> ChannelSync["copyErr 汇总（容量 3）"]
+CopyDown --> ChannelSync
+Inspect --> ChannelSync
+ChannelSync --> ResourceCleanup["defer 关闭 pipe 与上游连接"]
+ResourceCleanup --> GoroutineExit["协程全部退出"]
 subgraph "并发控制"
-MaxGoroutines[最大并发数]
-ChannelBuffer[通道缓冲]
-ContextCancellation[上下文取消]
+PingTicker["30s ping 定时器"]
+CtxDone["ctx.Done 取消传播"]
+CloseNotify["stream 绑定取消信号"]
 end
-GoroutineCreation --> MaxGoroutines
-ChannelSync --> ChannelBuffer
-ResourceCleanup --> ContextCancellation
+Inspect -.-> CtxDone
+PingTicker -.-> CtxDone
+CloseNotify -.-> CtxDone
 ```
+
+**图表来源**
+- [internal/dataplane/websocket.go:178-221](file://internal/dataplane/websocket.go#L178-L221)
+- [internal/dataplane/handler.go:49-62](file://internal/dataplane/handler.go#L49-L62)
+- [internal/dataplane/stream/stream_close_notify.go:28-50](file://internal/dataplane/stream/stream_close_notify.go#L28-L50)
+
+**章节来源**
+- [internal/dataplane/websocket.go:178-221](file://internal/dataplane/websocket.go#L178-L221)
+- [internal/dataplane/stream/stream_close_notify.go:21-50](file://internal/dataplane/stream/stream_close_notify.go#L21-L50)
 
 ### 监控和告警
 
 系统提供多层次的监控能力：
 
-- **实时指标**：QPS、状态码分布、WAF拦截统计
-- **连接状态**：活跃连接数、连接池使用情况
-- **性能指标**：延迟、吞吐量、错误率
-- **安全事件**：威胁检测、阻断统计
+- **实时指标**：QPS 与状态码分布来自数据面计数器，隧道内部字节量不单独计量
+- **连接状态**：上游健康位（`Healthy`、`FailCount`、`LastFailureKind`）由 `Mark` 更新
+- **判决可观测**：帧命中产生安全事件，阶段与规则 ID 可回溯到具体 WS 载荷
+- **请求追踪**：`X-Request-ID` 贯穿握手与后续事件，便于跨日志关联
 
-## 故障排除指南
+**章节来源**
+- [internal/upstream/health.go:40-56](file://internal/upstream/health.go#L40-L56)
+- [internal/dataplane/metrics/metrics.go:13-46](file://internal/dataplane/metrics/metrics.go#L13-L46)
+- [internal/dataplane/reqid/reqid.go:36-53](file://internal/dataplane/reqid/reqid.go#L36-L53)
+- [internal/dataplane/access_log.go:106-182](file://internal/dataplane/access_log.go#L106-L182)
+
+## 故障排查指南
 
 ### 常见问题诊断
 
-#### WebSocket 握手失败
+握手失败、异常断开与吞吐问题都可通过同一张表定位，判定点均为可grep的代码位置：
 
-**症状**：客户端收到非 101 状态码响应
-
-**可能原因**：
-1. **协议不匹配**：目标URL协议与实际不符
-2. **TLS配置错误**：上游服务器证书验证失败
-3. **网络连接超时**：上游服务器不可达
-4. **头部格式错误**：Upgrade 或 Connection 头部格式不正确
-
-**解决方法**：
-1. 检查目标URL协议前缀
-2. 验证TLS配置参数
-3. 确认网络连通性
-4. 验证请求头部格式
-
-#### 连接异常断开
-
-**症状**：WebSocket 连接在建立后很快断开
-
-**可能原因**：
-1. **上游服务器拒绝**：上游服务器不支持WebSocket
-2. **防火墙阻断**：中间设备阻止WebSocket升级
-3. **超时设置过短**：连接建立超时时间不足
-4. **资源限制**：系统资源不足导致连接被回收
-
-**解决方法**：
-1. 检查上游服务器WebSocket支持
-2. 验证防火墙和代理配置
-3. 调整超时参数
-4. 监控系统资源使用
-
-#### 性能问题
-
-**症状**：WebSocket 连接延迟高或吞吐量低
-
-**可能原因**：
-1. **连接池耗尽**：上游连接池配置过小
-2. **CPU瓶颈**：大量并发连接导致CPU负载过高
-3. **内存泄漏**：长时间运行后内存使用持续增长
-4. **网络拥塞**：上游网络带宽不足
-
-**解决方法**：
-1. 调整连接池参数
-2. 优化并发处理逻辑
-3. 检查内存使用情况
-4. 扩展网络带宽
+| 症状 | 可能原因 | 判定点 | 处置 |
+|------|----------|--------|------|
+| 非 101 响应 | 上游不支持 WS、协议前缀错、中间层阻止升级 | `readHTTPResponseHead`（`websocket.go:639`） | 核对 base scheme 与上游能力 |
+| 握手报错缺 Upgrade/Connection | 上游响应头被改写 | `sanitizeWebSocketUpgradeResponseHeaders`（`websocket.go:344`） | 让上游原样回两值 |
+| wss 握手失败 | SNI 或证书校验配置不符 | `wsUpstreamTLSConfig`（`websocket.go:235`） | 校正 `upstream_tls_server_name` |
+| 建立后立刻断 | 帧命中终止动作 | `inspectWebSocketPayload`（`websocket.go:499`） | 查安全事件的阶段与规则 ID |
+| 长空闲后被切 | NAT/防火墙空闲超时 | 30s ping 是否被回（`websocket.go:179`） | 调中间层超时 |
+| 拨号超时 | 上游不可达、端口缺省错 | `hostFromURL` + 10s 超时（`websocket.go:135`） | 确认端口与健康位 |
+| 延迟高/吞吐低 | 并发连接过多、送检开销 | `wsInspectFrameLimit`、CPU | 降低送检比例或扩容 |
+| 反复失败的上游 | 未进入探活摘除 | `Pool.Mark`（`health.go:470`） | 结合 `FailCount` 判断 |
+| h2 场景无 WS 流 | ALPN 未含 h2 | `IsH2ExtendedWebSocketConnect`（`websocket.go:46`） | 站点 ALPN 补 `h2` |
 
 **章节来源**
-- [websocket.go:41-54](file://internal/dataplane/websocket.go#L41-L54)
-- [drop.go:45-63](file://internal/waf/drop/drop.go#L45-L63)
+- [internal/dataplane/websocket.go:135-148](file://internal/dataplane/websocket.go#L135-L148)
+- [internal/dataplane/websocket.go:344-397](file://internal/dataplane/websocket.go#L344-L397)
+- [internal/dataplane/websocket.go:499-521](file://internal/dataplane/websocket.go#L499-L521)
+- [internal/dataplane/websocket.go:639-687](file://internal/dataplane/websocket.go#L639-L687)
+- [internal/waf/drop/drop.go:19-45](file://internal/waf/drop/drop.go#L19-L45)
+- [internal/upstream/health.go:460-514](file://internal/upstream/health.go#L460-L514)
 
 ## 结论
 
-My-OpenWaf 的 WebSocket 连接处理系统展现了现代 Web 安全网关的设计理念。通过模块化架构、深度 WAF 集成和性能优化，系统能够提供安全、可靠且高性能的 WebSocket 服务。
+My-OpenWaf 的 WebSocket 连接处理把「握手代理 + 帧级复检 + 双向透传」收敛在一个不依赖 `http.Transport` 的 Raw TCP 隧道里，HTTP/2 侧再用扩展 CONNECT 路径保持同一套复检语义。
 
 ### 主要优势
 
-1. **安全性**：完整的 WAF 集成提供实时威胁检测
-2. **性能**：连接池、对象池等优化技术确保高吞吐量
-3. **可靠性**：优雅的错误处理和异常恢复机制
-4. **可观测性**：全面的指标收集和监控能力
-5. **可扩展性**：模块化设计支持功能扩展和定制
+1. **安全性**：帧载荷复用同一引擎阶段链，命中即双端关闭
+2. **性能**：抽样送检限制驻留内存，配置与上下文双向复用
+3. **可靠性**：三路协程收齐后才返回，错误按 `isNetClosed` 归一
+4. **可观测性**：`X-Request-ID` 与上游健康位可回溯
+5. **兼容性**：`ws`/`wss`/h2c/gRPC 别名统一归一，h3 明确排除
+
+[本节为总结，无需特定文件来源]
 
 ### 技术特色
 
-- **协议透明**：完全支持标准 WebSocket 协议
-- **TLS 终止**：内置 TLS 支持和证书管理
-- **实时监控**：详细的性能和安全指标
-- **动态配置**：支持热重载和运行时配置更新
-- **多租户支持**：每个站点独立的配置和策略
+- **协议透明**：帧字节原样透传，仅在客户端方向做抽样解析
+- **保活双向**：上游方向定时 ping，客户端方向 ping 回 pong
+- **握手严格校验**：非 101、缺 `Upgrade` 或缺 `Connection: Upgrade` 均直接失败
+- **扩展 CONNECT 分流**：h2c 上游走帧层直通，其余降级桥接
+- **多站点隔离**：每站点独立上游 TLS 与转发参数，缓存按指纹键共享
 
-该系统为构建企业级 WebSocket 应用提供了坚实的技术基础，既满足了安全需求，又保证了高性能和良好的用户体验。
+[本节为总结，无需特定文件来源]
 
 ## 附录
 
-### WebSocket 服务配置示例
+### WebSocket 相关站点字段
+WebSocket 转发没有独立配置文件，全部复用站点与监听字段：
 
-#### 基本配置
-```yaml
-listeners:
-  - bind: "0.0.0.0:8080"
-    tls_enabled: false
-    upstream_urls:
-      - "http://localhost:3000"
-    upstream_host: "backend.example.com"
-    preserve_original_host: true
+| 字段 | JSON 名 | 作用域 | 与 WS 的关系 | 位置 |
+|------|---------|--------|--------------|------|
+| UpstreamURLs | `upstream_urls` | 站点 | 逗号分隔的 base 列表，逐个归一为 ws/wss | `store/site.go:45` |
+| UpstreamHost | `upstream_host` | 站点 | 握手 `Host` 头，支持 Go 模板 | `store/site.go:46` |
+| PreserveOriginalHost | `preserve_original_host` | 站点 | 决定是否写 `X-Forwarded-Host` | `store/site.go:95` |
+| UpstreamTLSServerName | `upstream_tls_server_name` | 站点 | wss 拨号 SNI | `store/site.go:99` |
+| UpstreamTLSSkipVerify | `upstream_tls_skip_verify` | 站点 | 跳过服务端校验 | `store/site.go:98` |
+| 客户端证书 | `upstream_tls_client_cert_pem` | 站点 | mTLS，指纹入缓存键 | `store/site.go:104` |
+| TLSEnabled | `tls_enabled` | 监听 | 决定入站是否 wss | `store/site.go:257` |
+| Network | `network` | 监听 | tcp/tcp4/tcp6 | `store/site.go:256` |
+| ALPN | `alpn` | 站点 | 决定入站能否用 h2 扩展 CONNECT | `store/site.go:57` |
 
-  - bind: "0.0.0.0:8443"
-    tls_enabled: true
-    tls_cert_file: "/etc/certs/server.crt"
-    tls_key_file: "/etc/certs/server.key"
-    upstream_urls:
-      - "https://localhost:3001"
-    upstream_host: "{{.Host}}.internal"
-```
+**章节来源**
+- [internal/store/site.go:45-110](file://internal/store/site.go#L45-L110)
+- [internal/store/site.go:247-263](file://internal/store/site.go#L247-L263)
+- [internal/dataplane/websocket.go:276-324](file://internal/dataplane/websocket.go#L276-L324)
+- [internal/dataplane/websocket.go:224-267](file://internal/dataplane/websocket.go#L224-L267)
 
-#### 高级配置
-```yaml
-protection:
-  maintenance_global_enabled: false
-  request_rate_limit_enabled: true
-  request_rate_limit_max: 1000
-  request_rate_limit_window: 60
-  error_rate_limit_enabled: true
-  error_rate_limit_max: 100
-  error_rate_limit_window: 60
+### 关键常量速查
+| 常量 | 取值 | 位置 | 作用 |
+|------|:----:|------|------|
+| `wsInspectFrameLimit` | 4096 B | `websocket.go:32` | 单帧送检载荷上限 |
+| `websocketUpstreamResponseHeaderLimit` | 1 MiB | `websocket.go:33` | 上游响应头读取上限 |
+| 上游拨号超时 | 10 s | `websocket.go:135` | `net.Dialer.Timeout` |
+| 保活 ping 间隔 | 30 s | `websocket.go:179` | 上游方向定时器 |
+| `copyErr` 容量 | 3 | `websocket.go:201` | 三路协程结果 |
+| 会话缓存容量 | 32 | `websocket.go:258` | 上游 TLS LRU |
+| h2 桥接响应头上限 | 1 MiB | `h2_websocket.go:27` | 扩展 CONNECT 桥 |
+| h2 直通握手超时 | 5 s | `h2_websocket.go:29` | 帧层直通 |
 
-waf_rules:
-  - phase: "ip_reputation"
-    enabled: true
-    action: "intercept"
-  - phase: "bot_detection"
-    enabled: true
-    action: "challenge"
-  - phase: "rate_limiting"
-    enabled: true
-    action: "intercept"
-```
+**章节来源**
+- [internal/dataplane/websocket.go:32-33](file://internal/dataplane/websocket.go#L32-L33)
+- [internal/dataplane/websocket.go:135-201](file://internal/dataplane/websocket.go#L135-L201)
+- [internal/dataplane/websocket.go:255-262](file://internal/dataplane/websocket.go#L255-L262)
+- [internal/dataplane/h2_websocket.go:27-31](file://internal/dataplane/h2_websocket.go#L27-L31)
 
-### 连接调试方法
+### 排障观测口径
+- **日志**：以 `X-Request-ID` 关联握手与事件行；上游错误按计数限流打印
+- **抓包**：关注 101 响应的 `Connection`/`Upgrade` 两值，以及客户端帧掩码位
+- **载荷**：送检只覆盖前 4096 字节，超长帧的判决需结合分片语义判断
+- **脱敏**：日志中的 URL 与查询串经 `logredact` 处理，Authorization 与 Cookie 不落原文
 
-#### 日志分析
-1. **请求ID追踪**：使用 X-Request-ID 头部关联日志
-2. **WAF事件记录**：检查安全事件表中的 WebSocket 相关记录
-3. **连接统计**：监控指标中的 WebSocket 连接数和错误率
-
-#### 网络诊断
-1. **抓包分析**：使用 tcpdump 或 wireshark 分析 WebSocket 握手
-2. **TLS验证**：检查证书链和加密套件
-3. **上游连通性**：验证上游服务器的 WebSocket 支持
-
-#### 性能监控
-1. **QPS监控**：观察 WebSocket 连接的查询每秒指标
-2. **延迟分析**：监控握手时间和数据传输延迟
-3. **资源使用**：检查 CPU、内存和连接池使用情况
-
-### 常见问题解决方案
-
-#### 握手失败排查
-1. **检查 Upgrade 头**：确认客户端发送了正确的 Upgrade: websocket 头
-2. **验证 Connection 头**：确保包含 Connection: Upgrade
-3. **检查协议版本**：确认使用 HTTP/1.1 和标准 WebSocket 协议
-
-#### 数据传输问题
-1. **帧解析错误**：检查 WebSocket 帧的掩码和长度字段
-2. **编码问题**：验证文本和二进制帧的正确解码
-3. **缓冲区溢出**：监控 payload 限制和内存使用
-
-#### 安全策略配置
-1. **WAF规则调整**：根据业务需求调整安全规则阈值
-2. **速率限制配置**：平衡安全性和用户体验
-3. **缓存策略**：合理配置静态资源缓存以提高性能
+**章节来源**
+- [internal/dataplane/reqid/reqid.go:36-53](file://internal/dataplane/reqid/reqid.go#L36-L53)
+- [internal/dataplane/logredact/sanitize.go:42-131](file://internal/dataplane/logredact/sanitize.go#L42-L131)
+- [internal/proxy/proxy.go:431-497](file://internal/proxy/proxy.go#L431-L497)
+- [internal/dataplane/websocket.go:605-637](file://internal/dataplane/websocket.go#L605-L637)

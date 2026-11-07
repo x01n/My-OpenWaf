@@ -3,386 +3,754 @@
 > [返回 管理 API 系统](../管理 API 系统.md)
 
 <cite>
-**本文引用的文件**
+**本文档引用的文件**
+- [router.go](file://internal/admin/router.go)
+- [auth.go](file://internal/admin/auth.go)
+- [auth_helpers.go](file://internal/admin/auth_helpers.go)
+- [auth_session.go](file://internal/admin/auth_session.go)
+- [admin_users.go](file://internal/admin/admin_users.go)
+- [middleware.go](file://internal/admin/middleware.go)
+- [session.go](file://internal/admin/auth/session.go)
+- [apikey.go](file://internal/admin/system/apikey/apikey.go)
+- [site.go](file://internal/admin/site/site.go)
+- [security.go](file://internal/admin/event/security.go)
+- [access.go](file://internal/admin/event/access.go)
+- [rule.go](file://internal/admin/rule/rule.go)
+- [settings.go](file://internal/admin/system/settings.go)
+- [helpers.go](file://internal/admin/shared/helpers.go)
+- [utils.go](file://internal/utils/utils.go)
+- [api.ts](file://frontend/lib/api.ts)
+- [REST API 设计规范.md](file://docs/管理 API 系统/REST API 设计规范/REST API 设计规范.md)
+- [认证授权机制.md](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md)
 - [路由设计规范.md](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md)
 - [请求响应格式规范.md](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md)
-- [认证授权机制.md](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md)
-- [管理 API 系统.md](file://docs/管理 API 系统/管理 API 系统.md)
-- [规则管理 API.md](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md)
-- [站点管理 API.md](file://docs/管理 API 系统/站点管理 API.md)
-- [系统设置 API.md](file://docs/管理 API 系统/系统设置 API.md)
-- [安全事件 API.md](file://docs/管理 API 系统/安全事件 API.md)
-- [证书管理 API.md](file://docs/管理 API 系统/证书管理 API.md)
-- [策略管理 API.md](file://docs/管理 API 系统/策略管理 API.md)
+- [错误处理机制.md](file://docs/管理 API 系统/REST API 设计规范/错误处理机制.md)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
-7. [性能考量](#性能考量)
+7. [性能考虑](#性能考虑)
 8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件为 My-OpenWaf 管理 API 的完整端点参考，覆盖所有 REST API 的 HTTP 方法、URL 模式、请求参数、响应格式与错误码。文档基于实际代码实现，确保规范与实现一致，适用于开发者与运维人员进行集成与排错。
+
+本篇是 My-OpenWaf 控制面（管理后台）REST API 的**端点总清单**。全部条目逐条取自 `internal/admin/router.go` 的实际注册语句，包含 HTTP 方法、完整路径、处理函数、注册行号、所需权限与用途说明，覆盖 `RegisterRoutes` 中注册的全部 **217 个端点**（GET 100 个、POST 117 个，无 PUT/DELETE 方法）。
+
+本篇只负责"有哪些端点、每个端点谁在处理、需要什么权限"。载荷字段、鉴权实现、路由命名规范与错误语义分别由[请求响应格式规范](请求响应格式规范.md)、[认证授权机制](认证授权机制.md)、[路由设计规范](路由设计规范.md)与[错误处理机制](错误处理机制.md)承载，本篇不重复展开。
 
 ## 项目结构
-后端采用 Hertz 框架，控制面（管理 API）与数据面（业务监听）分离部署。控制面负责认证、授权、系统设置、规则管理等；数据面负责业务流量防护与转发。前端通过 Next.js 构建，采用 SPA 模式，静态资源由后端统一托管。
+
+端点全部集中在 `RegisterRoutes` 一个函数体内注册，按权限分组下挂到四个组变量上。下表为注册位置的实测分布。
+
+| 注册位置 | 分组变量 | 端点数 | 中间件 | 挂载路径前缀 |
+|----------|----------|:------:|--------|--------------|
+| Hertz 实例根 | `h` | 8 | `SecurityHeaders` + `AccessLog` | 无（含 `/api/v1/health` 与数据面静态端点） |
+| 认证分组 | `api` | 4 | 追加 `AuthMiddleware` | `/api/v1` |
+| 只读分组 | `readGroup` | 92 | 追加 `RequireRole(admin, operator, readonly)` | `/api/v1` |
+| 操作分组 | `opsGroup` | 87 | 追加 `RequireRole(admin, operator)` | `/api/v1` |
+| 管理分组 | `adminGroup` | 26 | 追加 `RequireRole(admin)` | `/api/v1` |
+| **合计** | — | **217** | — | — |
 
 ```mermaid
 graph TB
-subgraph "控制面Admin Control Plane"
-AdminServer["Hertz 管理服务器<br/>/healthz,/readyz,/status,/metrics"]
-Router["路由注册器<br/>/api/v1/*"]
-Middleware["中间件链<br/>安全头/访问日志/鉴权/角色校验"]
-Static["静态文件托管<br/>SPA 回退"]
-end
-subgraph "数据面Data Plane"
-DataServers["站点监听器<br/>按站点热启停"]
-end
-subgraph "前端Next.js SPA"
-Frontend["前端应用<br/>/api/v1/* 调用"]
-end
-Frontend --> AdminServer
-AdminServer --> Router
-Router --> Middleware
-Router --> Static
-AdminServer --> DataServers
+Sub["RegisterRoutes(h, deps)<br/>router.go:89"]
+Sub --> GH["h 根实例<br/>8 个端点"]
+Sub --> GAPI["api 分组<br/>4 个端点"]
+Sub --> GRead["readGroup<br/>92 个端点"]
+Sub --> GOps["opsGroup<br/>87 个端点"]
+Sub --> GAdmin["adminGroup<br/>26 个端点"]
+GAPI --> MW1["AuthMiddleware"]
+GRead --> MW1
+GOps --> MW1
+GAdmin --> MW1
+GRead --> R1["RequireRole(admin,operator,readonly)"]
+GOps --> R2["RequireRole(admin,operator)"]
+GAdmin --> R3["RequireRole(admin)"]
+GRead --> HH["handler 子包<br/>site/certificate/policy/rule/event/system/..."]
+GOps --> HH
+GAdmin --> HH
 ```
 
 **图表来源**
-- [路由设计规范.md:38-57](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L38-L57)
-- [路由设计规范.md:223-232](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L223-L232)
+- [router.go:89-120](file://internal/admin/router.go#L89-L120)
+- [router.go:124-126](file://internal/admin/router.go#L124-L126)
+- [router.go:255-257](file://internal/admin/router.go#L255-L257)
+- [router.go:372-374](file://internal/admin/router.go#L372-L374)
 
 **章节来源**
-- [路由设计规范.md:32-57](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L32-L57)
-- [管理 API 系统.md:42-53](file://docs/管理 API 系统/管理 API 系统.md#L42-L53)
+- [router.go:89-440](file://internal/admin/router.go#L89-L440)
+- [middleware.go:42-147](file://internal/admin/middleware.go#L42-L147)
 
 ## 核心组件
-- 版本控制：统一使用 `/api/v1` 前缀，便于未来版本演进与兼容性管理。
-- 资源命名：采用复数名词（如 `/sites`, `/rules`, `/settings`），路径参数使用 `:id` 表示单个资源。
-- 路由注册：在控制面 Hertz 实例上注册健康检查、认证、受控 API 分组、静态文件回退。
-- 中间件：全局安全头设置、访问日志、认证（支持 Bearer JWT 与 API Key）、角色权限校验。
-- 静态文件：SPA 回退逻辑，区分 API 与静态资源，避免 API 路径误返回静态内容。
+
+端点按处理函数所在包归属，一个包对应一组资源。下表为处理器归属实测。
+
+| 处理器包 | 别名 | 端点数 | 负责资源 |
+|----------|------|:------:|----------|
+| `internal/admin/system` | `system` | 31 | 设置、健康、网络/TLS/HTTP2/Redis/日志/运行时配置、ACME、备份、重载 |
+| `internal/admin/rule` | `rule` | 17 | 自定义规则、站点级规则、应用路由规则、录制资源 |
+| `internal/admin/event` | `event` | 16 | 安全事件、访问日志、TLS 指纹、请求追踪、误报反馈 |
+| `internal/admin/access` | `access` | 14 | 站点访问控制（身份源、用户、路径规则） |
+| `internal/admin`（根） | 无前缀 | 12 | 登录、刷新、登出、me、改密、会话、强退、管理员账号 |
+| `internal/admin/detect/cverules` | `cverules` | 11 | CVE 规则 |
+| `internal/admin/detect/owasprules` | `owasprules` | 10 | OWASP 规则 |
+| `internal/admin/system/jsplugin` | `adminjsplugin` | 10 | JS 插件 |
+| `internal/admin/system/luaplugin` | `adminluaplugin` | 9 | Lua 插件 |
+| `internal/admin/site` | `site` | 8 | 站点增删改查与启停 |
+| `internal/admin/system/policy` | `policy` | 8 | 策略 |
+| `internal/admin/system/certificate` | `certificate` | 7 | 证书 |
+| `internal/admin/protect/page` | `pagehandler` | 6 | 页面模板 |
+| `internal/admin/system/threatintel` | `threatintel` | 6 | 威胁情报源 |
+| `internal/admin/system/iplist` | `iplist` | 5 | IP 黑白名单 |
+| `internal/admin/protect` 的 `bot`/`chain`/`drop`/`escalation` | 各 4 | 16 | Bot、链式验证、阻断策略、响应升级链 |
+| `internal/admin/site` 的 `errorpage`/`listener`/`observability` | 各 4 | 12 | 站点错误页、监听器、站点级观测 |
+| `internal/admin/protect/captcha`、`internal/admin/system/apikey` | 各 3 | 6 | 验证码、管理端令牌 |
+| `internal/admin/protect`、`protect/sensitivity`、`system/presetbots` | 各 2 | 6 | 保护配置读写、类别敏感度、预置白名单 |
+| `internal/admin/system/realtime` | `deps.Realtime` | 2 | 实时订阅票据与 WebSocket |
+| `internal/admin/system/dashboard`、`system/upstream` | 各 1 | 2 | 仪表盘汇总、上游连接池状态 |
+| `router.go` 内联闭包 | — | 3 | PoW WASM/glue JS 下发、ACME HTTP-01 应答 |
+| **合计** | — | **217** | — |
+
+包计数按注册语句中处理函数的包别名归属；`internal/admin` 根的 12 个包含 `RequireRole` 之后紧跟的 `ForceLogoutSessionHandler`。
 
 **章节来源**
-- [路由设计规范.md:67-77](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L67-L77)
-- [路由设计规范.md:107-114](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L107-L114)
+- [router.go:12-56](file://internal/admin/router.go#L12-L56)
+- [router.go:127-415](file://internal/admin/router.go#L127-L415)
 
 ## 架构总览
-控制面路由组织遵循"健康检查 + 认证 + 受控 API 分组 + 静态文件回退"的模式。API 分组内部按角色细分为只读、操作员、管理员三类权限组，确保最小权限原则。
+
+一次端点调用从路由匹配到处理函数返回，经过全局中间件、组级鉴权与组级角色三层过滤。
 
 ```mermaid
 sequenceDiagram
-participant Client as "客户端"
-participant Admin as "管理服务器"
-participant Router as "路由注册器"
-participant MW as "中间件链"
-participant Handler as "处理器"
-Client->>Admin : 请求 /api/v1/...
-Admin->>Router : 匹配路由
-Router->>MW : 应用中间件
-MW-->>Router : 通过/拒绝
-alt 通过
-Router->>Handler : 调用处理器
-Handler-->>Client : 返回响应
-else 拒绝
-MW-->>Client : 401/403 错误
-end
+participant C as "客户端"
+participant H as "Hertz 实例"
+participant G as "全局中间件"
+participant A as "AuthMiddleware"
+participant R as "RequireRole"
+participant F as "处理函数"
+C->>H : "GET /api/v1/sites"
+H->>G : "SecurityHeaders → AccessLog"
+G->>A : "组级鉴权"
+A->>A : "白名单判定（health/login/refresh/logout）"
+A-->>R : "写入 auth_role"
+R-->>F : "角色命中分组"
+F-->>C : "200 + JSON 载荷"
 ```
 
 **图表来源**
-- [路由设计规范.md:82-99](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L82-L99)
-- [路由设计规范.md:132-144](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L132-L144)
+- [router.go:91-92](file://internal/admin/router.go#L91-L92)
+- [router.go:110-110](file://internal/admin/router.go#L110-L110)
+- [middleware.go:42-147](file://internal/admin/middleware.go#L42-L147)
+
+下表为权限取值口径，各端点表的"权限"列均取此五种之一。
+
+| 权限取值 | 判定来源 | 允许角色 | 未满足时响应 |
+|----------|----------|----------|--------------|
+| `公开` | 未挂载 `AuthMiddleware` 或命中白名单 | 任意 | 不校验 |
+| `已认证` | `AuthMiddleware`，无 `RequireRole` | admin / operator / readonly | `401` |
+| `readonly+` | `RequireRole(admin, operator, readonly)` | 三角色 | `403` |
+| `admin/operator` | `RequireRole(admin, operator)` | admin / operator | `403` |
+| `仅 admin` | `RequireRole(admin)` | admin | `403` |
+
+**章节来源**
+- [middleware.go:46-53](file://internal/admin/middleware.go#L46-L53)
+- [middleware.go:127-147](file://internal/admin/middleware.go#L127-L147)
+- [router.go:124-126](file://internal/admin/router.go#L124-L126)
 
 ## 详细组件分析
 
-### 认证与授权机制
-- 短期访问令牌：HS256 签名，15 分钟有效期，携带用户名声明，用于后续 API 调用的 Bearer 认证。
-- 长期刷新令牌：随机生成 JTI 与原始令牌，仅存储哈希值，7 天有效期；刷新时撤销旧令牌并发放新令牌，同时更新 Cookie。
-- 登录：验证账户密码，签发访问令牌与刷新令牌（Cookie），返回短期令牌与过期时间。
-- 刷新：从 Cookie 中解析 JTI 与原始令牌，校验哈希，轮换并返回新的短期令牌。
-- 登出：撤销当前刷新令牌，清除 Cookie。
-- API 密钥：作为替代认证方式，直接通过仓库校验密钥有效性。
+本节按资源给出端点总表。列口径：`注册行` 为 `internal/admin/router.go` 内的注册语句行号；`说明` 取自处理函数名的动词与资源语义。
 
-```mermaid
-sequenceDiagram
-participant Client as "客户端"
-participant Login as "登录处理器"
-participant JWT as "JWT工具"
-participant RT as "刷新令牌仓库"
-participant Cookie as "Cookie"
-Client->>Login : "POST /api/v1/auth/login"
-Login->>Login : "校验用户名/密码"
-Login->>JWT : "签发短期访问令牌"
-Login->>RT : "创建刷新令牌(哈希存储)"
-RT-->>Login : "成功"
-Login->>Cookie : "设置刷新Cookie"
-Login-->>Client : "{access_token, expires_at, username}"
-```
+### 健康检查与认证会话端点
 
-**图表来源**
-- [认证授权机制.md:190-204](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L190-L204)
-- [认证授权机制.md:245-257](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L245-L257)
+`/api/v1/health` 与三个 `/auth/*` 写操作端点不经过鉴权中间件，其余认证端点要求已认证会话。
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/health` | `system.HealthCheck` | 94 | 公开 | 健康检查 |
+| POST | `/api/v1/auth/login` | `LoginHandler` | 105 | 公开 | 登录签发 |
+| POST | `/api/v1/auth/refresh` | `RefreshHandler` | 106 | 公开 | 令牌刷新 |
+| POST | `/api/v1/auth/logout` | `LogoutHandler` | 107 | 公开 | 登出撤销 |
+| GET | `/api/v1/auth/me` | `MeHandler` | 112 | 已认证 | 当前身份 |
+| POST | `/api/v1/auth/change-password` | `ChangeOwnPasswordHandler` | 113 | 已认证 | 修改本人口令 |
+| GET | `/api/v1/auth/sessions` | `ListSessionsHandler` | 115 | 已认证 | 会话列表 |
+| POST | `/api/v1/auth/sessions/force-logout` | `ForceLogoutSessionHandler` | 116 | 仅 admin | 强制下线 |
 
 **章节来源**
-- [认证授权机制.md:182-213](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L182-L213)
-- [认证授权机制.md:214-249](file://docs/管理 API 系统/REST API 设计规范/认证授权机制.md#L214-L249)
+- [router.go:94-116](file://internal/admin/router.go#L94-L116)
+- [auth.go:33-352](file://internal/admin/auth.go#L33-L352)
+- [auth_session.go:13-89](file://internal/admin/auth_session.go#L13-L89)
+- [settings.go:212-216](file://internal/admin/system/settings.go#L212-L216)
 
-### 路由系统与中间件链
-- 路由注册：控制面统一在 `/api/v1` 下注册，健康检查、认证相关端点无需鉴权；其余端点统一走认证中间件。
-- 中间件链：
-  - 安全头：设置 X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Content-Security-Policy。
-  - 访问日志：记录请求 ID、方法、路径、状态码、耗时与认证方式。
-  - 认证中间件：跳过健康与认证端点；校验 Bearer 令牌优先于 API Key；通过后注入用户信息与认证方式。
-- 前端静态资源：未命中 `/api/` 的路由回退到前端静态文件，实现 SPA 支持。
+### 站点与监听端点
 
-```mermaid
-flowchart TD
-Start(["请求进入"]) --> SecHdr["设置安全头"]
-SecHdr --> AccessLog["记录访问日志(含请求ID)"]
-AccessLog --> AuthChk{"是否为健康/认证端点?"}
-AuthChk --> |是| Route["进入对应处理器"]
-AuthChk --> |否| AuthHdr["检查Authorization头"]
-AuthHdr --> HasBearer{"是否为Bearer令牌?"}
-HasBearer --> |是| VerifyJWT["校验JWT签名与有效期"]
-VerifyJWT --> JWTOK{"有效?"}
-JWTOK --> |是| Inject["注入用户信息与认证方式"]
-JWTOK --> |否| APIKey["校验API Key"]
-HasBearer --> |否| APIKey
-APIKey --> KeyOK{"有效?"}
-KeyOK --> |是| Inject
-KeyOK --> |否| Abort["返回401并中止"]
-Inject --> Route
-Route --> End(["响应返回"])
-```
+站点资源共 42 个端点，读端点归 `readonly+`，写端点归 `admin/operator`。站点写操作处理函数均带 `reload` 回调，成功后触发快照重载。
 
-**图表来源**
-- [路由设计规范.md:222-240](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L222-L240)
-- [路由设计规范.md:132-144](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L132-L144)
-
-**章节来源**
-- [路由设计规范.md:214-248](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L214-L248)
-- [路由设计规范.md:146-170](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L146-L170)
-
-### 请求响应格式与错误处理
-- 成功响应
-  - 一般返回 200，携带业务数据对象或数组
-  - 列表接口统一使用分页包装对象：{"items":[...],"total":n,...}
-  - 创建资源返回 201；删除资源返回 204（无内容）
-- 错误响应
-  - 使用标准 HTTP 状态码映射错误语义
-  - 错误响应体为 JSON 对象，包含 "error" 字段描述错误信息
-  - 特殊场景：401 未授权（含刷新失败）、403 禁止访问、429 请求过快（暴力破解锁定）
-
-```mermaid
-flowchart TD
-Start(["请求到达"]) --> Bind["绑定请求体/解析参数"]
-Bind --> Valid{"参数/请求体有效?"}
-Valid --> |否| ErrResp["返回 4xx + {error}"]
-Valid --> |是| Biz["执行业务逻辑"]
-Biz --> Result{"是否成功?"}
-Result --> |否| ErrResp
-Result --> |是| Wrap["按资源类型封装响应"]
-Wrap --> List{"是否列表?"}
-List --> |是| Page["返回 {items,total,...}"]
-List --> |否| Item["返回具体对象"]
-Page --> End(["结束"])
-Item --> End
-ErrResp --> End
-```
-
-**图表来源**
-- [请求响应格式规范.md:158-173](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L158-L173)
-- [请求响应格式规范.md:233-249](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L233-L249)
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/sites` | `site.ListSites` | 127 | readonly+ | 站点级列表 |
+| GET | `/api/v1/sites/:id` | `site.GetSite` | 128 | readonly+ | 读取详情 |
+| GET | `/api/v1/sites/:id/status` | `site.GetSiteStatus` | 129 | readonly+ | 站点运行状态 |
+| GET | `/api/v1/sites/:id/listeners` | `listener.ListSiteListeners` | 130 | readonly+ | 站点级列表 |
+| GET | `/api/v1/sites/:id/security-events` | `event.ListSiteSecurityEvents` | 180 | readonly+ | 站点级事件列表 |
+| GET | `/api/v1/sites/:id/security-events/stats` | `event.SiteSecurityEventStats` | 181 | readonly+ | 站点级事件统计 |
+| GET | `/api/v1/sites/:id/security-events/timeline` | `event.SiteSecurityEventTimeline` | 182 | readonly+ | 站点级事件时间线 |
+| GET | `/api/v1/sites/:id/access-logs` | `observability.ListSiteAccessLogs` | 189 | readonly+ | 站点级访问日志列表 |
+| GET | `/api/v1/sites/:id/access-logs/stats` | `observability.SiteAccessLogStats` | 190 | readonly+ | 站点级访问日志统计 |
+| GET | `/api/v1/sites/:id/drop-events` | `observability.ListSiteDropEvents` | 191 | readonly+ | 站点级丢弃事件列表 |
+| GET | `/api/v1/sites/:id/drop-stats` | `observability.SiteDropStats` | 192 | readonly+ | 站点级丢弃统计 |
+| GET | `/api/v1/sites/:id/rules` | `rule.ListSiteRules` | 193 | readonly+ | 站点级规则列表 |
+| GET | `/api/v1/sites/:id/application-route-rules` | `rule.ListApplicationRouteRules` | 194 | readonly+ | 应用路由规则列表 |
+| GET | `/api/v1/sites/:id/recorded-resources` | `rule.ListRecordedResources` | 195 | readonly+ | 录制资源列表 |
+| GET | `/api/v1/sites/:id/access` | `access.GetAccessConfig` | 197 | readonly+ | 访问控制配置读取 |
+| GET | `/api/v1/sites/:id/access/providers` | `access.ListProviders` | 198 | readonly+ | 身份源列表 |
+| GET | `/api/v1/sites/:id/access/users` | `access.ListUsers` | 199 | readonly+ | 访问控制用户列表 |
+| GET | `/api/v1/sites/:id/access/rules` | `access.ListPathRules` | 200 | readonly+ | 路径规则列表 |
+| GET | `/api/v1/sites/:id/error-pages` | `errorpage.GetSiteErrorPages` | 239 | readonly+ | 站点错误页读取 |
+| POST | `/api/v1/sites` | `site.CreateSite` | 258 | admin/operator | 新建 |
+| POST | `/api/v1/sites/:id/update` | `site.UpdateSite` | 259 | admin/operator | 更新 |
+| POST | `/api/v1/sites/:id/delete` | `site.DeleteSite` | 260 | admin/operator | 删除 |
+| POST | `/api/v1/sites/:id/start` | `site.StartSite` | 261 | admin/operator | 启动站点 |
+| POST | `/api/v1/sites/:id/stop` | `site.StopSite` | 262 | admin/operator | 停止站点 |
+| POST | `/api/v1/sites/:id/listeners` | `listener.CreateSiteListener` | 263 | admin/operator | 新建监听 |
+| POST | `/api/v1/sites/:id/listeners/:lid/update` | `listener.UpdateSiteListener` | 264 | admin/operator | 更新监听 |
+| POST | `/api/v1/sites/:id/listeners/:lid/delete` | `listener.DeleteSiteListener` | 265 | admin/operator | 删除监听 |
+| POST | `/api/v1/sites/:id/application-route-rules` | `rule.CreateApplicationRouteRule` | 345 | admin/operator | 新建 |
+| POST | `/api/v1/sites/:id/application-route-rules/:rid/update` | `rule.UpdateApplicationRouteRule` | 346 | admin/operator | 更新 |
+| POST | `/api/v1/sites/:id/application-route-rules/:rid/delete` | `rule.DeleteApplicationRouteRule` | 347 | admin/operator | 删除 |
+| POST | `/api/v1/sites/:id/recorded-resources/clear` | `rule.ClearRecordedResources` | 348 | admin/operator | 清空 |
+| POST | `/api/v1/sites/:id/error-pages` | `errorpage.UpdateSiteErrorPages` | 350 | admin/operator | 更新站点错误页 |
+| POST | `/api/v1/sites/:id/access` | `access.SaveAccessConfig` | 353 | admin/operator | 整体保存访问控制配置 |
+| POST | `/api/v1/sites/:id/access/providers` | `access.CreateProvider` | 354 | admin/operator | 新建 |
+| POST | `/api/v1/sites/:id/access/providers/:pid/update` | `access.UpdateProvider` | 355 | admin/operator | 更新 |
+| POST | `/api/v1/sites/:id/access/providers/:pid/delete` | `access.DeleteProvider` | 356 | admin/operator | 删除 |
+| POST | `/api/v1/sites/:id/access/users` | `access.CreateUser` | 357 | admin/operator | 新建 |
+| POST | `/api/v1/sites/:id/access/users/:uid/update` | `access.UpdateUser` | 358 | admin/operator | 更新 |
+| POST | `/api/v1/sites/:id/access/users/:uid/delete` | `access.DeleteUser` | 359 | admin/operator | 删除 |
+| POST | `/api/v1/sites/:id/access/rules` | `access.CreatePathRule` | 360 | admin/operator | 新建 |
+| POST | `/api/v1/sites/:id/access/rules/:rid/update` | `access.UpdatePathRule` | 361 | admin/operator | 更新 |
+| POST | `/api/v1/sites/:id/access/rules/:rid/delete` | `access.DeletePathRule` | 362 | admin/operator | 删除 |
 
 **章节来源**
-- [请求响应格式规范.md:148-185](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L148-L185)
-- [请求响应格式规范.md:257-261](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L257-L261)
+- [router.go:127-130](file://internal/admin/router.go#L127-L130)
+- [router.go:180-200](file://internal/admin/router.go#L180-L200)
+- [router.go:239-265](file://internal/admin/router.go#L239-L265)
+- [router.go:345-362](file://internal/admin/router.go#L345-L362)
+- [site.go:74-130](file://internal/admin/site/site.go#L74-L130)
 
-### 站点管理 API
-- 列表/详情：支持分页查询与单条获取。
-- 创建/更新：绑定请求体，持久化后触发快照重载，使变更立即生效。
-- 删除：删除后重载。
-- 启动/停止：内存态标记站点运行状态（演示用途）。
-- 状态查询：返回站点主机与运行状态。
+### 证书与 ACME 端点
 
-```mermaid
-sequenceDiagram
-participant Client as "客户端"
-participant Router as "路由"
-participant Handler as "站点处理器"
-participant Repo as "站点仓库"
-participant Reload as "快照重载"
-Client->>Router : "POST /api/v1/sites/ : id/update"
-Router->>Handler : "调用更新处理器"
-Handler->>Repo : "Get/Bind/Update"
-Repo-->>Handler : "成功"
-Handler->>Reload : "触发重载"
-Handler-->>Client : "200/201/204"
-```
+证书读取与 PEM 解析为只读；`/certificates/parse` 是 POST 但无副作用，因此置于只读分组。ACME 配置写入与状态查询仅 admin。
 
-**图表来源**
-- [站点管理 API.md:257-270](file://docs/管理 API 系统/站点管理 API.md#L257-L270)
-- [站点管理 API.md:146-159](file://docs/管理 API 系统/站点管理 API.md#L146-L159)
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/certificates` | `certificate.ListCertificates` | 132 | readonly+ | 列表查询 |
+| GET | `/api/v1/certificates/:id` | `certificate.GetCertificate` | 133 | readonly+ | 读取详情 |
+| GET | `/api/v1/certificates/acme/config` | `system.GetACMEConfig` | 134 | readonly+ | ACME 配置读取 |
+| POST | `/api/v1/certificates/parse` | `certificate.ParseCertificate` | 138 | readonly+ | 证书 PEM 解析 |
+| POST | `/api/v1/certificates` | `certificate.CreateCertificate` | 267 | admin/operator | 新建 |
+| POST | `/api/v1/certificates/:id/update` | `certificate.UpdateCertificate` | 268 | admin/operator | 更新 |
+| POST | `/api/v1/certificates/:id/apply-to-sites` | `certificate.ApplyCertificateToSites` | 269 | admin/operator | 应用到站点 |
+| POST | `/api/v1/certificates/:id/delete` | `certificate.DeleteCertificate` | 270 | admin/operator | 删除 |
+| POST | `/api/v1/certificates/acme/apply` | `system.ACMEApply` | 271 | admin/operator | ACME 申请 |
+| POST | `/api/v1/certificates/acme/:id/renew` | `system.ACMERenew` | 272 | admin/operator | ACME 续签 |
+| POST | `/api/v1/certificates/acme/config` | `system.UpdateACMEConfig` | 397 | 仅 admin | ACME 配置写入 |
+| GET | `/api/v1/certificates/acme/status` | `system.ACMEStatus` | 398 | 仅 admin | ACME 状态 |
 
 **章节来源**
-- [站点管理 API.md:250-279](file://docs/管理 API 系统/站点管理 API.md#L250-L279)
-- [站点管理 API.md:172-207](file://docs/管理 API 系统/站点管理 API.md#L172-L207)
+- [router.go:132-138](file://internal/admin/router.go#L132-L138)
+- [router.go:267-272](file://internal/admin/router.go#L267-L272)
+- [router.go:397-398](file://internal/admin/router.go#L397-L398)
 
-### 规则管理 API
-- 列表/详情：分页与单条。
-- 创建/更新/删除：持久化后触发重载。
-- 测试：对自定义模式进行即时匹配测试，不落库。
-- 导入/导出：批量导入 JSON 数组，导出全量规则。
+### 策略与 OWASP 规则端点
 
-```mermaid
-sequenceDiagram
-participant Client as "客户端"
-participant Router as "路由"
-participant Handler as "规则处理器"
-participant Repo as "规则仓库"
-participant Reload as "快照重载"
-Client->>Router : "POST /api/v1/rules/test"
-Router->>Handler : "TestRule"
-Handler-->>Client : "{matched, kind, arg}"
-Client->>Router : "POST /api/v1/rules/import"
-Router->>Handler : "ImportRules"
-Handler->>Repo : "批量创建"
-Handler->>Reload : "触发重载"
-Handler-->>Client : "{imported, total}"
-```
+策略与 OWASP 规则共用策略作用域路径：`/policies/:policyId/owasp-rules*` 与全局 `/owasp-rules*` 绑定同一对处理函数，策略级路径仅用于前端按策略视图复用。
 
-**图表来源**
-- [规则管理 API.md:286-301](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L286-L301)
-- [规则管理 API.md:176-246](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L176-L246)
-
-**章节来源**
-- [规则管理 API.md:294-316](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L294-L316)
-- [规则管理 API.md:467-535](file://docs/管理 API 系统/规则管理 API/规则 CRUD 操作.md#L467-L535)
-
-### 系统设置 API
-- 系统设置：列出、按键获取、创建、设置、删除；修改后触发重载。
-- API 密钥：列出、创建（返回明文一次性令牌）、删除。
-- 快照重载：手动触发重载以应用最新配置。
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/policies` | `policy.ListPolicies` | 140 | readonly+ | 列表查询 |
+| GET | `/api/v1/policies/default` | `policy.GetDefaultPolicy` | 141 | readonly+ | 读取详情 |
+| GET | `/api/v1/policies/:id` | `policy.GetPolicy` | 142 | readonly+ | 读取详情 |
+| GET | `/api/v1/owasp-rules` | `owasprules.ListOWASPRulesFromRegistry` | 224 | readonly+ | OWASP 规则清单 |
+| GET | `/api/v1/owasp-rules/stats` | `owasprules.GetOWASPRuleStats` | 225 | readonly+ | OWASP 规则统计 |
+| GET | `/api/v1/policies/:policyId/owasp-rules` | `owasprules.ListOWASPRulesFromRegistry` | 226 | readonly+ | OWASP 规则清单 |
+| GET | `/api/v1/policies/:policyId/owasp-rules/stats` | `owasprules.GetOWASPRuleStats` | 227 | readonly+ | OWASP 规则统计 |
+| POST | `/api/v1/policies` | `policy.CreatePolicy` | 274 | admin/operator | 新建 |
+| POST | `/api/v1/policies/:id/set-default` | `policy.SetDefaultPolicy` | 275 | admin/operator | 设为默认策略 |
+| POST | `/api/v1/policies/:id/default` | `policy.SetDefaultPolicy` | 276 | admin/operator | 设为默认策略 |
+| POST | `/api/v1/policies/:id/update` | `policy.UpdatePolicy` | 277 | admin/operator | 更新 |
+| POST | `/api/v1/policies/:id/delete` | `policy.DeletePolicy` | 278 | admin/operator | 删除 |
+| POST | `/api/v1/owasp-rules/:id/update` | `owasprules.UpdateSingleOWASPRule` | 323 | admin/operator | 更新 |
+| POST | `/api/v1/owasp-rules/:id/reset` | `owasprules.ResetOWASPRuleOverride` | 324 | admin/operator | 重置为默认 |
+| POST | `/api/v1/owasp-rules/batch` | `owasprules.BatchUpdateOWASPRules` | 325 | admin/operator | 更新 |
+| POST | `/api/v1/policies/:policyId/owasp-rules/:id` | `owasprules.UpdateSingleOWASPRule` | 326 | admin/operator | 更新 |
+| POST | `/api/v1/policies/:policyId/owasp-rules/:id/reset` | `owasprules.ResetOWASPRuleOverride` | 327 | admin/operator | 重置为默认 |
+| POST | `/api/v1/policies/:policyId/owasp-rules/batch` | `owasprules.BatchUpdateOWASPRules` | 328 | admin/operator | 更新 |
 
 **章节来源**
-- [系统设置 API.md:138-155](file://docs/管理 API 系统/系统设置 API.md#L138-L155)
-- [系统设置 API.md:177-202](file://docs/管理 API 系统/系统设置 API.md#L177-L202)
+- [router.go:140-142](file://internal/admin/router.go#L140-L142)
+- [router.go:224-227](file://internal/admin/router.go#L224-L227)
+- [router.go:274-278](file://internal/admin/router.go#L274-L278)
+- [router.go:323-328](file://internal/admin/router.go#L323-L328)
 
-### 安全事件 API
-- 列表：支持按动作、阶段、类别、客户端 IP、主机、路径、规则 ID、时间范围过滤。
-- 统计：近 N 小时的分类统计、Top IP、Top 路径、Top 规则、总量。
-- 时间线：按时间桶统计事件趋势。
-- 详情：按 ID 获取事件。
+### 自定义规则端点
 
-**章节来源**
-- [安全事件 API.md:161-197](file://docs/管理 API 系统/安全事件 API.md#L161-L197)
-- [安全事件 API.md:228-266](file://docs/管理 API 系统/安全事件 API.md#L228-L266)
+规则的读写、试运行与批量导入导出共 10 个端点；`/rules/:id/{update,delete}` 以 POST 动作替代 PUT/DELETE。
 
-### 证书管理 API
-- 列表/详情：分页与单条。
-- 创建/更新：校验证书与私钥配对有效性后再持久化，失败返回错误。
-- 删除：删除后重载。
-
-**章节来源**
-- [证书管理 API.md:126-134](file://docs/管理 API 系统/证书管理 API.md#L126-L134)
-- [证书管理 API.md:169-173](file://docs/管理 API 系统/证书管理 API.md#L169-L173)
-
-### 策略管理 API
-- 列表/详情：分页与单条。
-- 创建/更新/删除：持久化后触发重载。
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/rules` | `rule.ListRules` | 144 | readonly+ | 列表查询 |
+| GET | `/api/v1/rules/:id` | `rule.GetRule` | 145 | readonly+ | 读取详情 |
+| GET | `/api/v1/rules/templates` | `rule.GetRuleTemplates` | 146 | readonly+ | 规则模板清单 |
+| GET | `/api/v1/rules/export` | `rule.ExportRules` | 147 | readonly+ | 导出 |
+| POST | `/api/v1/rules` | `rule.CreateRule` | 280 | admin/operator | 新建 |
+| POST | `/api/v1/rules/:id/update` | `rule.UpdateRule` | 281 | admin/operator | 更新 |
+| POST | `/api/v1/rules/:id/delete` | `rule.DeleteRule` | 282 | admin/operator | 删除 |
+| POST | `/api/v1/rules/test` | `rule.TestRule` | 283 | admin/operator | 试运行 |
+| POST | `/api/v1/rules/validate` | `rule.ValidateRule` | 284 | admin/operator | 规则语法校验 |
+| POST | `/api/v1/rules/import` | `rule.ImportRules` | 285 | admin/operator | 导入 |
 
 **章节来源**
-- [策略管理 API.md:155-161](file://docs/管理 API 系统/策略管理 API.md#L155-L161)
-- [策略管理 API.md:195-200](file://docs/管理 API 系统/策略管理 API.md#L195-L200)
+- [router.go:144-147](file://internal/admin/router.go#L144-L147)
+- [router.go:280-285](file://internal/admin/router.go#L280-L285)
+- [rule.go:210-265](file://internal/admin/rule/rule.go#L210-L265)
+
+### 系统设置与保护配置端点
+
+`/settings*` 写操作仅 admin；`/protection-settings` 与敏感度、升级链整体写入归 `admin/operator`。
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/settings` | `system.ListSettings` | 149 | readonly+ | 列表查询 |
+| GET | `/api/v1/settings/:key` | `system.GetSetting` | 150 | readonly+ | 读取详情 |
+| POST | `/api/v1/settings` | `system.CreateSetting` | 375 | 仅 admin | 新建 |
+| POST | `/api/v1/settings/:key` | `system.SetSetting` | 376 | 仅 admin | 按键写入 |
+| POST | `/api/v1/settings/:key/update` | `system.SetSetting` | 377 | 仅 admin | 按键写入 |
+| POST | `/api/v1/settings/:key/delete` | `system.DeleteSetting` | 378 | 仅 admin | 删除 |
+| GET | `/api/v1/protection-settings` | `protect.GetProtectionSettings` | 152 | readonly+ | 保护配置读取 |
+| GET | `/api/v1/protection/:id/sensitivity` | `sensitivity.GetSensitivityConfig` | 234 | readonly+ | 敏感度配置读取 |
+| GET | `/api/v1/protection/:id/escalation` | `protectescalation.GetEscalationConfig` | 236 | readonly+ | 升级链配置读取 |
+| GET | `/api/v1/escalation/status/:ip` | `protectescalation.GetEscalationIPStatus` | 237 | readonly+ | 单 IP 升级状态 |
+| POST | `/api/v1/protection-settings` | `protect.PutProtectionSettings` | 287 | admin/operator | 保护配置整体写入 |
+| POST | `/api/v1/protection/:id/sensitivity` | `sensitivity.UpdateSensitivityConfig` | 340 | admin/operator | 更新敏感度配置 |
+| POST | `/api/v1/protection/:id/escalation` | `protectescalation.UpdateEscalationConfig` | 342 | admin/operator | 更新升级链配置 |
+| POST | `/api/v1/escalation/status/:ip/reset` | `protectescalation.ResetEscalationIPStatus` | 343 | admin/operator | 重置单 IP 升级状态 |
+
+**章节来源**
+- [router.go:149-152](file://internal/admin/router.go#L149-L152)
+- [router.go:234-237](file://internal/admin/router.go#L234-L237)
+- [router.go:287-287](file://internal/admin/router.go#L287-L287)
+- [router.go:340-343](file://internal/admin/router.go#L340-L343)
+- [router.go:375-378](file://internal/admin/router.go#L375-L378)
+
+### IP 黑白名单与威胁情报端点
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/ip-lists` | `iplist.ListIPEntries` | 154 | readonly+ | IP 条目列表 |
+| GET | `/api/v1/ip-lists/:id` | `iplist.GetIPEntry` | 155 | readonly+ | 读取详情 |
+| POST | `/api/v1/ip-lists` | `iplist.CreateIPEntry` | 289 | admin/operator | 新建 |
+| POST | `/api/v1/ip-lists/:id/update` | `iplist.UpdateIPEntry` | 290 | admin/operator | 更新 |
+| POST | `/api/v1/ip-lists/:id/delete` | `iplist.DeleteIPEntry` | 291 | admin/operator | 删除 |
+| GET | `/api/v1/threat-intel-feeds` | `threatintel.ListThreatIntelFeeds` | 157 | readonly+ | 列表查询 |
+| GET | `/api/v1/threat-intel-sync-logs` | `threatintel.ListThreatIntelSyncLogs` | 158 | readonly+ | 同步日志列表 |
+| POST | `/api/v1/threat-intel-feeds` | `threatintel.CreateThreatIntelFeed` | 293 | admin/operator | 新建 |
+| POST | `/api/v1/threat-intel-feeds/:id/update` | `threatintel.UpdateThreatIntelFeed` | 294 | admin/operator | 更新 |
+| POST | `/api/v1/threat-intel-feeds/:id/delete` | `threatintel.DeleteThreatIntelFeed` | 295 | admin/operator | 删除 |
+| POST | `/api/v1/threat-intel-feeds/:id/sync` | `threatintel.SyncThreatIntelFeed` | 296 | admin/operator | 同步 |
+
+**章节来源**
+- [router.go:154-158](file://internal/admin/router.go#L154-L158)
+- [router.go:289-296](file://internal/admin/router.go#L289-L296)
+
+### 插件端点
+
+Lua 与 JS 插件各有一组同构端点（增删改、启停、校验、试运行）。校验与试运行虽不改配置，但会执行用户代码，故与写操作同归 `admin/operator`。
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/lua-plugins` | `adminluaplugin.ListLuaPlugins` | 159 | readonly+ | 列表查询 |
+| GET | `/api/v1/lua-plugins/stats` | `adminluaplugin.GetLuaPluginStats` | 162 | readonly+ | Lua 运行时统计 |
+| GET | `/api/v1/lua-plugins/:id` | `adminluaplugin.GetLuaPlugin` | 163 | readonly+ | 读取详情 |
+| GET | `/api/v1/js-plugins` | `adminjsplugin.ListJSPlugins` | 164 | readonly+ | 列表查询 |
+| GET | `/api/v1/js-plugins/stats` | `adminjsplugin.GetJSPluginStats` | 165 | readonly+ | JS 运行时统计 |
+| GET | `/api/v1/js-plugins/runtime` | `adminjsplugin.GetJSPluginRuntime` | 166 | readonly+ | JS 引擎运行时状态 |
+| GET | `/api/v1/js-plugins/:id` | `adminjsplugin.GetJSPlugin` | 167 | readonly+ | 读取详情 |
+| POST | `/api/v1/lua-plugins` | `adminluaplugin.CreateLuaPlugin` | 300 | admin/operator | 新建 |
+| POST | `/api/v1/lua-plugins/:id/update` | `adminluaplugin.UpdateLuaPlugin` | 301 | admin/operator | 更新 |
+| POST | `/api/v1/lua-plugins/:id/delete` | `adminluaplugin.DeleteLuaPlugin` | 302 | admin/operator | 删除 |
+| POST | `/api/v1/lua-plugins/:id/toggle` | `adminluaplugin.ToggleLuaPlugin` | 303 | admin/operator | 启停切换 |
+| POST | `/api/v1/lua-plugins/validate` | `adminluaplugin.ValidateLuaPlugin` | 304 | admin/operator | 语法校验 |
+| POST | `/api/v1/lua-plugins/dry-run` | `adminluaplugin.DryRunLuaPlugin` | 305 | admin/operator | 脚本试运行 |
+| POST | `/api/v1/js-plugins` | `adminjsplugin.CreateJSPlugin` | 306 | admin/operator | 新建 |
+| POST | `/api/v1/js-plugins/:id/update` | `adminjsplugin.UpdateJSPlugin` | 307 | admin/operator | 更新 |
+| POST | `/api/v1/js-plugins/:id/delete` | `adminjsplugin.DeleteJSPlugin` | 308 | admin/operator | 删除 |
+| POST | `/api/v1/js-plugins/:id/toggle` | `adminjsplugin.ToggleJSPlugin` | 309 | admin/operator | 启停切换 |
+| POST | `/api/v1/js-plugins/validate` | `adminjsplugin.ValidateJSPlugin` | 310 | admin/operator | 语法校验 |
+| POST | `/api/v1/js-plugins/dry-run` | `adminjsplugin.DryRunJSPlugin` | 311 | admin/operator | 脚本试运行 |
+
+**章节来源**
+- [router.go:159-167](file://internal/admin/router.go#L159-L167)
+- [router.go:298-311](file://internal/admin/router.go#L298-L311)
+
+### 安全事件与访问日志端点
+
+安全事件与访问日志读端点共享同一套查询参数解析；`/security-events/requests` 为请求级聚合视图，`total` 是去重后的请求数。
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/security-events` | `event.ListSecurityEvents` | 169 | readonly+ | 安全事件列表 |
+| GET | `/api/v1/security-events/stats` | `event.SecurityEventStats` | 170 | readonly+ | 事件聚合统计 |
+| GET | `/api/v1/security-events/timeline` | `event.SecurityEventTimeline` | 171 | readonly+ | 事件时间线 |
+| GET | `/api/v1/security-events/requests` | `event.ListSecurityEventRequests` | 174 | readonly+ | 请求级聚合列表 |
+| GET | `/api/v1/security-events/:id` | `event.GetSecurityEvent` | 175 | readonly+ | 读取详情 |
+| GET | `/api/v1/access-logs` | `event.ListAccessLogs` | 176 | readonly+ | 访问日志列表 |
+| GET | `/api/v1/access-logs/:id` | `event.GetAccessLog` | 177 | readonly+ | 访问日志详情 |
+| GET | `/api/v1/fingerprints` | `event.ListTLSFingerprints` | 178 | readonly+ | TLS 指纹聚合 |
+| GET | `/api/v1/request/:request_id` | `event.GetRequestTrace` | 179 | readonly+ | 单请求链路追踪 |
+| GET | `/api/v1/false-positives` | `event.ListFalsePositives` | 185 | readonly+ | 误报列表 |
+| POST | `/api/v1/false-positives` | `event.CreateFalsePositive` | 365 | admin/operator | 新建误报 |
+| POST | `/api/v1/false-positives/:id/status` | `event.UpdateFalsePositiveStatus` | 366 | admin/operator | 更新误报状态 |
+| POST | `/api/v1/false-positives/:id/delete` | `event.DeleteFalsePositive` | 415 | 仅 admin | 删除 |
+
+**章节来源**
+- [router.go:169-185](file://internal/admin/router.go#L169-L185)
+- [router.go:365-366](file://internal/admin/router.go#L365-L366)
+- [router.go:415-415](file://internal/admin/router.go#L415-L415)
+- [security.go:39-130](file://internal/admin/event/security.go#L39-L130)
+- [access.go:17-111](file://internal/admin/event/access.go#L17-L111)
+
+### 阻断、Bot、CVE、验证码与链式验证端点
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/drop-policy` | `drop.GetDropPolicy` | 242 | readonly+ | 读取详情 |
+| GET | `/api/v1/drop-stats` | `drop.GetDropStats` | 243 | readonly+ | 丢弃统计 |
+| GET | `/api/v1/drop-events` | `drop.GetDropEvents` | 244 | readonly+ | 丢弃事件列表 |
+| POST | `/api/v1/drop-policy/update` | `drop.UpdateDropPolicy` | 408 | 仅 admin | 更新 |
+| GET | `/api/v1/preset-bot-whitelist` | `presetbots.ListPresetBotWhitelist` | 188 | readonly+ | 预置白名单预览 |
+| GET | `/api/v1/bot-settings` | `bot.GetBotSettings` | 216 | readonly+ | Bot 配置读取 |
+| GET | `/api/v1/bot-stats` | `bot.GetBotStats` | 217 | readonly+ | Bot 分值统计 |
+| GET | `/api/v1/bot-scores` | `bot.GetBotScores` | 218 | readonly+ | Bot 分值明细 |
+| POST | `/api/v1/bot-settings/update` | `bot.UpdateBotSettings` | 315 | admin/operator | 更新 |
+| POST | `/api/v1/preset-bot-whitelist/seed` | `presetbots.SeedBotWhitelist` | 369 | admin/operator | 写入预置白名单 |
+| GET | `/api/v1/cve-rules` | `cverules.ListCVERules` | 220 | readonly+ | 列表查询 |
+| GET | `/api/v1/cve-rules/stats` | `cverules.GetCVERuleStats` | 221 | readonly+ | CVE 规则统计 |
+| GET | `/api/v1/cve-feed/status` | `cverules.GetCVEFeedStatus` | 222 | readonly+ | CVE 订阅源状态 |
+| POST | `/api/v1/cve-rules/:id/toggle` | `cverules.ToggleCVERule` | 317 | admin/operator | 启停切换 |
+| POST | `/api/v1/cve-rules/:id/patch` | `cverules.UpdateSingleCVERule` | 318 | admin/operator | 更新 |
+| POST | `/api/v1/cve-rules/:id/reset` | `cverules.ResetCVERuleOverride` | 319 | admin/operator | 重置为默认 |
+| POST | `/api/v1/cve-rules/batch` | `cverules.BatchUpdateCVERules` | 320 | admin/operator | 更新 |
+| POST | `/api/v1/cve-rules/sync` | `cverules.SyncCVERules` | 321 | admin/operator | 同步 |
+| POST | `/api/v1/cve-rules` | `cverules.CreateCVERule` | 410 | 仅 admin | 新建 |
+| POST | `/api/v1/cve-rules/:id/update` | `cverules.UpdateCVERule` | 411 | 仅 admin | 更新 |
+| POST | `/api/v1/cve-rules/:id/delete` | `cverules.DeleteCVERule` | 412 | 仅 admin | 删除 |
+| GET | `/api/v1/captcha/config` | `captcha.GetCaptchaConfig` | 229 | readonly+ | 读取详情 |
+| POST | `/api/v1/captcha/config` | `captcha.UpdateCaptchaConfig` | 330 | admin/operator | 更新 |
+| POST | `/api/v1/captcha/test` | `captcha.TestCaptcha` | 331 | admin/operator | 验证码连通性测试 |
+| GET | `/api/v1/chain/config` | `chain.GetChainConfig` | 231 | readonly+ | 读取详情 |
+| GET | `/api/v1/chain/sessions` | `chain.ListChainSessions` | 232 | readonly+ | 链式会话列表 |
+| POST | `/api/v1/chain/config` | `chain.UpdateChainConfig` | 337 | admin/operator | 更新 |
+| POST | `/api/v1/chain/sessions/:id/delete` | `chain.DeleteChainSession` | 338 | admin/operator | 删除 |
+
+**章节来源**
+- [router.go:216-244](file://internal/admin/router.go#L216-L244)
+- [router.go:315-338](file://internal/admin/router.go#L315-L338)
+- [router.go:369-369](file://internal/admin/router.go#L369-L369)
+- [router.go:408-412](file://internal/admin/router.go#L408-L412)
+
+### 错误页、页面模板与系统配置项端点
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/error-pages/defaults` | `errorpage.GetDefaultErrorPages` | 240 | readonly+ | 默认错误页读取 |
+| GET | `/api/v1/page-templates` | `pagehandler.GetPageTemplates` | 250 | readonly+ | 页面模板清单 |
+| GET | `/api/v1/page-templates/:type` | `pagehandler.GetPageTemplate` | 251 | readonly+ | 读取详情 |
+| GET | `/api/v1/page-templates/:type/preview` | `pagehandler.PreviewPageTemplate` | 252 | readonly+ | 页面模板预览 |
+| POST | `/api/v1/page-templates/:type` | `pagehandler.UpdatePageTemplate` | 333 | admin/operator | 更新页面模板 |
+| POST | `/api/v1/page-templates/:type/reset` | `pagehandler.ResetPageTemplate` | 334 | admin/operator | 重置页面模板 |
+| POST | `/api/v1/page-templates/:type/preview` | `pagehandler.PreviewPageTemplateDraft` | 335 | admin/operator | 页面模板草稿预览 |
+| POST | `/api/v1/error-pages/preview` | `errorpage.PreviewErrorPage` | 351 | admin/operator | 错误页预览 |
+| GET | `/api/v1/network-config` | `system.GetNetworkConfig` | 208 | readonly+ | 读取详情 |
+| GET | `/api/v1/tls-config` | `system.GetTLSDefaultConfig` | 209 | readonly+ | TLS 默认配置读取 |
+| GET | `/api/v1/tls-cipher-suites` | `system.ListCipherSuites` | 210 | readonly+ | TLS 套件清单 |
+| GET | `/api/v1/http2-config` | `system.GetHTTP2Config` | 211 | readonly+ | 读取详情 |
+| GET | `/api/v1/image-transform` | `system.GetImageTransformConfig` | 212 | readonly+ | 图片改写配置读取 |
+| GET | `/api/v1/redis-config` | `system.GetRedisConfig` | 213 | readonly+ | 读取详情 |
+| GET | `/api/v1/log-config` | `system.GetLogConfig` | 214 | readonly+ | 读取详情 |
+| GET | `/api/v1/runtime-config` | `system.GetRuntimeConfig` | 246 | readonly+ | 运行时配置读取 |
+| GET | `/api/v1/runtime-config/env-overrides` | `system.ListRuntimeConfigOverrides` | 247 | readonly+ | 环境变量覆盖清单 |
+| POST | `/api/v1/network-config` | `system.UpdateNetworkConfig` | 390 | 仅 admin | 更新 |
+| POST | `/api/v1/runtime-config/env-overrides` | `system.UpdateRuntimeConfigOverrides` | 391 | 仅 admin | 环境变量覆盖写入 |
+| POST | `/api/v1/http2-config` | `system.UpdateHTTP2Config` | 392 | 仅 admin | 更新 |
+| POST | `/api/v1/image-transform` | `system.UpdateImageTransformConfig` | 393 | 仅 admin | 更新配置 |
+| POST | `/api/v1/redis-config` | `system.UpdateRedisConfig` | 394 | 仅 admin | 更新 |
+| POST | `/api/v1/log-config` | `system.UpdateLogConfig` | 395 | 仅 admin | 更新 |
+| POST | `/api/v1/tls-config` | `system.UpdateTLSDefaultConfig` | 396 | 仅 admin | 更新 |
+
+**章节来源**
+- [router.go:208-214](file://internal/admin/router.go#L208-L214)
+- [router.go:239-252](file://internal/admin/router.go#L239-L252)
+- [router.go:333-351](file://internal/admin/router.go#L333-L351)
+- [router.go:390-396](file://internal/admin/router.go#L390-L396)
+
+### 仪表盘、上游、实时、重载与备份端点
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/dashboard/summary` | `dashboard.DashboardSummary` | 203 | readonly+ | 仪表盘汇总 |
+| GET | `/api/v1/upstreams/status` | `adminupstream.UpstreamStatus` | 245 | readonly+ | 上游连接池状态 |
+| GET | `/api/v1/realtime/ticket` | `RealtimeHub.TicketHandler` | 248 | readonly+ | 实时订阅票据 |
+| GET | `/api/v1/realtime/ws` | `RealtimeHub.WebSocketHandler` | 424 | 公开 | WebSocket 实时订阅（票据鉴权） |
+| POST | `/api/v1/reload` | `system.ReloadSnapshot` | 313 | admin/operator | 重载快照 |
+| GET | `/api/v1/backup/export` | `system.ExportBackup` | 381 | 仅 admin | 导出 |
+| POST | `/api/v1/backup/import` | `system.ImportBackup` | 382 | 仅 admin | 导入 |
+
+**章节来源**
+- [router.go:202-203](file://internal/admin/router.go#L202-L203)
+- [router.go:245-248](file://internal/admin/router.go#L245-L248)
+- [router.go:313-313](file://internal/admin/router.go#L313-L313)
+- [router.go:380-388](file://internal/admin/router.go#L380-L388)
+- [router.go:424-424](file://internal/admin/router.go#L424-L424)
+
+### 管理端令牌与管理员账号端点
+
+管理端令牌（`/api-keys`）与管理员账号（`/admin-users`）的读端点为 `readonly+`，写端点全部仅 admin。
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/api/v1/api-keys` | `adminapikey.ListAPIKeys` | 205 | readonly+ | 令牌列表 |
+| POST | `/api/v1/api-keys` | `adminapikey.CreateAPIKey` | 400 | 仅 admin | 新建 |
+| POST | `/api/v1/api-keys/:id/delete` | `adminapikey.DeleteAPIKey` | 401 | 仅 admin | 删除 |
+| GET | `/api/v1/admin-users` | `ListAdminUsers` | 207 | readonly+ | 列表查询 |
+| POST | `/api/v1/admin-users` | `CreateAdminUser` | 403 | 仅 admin | 新建 |
+| POST | `/api/v1/admin-users/:id/update-password` | `UpdateAdminPassword` | 404 | 仅 admin | 更新 |
+| POST | `/api/v1/admin-users/:id/update-role` | `UpdateAdminRole` | 405 | 仅 admin | 更新 |
+| POST | `/api/v1/admin-users/:id/delete` | `DeleteAdminUser` | 406 | 仅 admin | 删除 |
+
+**章节来源**
+- [router.go:205-207](file://internal/admin/router.go#L205-L207)
+- [router.go:400-406](file://internal/admin/router.go#L400-L406)
+- [admin_users.go:22-88](file://internal/admin/admin_users.go#L22-L88)
+- [apikey.go:26-90](file://internal/admin/system/apikey/apikey.go#L26-L90)
+
+### 数据面与公开端点
+
+以下端点不在 `/api/v1` 鉴权分组内，由控制面实例根直接注册，供浏览器挑战脚本与 CA 校验访问。
+
+| 方法 | 路径 | 处理函数 | 注册行 | 权限 | 说明 |
+|------|------|----------|:------:|------|------|
+| GET | `/__owaf/pow.wasm` | `challengepow.ServePoWWASM`（内联闭包） | 418 | 公开 | 下发 PoW WASM 模块 |
+| GET | `/__owaf/pow_glue.js` | `challengepow.ServePowGlueJS`（内联闭包） | 421 | 公开 | 下发 PoW glue JS |
+| GET | `/.well-known/acme-challenge/:token` | 内联闭包 + `ACMEStore.GetChallengeResponse` | 425 | 公开 | ACME HTTP-01 应答 |
+
+**章节来源**
+- [router.go:418-437](file://internal/admin/router.go#L418-L437)
 
 ## 依赖关系分析
-- 控制面启动：主程序启动后构建运行时、迁移数据库、初始化事件写入与归档、指标收集、WAF 引擎、速率限制器、IP 黑名单、配置同步与 Prometheus 指标。
-- 路由注册：在管理服务器上注册健康检查、认证、受控 API 与静态文件回退。
-- 数据面：按站点热启停，支持 TLS 终止与 SNI 证书。
+
+端点注册只依赖一个装配入口 `RegisterRoutes(h, deps)`，全部 handler 通过 `Dependencies` 结构体注入，避免处理器各自持有全局状态。
 
 ```mermaid
 graph LR
-Main["main.go 启动"] --> Runtime["运行时初始化"]
-Runtime --> DB["数据库迁移"]
-Runtime --> Engine["WAF 引擎"]
-Engine --> RL["速率限制器"]
-Engine --> IPRep["IP信誉"]
-Runtime --> Admin["管理服务器注册路由"]
-Admin --> DataPlane["数据面监听器"]
+Dep["Dependencies<br/>router.go:60-87"] --> Reg["RegisterRoutes<br/>router.go:89"]
+Reg --> AuthDeps["AuthDeps<br/>auth.go:18-26"]
+Reg --> Repos["repository.Repos"]
+Reg --> Snapshot["snapshot.Holder"]
+Reg --> Mgrs["TokenMgr / BruteForce / SessionMgr"]
+AuthDeps --> Handlers["认证端点处理器"]
+Repos --> Handlers2["资源端点处理器"]
+Snapshot --> Handlers2
+Mgrs --> Handlers
 ```
 
 **图表来源**
-- [路由设计规范.md:233-236](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L233-L236)
-- [管理 API 系统.md:218-232](file://docs/管理 API 系统/管理 API 系统.md#L218-L232)
+- [router.go:60-120](file://internal/admin/router.go#L60-L120)
+- [auth.go:18-26](file://internal/admin/auth.go#L18-L26)
+
+下表为端点对外部实体的依赖归属，用于判断集成点失效时哪些端点会受影响。
+
+| 外部实体 | 类型 | 交互方向 | 依赖端点组 | 失败影响 | 容错处理 |
+|----------|------|:--------:|------------|----------|----------|
+| GORM 主库 | 存储 | 出向 | 全部读写端点 | `500` / `503` | 认证类返回 `503`，资源类返回 `500` |
+| 日志库 `LogDB` | 存储 | 出向 | 事件、访问日志、仪表盘 | 列表为空或 `500` | 无（风险） |
+| Redis KV | 第三方 | 出向 | `redis-config`、仪表盘 | 缓存降级 | 可选客户端，缺失时跳过 |
+| ACME CA | 第三方 | 出向 | `certificates/acme/*` | 签发/续签失败 | `ACMEStore` 缓存应答 |
+| NVD / CVE Feed | 第三方 API | 出向 | `cve-rules/sync` | 同步失败 | 订阅源状态端点暴露 |
+| `RealtimeHub` | 调度 | 双向 | `realtime/ticket`、`realtime/ws` | 推送中断 | WebSocket 自带票据校验 |
+| 上游连接池 | 存储 | 出向 | `upstreams/status` | 状态不可见 | 只读，无副作用 |
 
 **章节来源**
-- [管理 API 系统.md:218-240](file://docs/管理 API 系统/管理 API 系统.md#L218-L240)
-- [路由设计规范.md:218-232](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L218-L232)
+- [router.go:60-87](file://internal/admin/router.go#L60-L87)
+- [router.go:380-388](file://internal/admin/router.go#L380-L388)
 
-## 性能考量
-- 本地缓存：响应缓存（GET 安全请求）与快照缓存（进程内），减少重复计算与 IO。
-- 速率限制：本地与 Redis 双栈滑动窗口限流，支持分布式部署。
-- 配置漂移检测：站点监听器指纹校验，变更时自动重启，保证一致性。
-- TLS 优化：按站点配置 TLS，支持 ALPN 与 SNI，降低握手开销。
-- 前端静态资源：由后端统一托管，减少跨域与额外请求。
+## 性能考虑
+
+端点侧的性能约束集中在分页上限、聚合窗口与静态段路由优先级三点。
+
+| 约束 | 取值 | 来源 | 影响面 |
+|------|------|------|--------|
+| 单页条数上限 | `page_size ≤ 200` | `utils.MaxPageSize` | 所有分页列表端点 |
+| 默认页长 | `page_size = 20` | `utils.Paginate` | 所有分页列表端点 |
+| 站点资源聚合上限 | 前端最多聚合 10 页 | `api.ts:31` | `sites/:id/*` 列表 |
+| 事件聚合窗口 | 默认 24 小时，上限 720 小时 | `security.go:17-37` | `*/stats`、`*/timeline` |
+| 刷新 Cookie 清理批量 | `CleanExpired(64)` | `auth.go:115` | `auth/login`、`auth/refresh` |
+| 静态段路由优先 | `stats`/`requests` 须排在 `:id` 前 | `router.go:160-174` | 插件、事件列表 |
 
 **章节来源**
-- [路由设计规范.md:241-253](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L241-L253)
-- [管理 API 系统.md:425-431](file://docs/管理 API 系统/管理 API 系统.md#L425-L431)
+- [utils.go:8-41](file://internal/utils/utils.go#L8-L41)
+- [api.ts:27-31](file://frontend/lib/api.ts#L27-L31)
+- [security.go:17-37](file://internal/admin/event/security.go#L17-L37)
+- [auth.go:111-115](file://internal/admin/auth.go#L111-L115)
+- [router.go:160-174](file://internal/admin/router.go#L160-L174)
 
 ## 故障排查指南
-- 401 未授权：检查 Authorization 头格式（Bearer）、刷新令牌 Cookie 是否存在且有效；查看前端自动刷新逻辑与错误提示。
-- 权限不足（403）：确认用户角色是否满足目标资源与动作的最低要求。
-- 速率限制（429）：检查请求频率与窗口设置，必要时调整保护配置。
-- 静态资源 404：确认请求路径是否为 API 路径，否则应由 SPA 回退处理。
-- 日志定位：启用访问日志中间件，结合 X-Request-ID 追踪请求链路。
+
+端点层的定位路径为：先确认端点存在与权限分组，再看载荷与鉴权。
+
+```mermaid
+flowchart TD
+Start(["调用返回异常"]) --> Exist{"路径与方法<br/>在端点总表中？"}
+Exist --> |否| FixPath["按总表改正路径<br/>注意 POST 动作后缀"]
+Exist --> |是| Code{"状态码"}
+Code --> |401| AuthChk["检查 Bearer 令牌<br/>或 API Key 归属账号"]
+Code --> |403| RoleChk["比对端点表权限列<br/>readonly+/admin/operator/仅 admin"]
+Code --> |404| RouteChk["确认分组与静态段顺序"]
+Code --> |429| LockChk["暴力破解锁定<br/>读 retry_after_secs"]
+Code --> |500/503| DepChk["依赖项：DB/Redis/CA/Feed"]
+AuthChk --> End(["恢复调用"])
+RoleChk --> End
+FixPath --> End
+RouteChk --> End
+LockChk --> End
+DepChk --> End
+```
+
+**图表来源**
+- [middleware.go:46-147](file://internal/admin/middleware.go#L46-L147)
+- [router.go:448-456](file://internal/admin/router.go#L448-L456)
+
+控制面错误码取值口径如下（载荷字段与错误语义细节见[错误处理机制](错误处理机制.md)）。
+
+| HTTP | 触发条件 | 错误载荷关键字段 | 常见定位入口 |
+|:----:|----------|------------------|--------------|
+| 400 | 请求体绑定失败、路径参数非法、字段校验不通过 | `error` | 处理函数绑定分支 |
+| 401 | 缺少 Authorization 头、非 Bearer 格式、令牌无效、刷新凭据失效 | `error`、`remaining_attempts` | `AuthMiddleware` |
+| 403 | 角色不满足分组要求、改密时旧口令错误、越权改他人口令 | `error` | `RequireRole` |
+| 404 | 端点未注册（`/api/` 前缀）、资源或会话不存在 | `error: endpoint not found` | `NoRoute` 回退 |
+| 409 | 管理员账号重名 | `error` | `admin_users.go` |
+| 429 | 登录失败次数达到锁定阈值 | `error`、`retry_after_secs` | `LoginHandler` |
+| 500 | 令牌签发/落库失败、业务写库异常、吊销链失败 | `error` | 各处理函数错误分支 |
+| 503 | 认证依赖未就绪、令牌黑名单不可用、刷新仓储不可用 | `error` | `AuthMiddleware`、`auth.go` |
 
 **章节来源**
-- [路由设计规范.md:255-265](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L255-L265)
-- [请求响应格式规范.md:383-396](file://docs/管理 API 系统/REST API 设计规范/请求响应格式规范.md#L383-L396)
+- [router.go:448-456](file://internal/admin/router.go#L448-L456)
+- [middleware.go:55-121](file://internal/admin/middleware.go#L55-L121)
+- [auth.go:36-135](file://internal/admin/auth.go#L36-L135)
+- [admin_users.go:40-88](file://internal/admin/admin_users.go#L40-L88)
 
 ## 结论
-本规范以实际代码为基础，明确了版本控制、资源命名、路由注册、HTTP 方法使用、安全与性能优化策略。通过严格的中间件链与角色权限控制，确保 API 的安全性与可维护性；通过静态文件回退与前端 SPA 集成，提供良好的用户体验。建议在后续版本中逐步引入更细粒度的 RBAC 与审计日志，持续提升系统的可观测性与合规性。
+
+本篇以 `router.go` 的注册语句为唯一事实源，穷举了控制面 217 个端点的方法、路径、处理函数、注册行号与权限分组，并给出处理器归属、外部依赖与端点层错误码口径。端点清单的可核对性来自三个设计选择：注册位置集中、权限按分组统一声明、写操作以 POST 动作后缀表达。后续新增端点只需在对应分组追加注册语句，并同步本篇的分组计数与资源表即可。
 
 ## 附录
 
-### API 路由清单（节选）
-- 健康检查：GET /api/v1/health
-- 认证：POST /api/v1/auth/login, POST /api/v1/auth/refresh, POST /api/v1/auth/logout
-- 用户信息：GET /api/v1/auth/me
-- 会话管理：GET /api/v1/auth/sessions, POST /api/v1/auth/sessions/force-logout
-- 站点管理：GET/POST /api/v1/sites, GET/POST /api/v1/sites/:id/update, GET/POST /api/v1/sites/:id/delete, GET/POST /api/v1/sites/:id/start, GET/POST /api/v1/sites/:id/stop
-- 证书管理：GET/POST /api/v1/certificates, GET/POST /api/v1/certificates/:id/update, GET/POST /api/v1/certificates/:id/delete
-- 策略管理：GET/POST /api/v1/policies, GET/POST /api/v1/policies/:id/update, GET/POST /api/v1/policies/:id/delete
-- 规则管理：GET/POST /api/v1/rules, GET/POST /api/v1/rules/:id/update, GET/POST /api/v1/rules/:id/delete, POST /api/v1/rules/test, POST /api/v1/rules/validate, POST /api/v1/rules/import, GET /api/v1/rules/templates, GET /api/v1/rules/export
-- 保护设置：GET/POST /api/v1/protection-settings
-- IP 名单：GET/POST /api/v1/ip-lists, GET/POST /api/v1/ip-lists/:id/update, GET/POST /api/v1/ip-lists/:id/delete
-- 安全事件：GET /api/v1/security-events, GET /api/v1/security-events/stats, GET /api/v1/security-events/timeline, GET /api/v1/security-events/:id
-- 仪表盘：GET /api/v1/dashboard/summary
-- API Key 管理：GET /api/v1/api-keys, POST /api/v1/api-keys, POST /api/v1/api-keys/:id/delete
-- Bot 设置：GET /api/v1/bot-settings, GET /api/v1/bot-scores, GET /api/v1/fingerprints
-- CVE 规则：GET/POST /api/v1/cve-rules, GET/POST /api/v1/cve-rules/:id/update, GET/POST /api/v1/cve-rules/:id/delete, POST /api/v1/cve-rules/:id/toggle, POST /api/v1/cve-rules/sync, GET /api/v1/cve-feed/status
-- 系统设置：GET/POST /api/v1/settings, GET/POST /api/v1/settings/:key, GET/POST /api/v1/settings/:key/update, GET/POST /api/v1/settings/:key/delete
-- 重载：POST /api/v1/reload
-- 下发策略：GET/POST /api/v1/drop-policy, GET /api/v1/drop-stats, GET /api/v1/drop-events
+### 请求参数表
+
+下表为跨端点复用的通用请求参数，取自实际解析代码。资源专有参数见对应业务 API 文档。
+
+| 参数 | 位置 | 类型 | 必填 | 约束 | 默认 | 示例 | 说明 |
+|------|:----:|------|:----:|------|------|------|------|
+| `page` | query | int | 否 | ≥ 1，越界钳制 | `1` | `2` | 页码 |
+| `page_size` | query | int | 否 | `1..200` | `20` | `50` | 页长 |
+| `id` | path | uint | 是 | > 0，非法即 `400` | — | `12` | 资源 ID |
+| `key` | path | string | 是 | 非空设置键 | — | `protection` | 系统设置键 |
+| `type` | path | string | 是 | 页面模板类型 | — | `block` | 模板类型段 |
+| `request_id` | path | string | 是 | 非空 | — | `{request_id}` | 单请求追踪键 |
+| `ip` | path | string | 是 | 合法 IP | — | `{client_ip}` | 升级链状态查询 |
+| `all` | query | string | 否 | 仅 `true` 生效且需 admin | 不生效 | `true` | 会话列表取全量 |
+| `hours` | query | int | 否 | `1..720` | `24` | `168` | 统计聚合窗口 |
+| `q` | query | string | 否 | 关键词 | 空 | `sqli` | 事件/日志模糊查询 |
+| `action` | query | string | 否 | 动作枚举 | 空 | `intercept` | 按判定动作过滤 |
+| `phase` | query | string | 否 | 阶段枚举 | 空 | `request` | 按处理阶段过滤 |
+| `category` | query | string | 否 | 类别枚举 | 空 | `sqli` | 按事件类别过滤 |
+| `client_ip` | query | string | 否 | 合法 IP | 空 | `{client_ip}` | 按客户端 IP 过滤 |
+| `since` / `until` | query | string | 否 | RFC3339，解析失败即忽略 | 空 | `2026-01-01T00:00:00Z` | 时间范围 |
+| `Authorization` | header | string | 条件 | `Bearer {access_token}` | 无 | `Bearer {access_token}` | 受控端点必填 |
+| `my_openwaf_rt` | cookie | string | 条件 | `{jti}.{raw}` | 无 | `{jti}.{raw}` | 刷新令牌 |
 
 **章节来源**
-- [路由设计规范.md:272-291](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L272-L291)
-- [管理 API 系统.md:494-586](file://docs/管理 API 系统/管理 API 系统.md#L494-L586)
+- [utils.go:8-41](file://internal/utils/utils.go#L8-L41)
+- [security.go:27-130](file://internal/admin/event/security.go#L27-L130)
+- [access.go:17-57](file://internal/admin/event/access.go#L17-L57)
+- [auth_session.go:27-31](file://internal/admin/auth_session.go#L27-L31)
+- [auth_helpers.go:14-61](file://internal/admin/auth_helpers.go#L14-L61)
+- [helpers.go:81-84](file://internal/admin/shared/helpers.go#L81-L84)
 
-### 配置项参考
-- 数据库与存储：驱动、DSN、数据目录、Redis 地址与密码、Admin 绑定地址、Admin 静态目录。
-- Bot 检测：启用开关、GeoIP 数据库路径、阈值、高风险国家、数据中心与 VPN/代理 ASN 列表。
-- Drop 策略：启用开关、Bot 阈值、CVE 自动封禁策略。
-- 环境变量：MY_OPENWAF_DB_DRIVER、MY_OPENWAF_DSN/MY_OPENWAF_DB、MY_OPENWAF_DATA、MY_OPENWAF_REDIS_ADDR/PASSWORD/DB、MY_OPENWAF_ADMIN_BIND、MY_OPENWAF_ADMIN_STATIC_DIR、MY_OPENWAF_GEOIP_DB、MY_OPENWAF_BOT_THRESHOLD、MY_OPENWAF_CVE_ENABLED/FEED_ENABLED/FEED_INTERVAL/NVD_API_KEY/CVE_AUTO_APPROVE、MY_OPENWAF_DROP_ENABLED/DROP_BOT_THRESHOLD。
+### 请求体字段表（典型写端点）
+
+| 端点 | 字段 | 位置 | 类型 | 必填 | 约束 | 说明 |
+|------|------|:----:|------|:----:|------|------|
+| `/auth/login` | `username` | body | string | 是 | 非空 | 登录名 |
+| `/auth/login` | `password` | body | string | 是 | 非空 | 口令，响应不回显 |
+| `/auth/change-password` | `old_password` | body | string | 是 | 非空 | 校验当前口令 |
+| `/auth/change-password` | `new_password` | body | string | 是 | ≥ 8 字符 | 新口令 |
+| `/admin-users` | `username` | body | string | 是 | ≤ 64 字符 | 账号名 |
+| `/admin-users` | `password` | body | string | 是 | ≥ 8 字符 | 初始口令 |
+| `/admin-users` | `role` | body | string | 否 | `admin`/`operator`/`readonly`，缺省 `readonly` | 角色 |
+| `/admin-users/:id/update-role` | `role` | body | string | 是 | 同上枚举 | 变更后吊销该账号凭据 |
+| `/api-keys` | `name` | body | string | 否 | ≤ 128 字节，空则置 `unnamed` | 令牌名称 |
+| `/auth/sessions/force-logout` | `jti` | body | string | 是 | 非空 | 目标会话 |
+| `/rules/test` | `pattern` | body | string | 是 | 可被 `ParsePattern` 解析 | 规则模式 |
+| `/rules/test` | `client_ip` | body | string | 否 | 合法 IP | 合成请求字段 |
+| `/rules/test` | `path` / `query` / `method` / `body` | body | string | 否 | — | 合成请求字段 |
+| `/rules/test` | `headers` | body | map | 否 | 键值对 | 合成请求头 |
 
 **章节来源**
-- [路由设计规范.md:295-302](file://docs/管理 API 系统/REST API 设计规范/路由设计规范.md#L295-L302)
-- [系统设置 API.md:304-322](file://docs/管理 API 系统/系统设置 API.md#L304-L322)
+- [auth.go:28-31](file://internal/admin/auth.go#L28-L31)
+- [auth.go:319-334](file://internal/admin/auth.go#L319-L334)
+- [auth_session.go:41-48](file://internal/admin/auth_session.go#L41-L48)
+- [admin_users.go:33-70](file://internal/admin/admin_users.go#L33-L70)
+- [admin_users.go:90-110](file://internal/admin/admin_users.go#L90-L110)
+- [apikey.go:56-70](file://internal/admin/system/apikey/apikey.go#L56-L70)
+- [rule.go:210-240](file://internal/admin/rule/rule.go#L210-L240)
+
+### 响应字段表
+
+| 端点组 | 字段 | 类型 | 恒返回 | 可为空 | 说明 |
+|--------|------|------|:------:|:------:|------|
+| 登录/刷新 | `access_token` | string | 是 | 否 | 短期访问令牌 |
+| 登录/刷新 | `expires_at` | int64 | 是 | 否 | Unix 秒 |
+| 登录/刷新 | `username` | string | 是 | 否 | 账号名 |
+| 登录/刷新 | `role` | string | 是 | 否 | `admin`/`operator`/`readonly` |
+| `/auth/me` | `username` | string | 是 | 是 | 未认证时为空值 |
+| `/auth/me` | `role` | string | 是 | 是 | 同上 |
+| 登出/强退 | `status` | string | 是 | 否 | 固定 `ok` |
+| `/auth/sessions` | `sessions` | array | 是 | 否 | 空结果返回空数组 |
+| `/auth/sessions` | `sessions[].jti` | string | 是 | 否 | 会话标识 |
+| `/auth/sessions` | `sessions[].refresh_jti` | — | 否 | — | 有意不序列化 |
+| 列表端点 | `items` | array | 是 | 否 | 分页结果 |
+| 列表端点 | `total` | int/int64 | 是 | 否 | 总条数 |
+| 列表端点 | `page` | int | 条件 | 是 | 事件与访问日志类返回，站点列表不返回 |
+| `/api-keys` 创建 | `token` | string | 是 | 否 | 一次性明文，此后不再返回 |
+| `/api-keys` 创建 | `id` / `name` / `user_id` / `username` | — | 是 | 否 | 令牌归属信息 |
+| 删除端点 | — | — | — | — | `204` 无响应体 |
+
+**章节来源**
+- [auth.go:122-127](file://internal/admin/auth.go#L122-L127)
+- [auth.go:234-239](file://internal/admin/auth.go#L234-L239)
+- [auth.go:293-303](file://internal/admin/auth.go#L293-L303)
+- [auth_session.go:17-33](file://internal/admin/auth_session.go#L17-L33)
+- [session.go:14-25](file://internal/admin/auth/session.go#L14-L25)
+- [apikey.go:77-82](file://internal/admin/system/apikey/apikey.go#L77-L82)
+- [security.go:50-54](file://internal/admin/event/security.go#L50-L54)
+- [access.go:68-68](file://internal/admin/event/access.go#L68-L68)

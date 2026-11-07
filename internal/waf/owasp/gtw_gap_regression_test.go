@@ -16,9 +16,36 @@ import (
 // internal/core/rules（extractMultipartFieldValues / extractFormValues），
 // 其回归测试见 internal/core/rules/gtw_body_extract_regression_test.go。
 
-// TestGTWFPHPFuncCallCmd 覆盖 PHP 变量函数调用 `${@fn(...)}`：
-// gotestwaf community-rce-rawrequests 的 `cmd=${@print(md5(31337))}` 属此语法，
-// 原 cmd:022（`$(` 形态）不覆盖 `${@`，检出为空。
+func TestGTWOverlongUTF8AfterNestedURLDecode(t *testing.T) {
+	payload := "%25C0%25AE%25C0%25AE%25C0%25AF%25C0%25AE%25C0%25AE%25C0%25AFetc%25C0%25AFpasswd"
+	normalized := normalizeWithDecodeTarget(payload, true)
+	if !strings.Contains(normalized, "../../etc/passwd") {
+		t.Fatalf("nested overlong UTF-8 did not normalize to traversal path: %q", normalized)
+	}
+	hits := CheckOWASP("mid", "/", "", map[string]string{"content-type": "application/json"}, []string{payload})
+	for _, hit := range hits {
+		if hit.Category == CatPathTrav {
+			return
+		}
+	}
+	t.Fatalf("CheckOWASP missed nested overlong UTF-8 path traversal; hits=%+v", hits)
+}
+
+func TestGTWEntityXSSFormTarget(t *testing.T) {
+	payload := "&gt;+src+onerror=confirm&amp;lpar;1&amp;rpar;&lt;"
+	normalized := normalizeWithDecodeTarget(payload, true)
+	if !strings.Contains(normalized, "onerror=confirm(1)") {
+		t.Fatalf("HTML entity XSS target did not normalize correctly: %q", normalized)
+	}
+	hits := CheckOWASP("mid", "/", "", map[string]string{"content-type": "application/x-www-form-urlencoded"}, []string{payload})
+	for _, hit := range hits {
+		if hit.Category == CatXSS {
+			return
+		}
+	}
+	t.Fatalf("CheckOWASP missed HTML entity XSS form target; hits=%+v", hits)
+}
+
 func TestGTWFPHPFuncCallCmd(t *testing.T) {
 	positives := []string{
 		"cmd=${@print(md5(31337))}",
@@ -29,7 +56,7 @@ func TestGTWFPHPFuncCallCmd(t *testing.T) {
 	}
 	for _, s := range positives {
 		norm := normalizeWithDecode(s)
-		hit, ok := checkCmdInjection(norm, 4)
+		hit, ok := checkCmdInjection(norm, 4, nil)
 		if !ok {
 			t.Fatalf("PHP ${@ 调用形态 %q 未被命令注入检出（归一后 %q）", s, norm)
 		}
@@ -50,7 +77,7 @@ func TestGTWFPHPFuncCallCmd(t *testing.T) {
 		"${ json.encode(t) }",
 	}
 	for _, s := range negatives {
-		if hit, ok := checkCmdInjection(normalizeWithDecode(s), 4); ok {
+		if hit, ok := checkCmdInjection(normalizeWithDecode(s), 4, nil); ok {
 			t.Fatalf("良性变量插值 %q 被误判为命令注入（%s）", s, hit.RuleID)
 		}
 	}
@@ -61,7 +88,7 @@ func TestGTWFPHPFuncCallCmd(t *testing.T) {
 		if !pat.re.MatchString(strings.ToLower(s)) {
 			t.Fatalf("owasp:cmd:036 正则未命中正例 %q", s)
 		}
-		if !shouldScanCmdPattern(strings.ToLower(s), pat) {
+		if !shouldScanCmdPattern(strings.ToLower(s), pat, nil) {
 			t.Fatalf("owasp:cmd:036 前置把正则命中的正例 %q 剪掉了", s)
 		}
 	}
@@ -86,7 +113,7 @@ func TestGTWFUTF7PreDecode(t *testing.T) {
 	if !strings.Contains(norm, "<!doctype foo[") || !strings.Contains(norm, "<!entity") {
 		t.Fatalf("UTF-7 XML 未解码为标记原文，归一结果 = %q", norm)
 	}
-	hit, ok := checkXXE(norm, 4)
+	hit, ok := checkXXE(norm, 4, nil)
 	if !ok {
 		t.Fatalf("UTF-7 编码的 XXE 文档未检出（归一结果 %q）", norm)
 	}
@@ -99,7 +126,7 @@ func TestGTWFUTF7PreDecode(t *testing.T) {
 	if !strings.Contains(frag, "<!doctype foo[") {
 		t.Fatalf("UTF-7 片段未预解码，结果 = %q", frag)
 	}
-	if _, ok := checkXXE(frag, 4); !ok {
+	if _, ok := checkXXE(frag, 4, nil); !ok {
 		t.Fatalf("UTF-7 片段 %q 未检出", frag)
 	}
 
@@ -127,7 +154,7 @@ func TestGTWFUTF7PreDecode(t *testing.T) {
 
 	// 反例 3：XML 正文里的 UTF-7 字面量（无 +A 编码序列）保持原样。
 	plain := "<!DOCTYPE foo [ <!ENTITY data SYSTEM \"netdoc:/etc/passwd\">]><foo>&data;</foo>"
-	if _, ok := checkXXE(normalizeWithDecode(plain), 4); !ok {
+	if _, ok := checkXXE(normalizeWithDecode(plain), 4, nil); !ok {
 		t.Fatal("非 UTF-7 的常规 XXE 文档漏检")
 	}
 }
@@ -135,6 +162,31 @@ func TestGTWFUTF7PreDecode(t *testing.T) {
 // TestGTWFAlnumSQLiPhrase 覆盖「干净目标短路」误杀 SQLi 的问题：
 // `1e1 union select users from password` 全由字母数字与空格组成，
 // isCleanTarget 判定为干净目标直接跳过扫描，而 sqli:001 恰恰依赖词边界
+// TestGTWWideCRLFPathInjection 覆盖 owasp/crlf 最后一条旁路：
+// %e5%98%8d 归一为 \r 后必须保留到 CRLF 检测，不能被空白折叠成空格。
+func TestGTWWideCRLFPathInjection(t *testing.T) {
+	const raw = "/%e5%98%8dSet-cookie%3acrlf%3dinjection"
+	norm := normalizeTarget(raw, false)
+	if !strings.ContainsAny(norm, "\r\n") {
+		t.Fatalf("宽字符换行在归一化阶段丢失，归一结果 = %q", norm)
+	}
+	hits := CheckOWASP("mid", raw, "", nil, nil)
+	for _, hit := range hits {
+		if hit.Category == CatCRLF {
+			return
+		}
+	}
+	t.Fatalf("宽字符 CRLF 注入未命中，hits = %+v", hits)
+}
+
+// TestGTWWhitespaceStillCollapsed 确认只对宽字符换行保留证据，
+// 普通空白仍按既有语义折叠成单个空格。
+func TestGTWWhitespaceStillCollapsed(t *testing.T) {
+	if got := normalizeTarget("a%20%20%20b", false); got != "a b" {
+		t.Fatalf("普通空白折叠语义改变，归一结果 = %q", got)
+	}
+}
+
 // 匹配这类短语。短路条件补充 hasSuspiciousKeywords 后恢复检出。
 func TestGTWFAlnumSQLiPhrase(t *testing.T) {
 	positives := []string{
@@ -180,7 +232,7 @@ func TestGTWFAlnumSQLiPhrase(t *testing.T) {
 		if hit, ok := nextSQLiHit(normalizeWithDecode(s), 4); ok {
 			t.Fatalf("良性字母数字文本 %q 被 SQLi 电池误判（%s）", s, hit.RuleID)
 		}
-		if hit, ok := checkCmdInjection(normalizeWithDecode(s), 4); ok {
+		if hit, ok := checkCmdInjection(normalizeWithDecode(s), 4, nil); ok {
 			t.Fatalf("良性字母数字文本 %q 被命令注入电池误判（%s）", s, hit.RuleID)
 		}
 	}

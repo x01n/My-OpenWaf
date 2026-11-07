@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"log/slog"
 
 	"My-OpenWaf/internal/store/access"
 	"My-OpenWaf/internal/store/approute"
@@ -123,7 +124,27 @@ func AutoMigrate(db *gorm.DB) error {
 	return migrations.V11MigrateSiteAntiReplayInheritance(db)
 }
 
+// AutoMigrateLogs 完成日志库结构迁移，并同步回填历史指纹摘要。
+// 测试与小库使用该入口；生产启动请用 AutoMigrateLogsDeferred。
 func AutoMigrateLogs(db *gorm.DB) error {
+	return autoMigrateLogs(db, true)
+}
+
+/**
+ * AutoMigrateLogsDeferred 与 AutoMigrateLogs 的结构迁移完全一致，但把历史
+ * 指纹回填放到后台执行。
+ *
+ * 13GB / 1310 万行的日志库回填会持续数十秒，放在启动关键路径会把 readyz
+ * 阻塞同样时长。回填幂等且带完成标记，进程中途退出后下次启动会续跑。
+ *
+ * @param db 日志库句柄。
+ * @return 结构迁移错误；后台回填错误通过日志上报。
+ */
+func AutoMigrateLogsDeferred(db *gorm.DB) error {
+	return autoMigrateLogs(db, false)
+}
+
+func autoMigrateLogs(db *gorm.DB, syncBackfill bool) error {
 	if err := db.AutoMigrate(
 		&SecurityEvent{},
 		&AccessLog{},
@@ -132,10 +153,27 @@ func AutoMigrateLogs(db *gorm.DB) error {
 	); err != nil {
 		return err
 	}
-	if err := migrations.V12MigrateAccessLogFingerprintKey(db); err != nil {
+	// 列与索引的补齐是元数据操作，可放在启动关键路径。
+	if err := migrations.V12EnsureAccessLogFingerprintKey(db); err != nil {
 		return err
 	}
-	return migrations.V13MigrateSecurityEventRuleInfo(db)
+	if err := migrations.V13MigrateSecurityEventRuleInfo(db); err != nil {
+		return err
+	}
+	// 老库上残留的空闲索引只会放大写入成本，AutoMigrate 不会删除它们。
+	if err := migrations.V14MigrateAccessLogIndexTrim(db); err != nil {
+		return err
+	}
+	if syncBackfill {
+		return migrations.V12BackfillAccessLogFingerprintKey(db)
+	}
+	// 回填排在全部结构迁移之后：后台 goroutine 与 GORM Migrator 共用同一
+	// 会话会竞争 Statement，独立 Session 隔离两者的链式状态。
+	background := db.Session(&gorm.Session{NewDB: true})
+	migrations.V12StartAccessLogFingerprintBackfill(background, func(err error) {
+		slog.Error("log fingerprint backfill failed", slog.Any("err", err))
+	})
+	return nil
 }
 
 func BumpRevision(db *gorm.DB) error {

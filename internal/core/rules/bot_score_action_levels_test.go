@@ -217,15 +217,8 @@ func bsaRun(t *testing.T, ctx *pipeline.RequestCtx, rep *iprep.IPReputation, lim
 	return phase.Execute(ctx)
 }
 
-// bsaBehaviorKey 复刻 botPhase 的行为窗口 key（clientIP|host|bot）。
-// 这是**接口契约**（跨阶段共享同一份频率数据、且不与限流计数叠加），
-// 决定了本文件能否预置计数来构造指定档位。
 func bsaBehaviorKey(ctx *pipeline.RequestCtx) string {
-	key := ""
-	if ctx.ClientIP != nil {
-		key = ctx.ClientIP.String()
-	}
-	return key + "|" + ctx.Host + "|bot"
+	return RateLimitKey(ctx.Bind, ctx.SiteID, ctx.Host, ctx.ClientIP) + botBehaviorKeySuffix
 }
 
 // bsaPrimeBehavior 预置行为窗口计数，使 Execute 内的 +1 之后恰好等于 want。
@@ -678,17 +671,13 @@ func TestBSADangerFlagPropagatesToLog(t *testing.T) {
 	})
 }
 
-// 六、行为模块接入：botPhase 的行为频率链路
-
 // TestBSABehaviorWindowIsIsolatedFromRateLimiter 行为分使用独立窗口 key，
 // 不与限流阶段的计数叠加（否则限流阈值会被隐形减半）。
 func TestBSABehaviorWindowIsIsolatedFromRateLimiter(t *testing.T) {
 	ctx := bsaCtx(bsaBrowserHeaders())
 	ctx.ClientIP = net.ParseIP("198.51.100.70")
 	limiter := bsaNewLimiter()
-
-	// 先让限流阶段用掉同一个 (ip|host) key。
-	rateKey := ctx.ClientIP.String() + "|" + ctx.Host
+	rateKey := RateLimitKey(ctx.Bind, ctx.SiteID, ctx.Host, ctx.ClientIP)
 	limiter.Allow(rateKey)
 	limiter.Allow(rateKey)
 

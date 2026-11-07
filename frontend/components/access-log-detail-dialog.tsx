@@ -40,6 +40,7 @@ import {
 import { ActionBadge } from "@/components/action-badge"
 import { AccessLogOriginBadge } from "@/components/access-log-origin-badge"
 import { Skeleton } from "@/components/ui/skeleton"
+import { tlsSniDisplayValue } from "@/lib/tls-sni-presence"
 import {
   applyEncoding,
   capMessage,
@@ -252,7 +253,15 @@ export function AccessLogDetailDialog({
   })
   const fingerprintFields = [
     { label: t("securityEventDetail.tlsVersion"), value: log.tls_version },
-    { label: t("securityEventDetail.sni"), value: log.tls_sni },
+    {
+      label: t("securityEventDetail.sni"),
+      value: tlsSniDisplayValue(
+        log.tls_sni,
+        log.tls_sni_presence,
+        t("securityEventDetail.sniAbsent"),
+        t("securityEventDetail.sniUnknown")
+      ),
+    },
     { label: t("securityEventDetail.alpn"), value: log.tls_alpn },
     { label: t("securityEventDetail.tlsJa4"), value: log.tls_ja4 },
     { label: t("securityEventDetail.tlsJa3Hash"), value: log.tls_ja3_hash },
@@ -493,6 +502,9 @@ export function AccessLogDetailDialog({
                 {t("securityEventDetail.upstreamHttpProtocol")}:{" "}
                 {log.upstream_http_protocol}
               </span>
+            )}
+            {log.zero_rtt && (
+              <span className="text-amber-600 dark:text-amber-400">0-RTT (early data)</span>
             )}
           </div>
           <p className="mt-2 text-[11px] text-muted-foreground">

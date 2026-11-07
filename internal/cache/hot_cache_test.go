@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,9 @@ func TestHotCacheNilRedisIsNoop(t *testing.T) {
 	}
 	h.Set("k", map[string]string{"a": "b"}, 0)
 	h.SetBytes("k", []byte("x"), 0)
+	if h.SetIfAbsent("k", map[string]string{"a": "b"}, time.Minute) {
+		t.Error("nil Redis 时 SetIfAbsent 应返回 false")
+	}
 
 	hits, misses := h.HitStats()
 	if hits != 0 || misses != 0 {
@@ -207,4 +211,41 @@ func TestHotCacheIgnoresResultsFromReplacedClient(t *testing.T) {
 			t.Fatal("stale success must not heal the replacement client's breaker")
 		}
 	})
+}
+
+// TestHotCacheInvalidateManyDeletesAllKeysInOneCommand 验证批量失效在一次
+// DEL 中删除全部键：逐键调用会产生 N 次网络往返，删除一批指纹聚合键时
+// 成本会随键数线性上升。
+func TestHotCacheInvalidateManyDeletesAllKeysInOneCommand(t *testing.T) {
+	mock := startKVMiniRedis(t)
+	client := newKVTestClient(t, mock.ln.Addr().String())
+	h := newSilentHotCache(client)
+
+	for _, key := range []string{"fp:a", "fp:b", "keep"} {
+		h.Set(key, key, time.Minute)
+	}
+	h.InvalidateMany([]string{"fp:a", "fp:b"})
+
+	for _, key := range []string{"fp:a", "fp:b"} {
+		var got string
+		if h.Get(key, &got) {
+			t.Fatalf("key %q survived InvalidateMany", key)
+		}
+	}
+	var got string
+	if !h.Get("keep", &got) || got != "keep" {
+		t.Fatalf("unrelated key was removed: got=%q ok=%v", got, got != "")
+	}
+
+	mock.mu.Lock()
+	delCommands := 0
+	for _, cmd := range mock.cmdLog {
+		if strings.HasPrefix(cmd, "DEL ") {
+			delCommands++
+		}
+	}
+	mock.mu.Unlock()
+	if delCommands != 1 {
+		t.Fatalf("DEL commands = %d, want a single batched DEL", delCommands)
+	}
 }

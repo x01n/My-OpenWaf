@@ -2,773 +2,296 @@
 
 > [返回 WAF 引擎系统](../WAF 引擎系统.md)
 
+> 分工说明：本篇只写**引擎侧**内容——`owasp_default` 阶段的注册、执行入口、与流水线的交互、请求体目标抽取与命中结果构造。规则清单、检测算法、误报抑制与配置项详见 [OWASP 检测](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md)、[基本 OWASP 规则](file://docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md)、[检测算法与技术](file://docs/安全防护功能/OWASP 检测/检测算法与技术.md)、[配置与管理](file://docs/安全防护功能/OWASP 检测/配置与管理.md)，两处不重复同一张规则明细表。
+
 <cite>
 **本文档引用的文件**
-- [internal/waf/owasp/owasp.go](file://internal/waf/owasp/owasp.go)
-- [internal/waf/owasp/owasp_extended.go](file://internal/waf/owasp/owasp_extended.go)
-- [internal/waf/owasp/owasp_registry.go](file://internal/waf/owasp/owasp_registry.go)
-- [internal/waf/owasp/base64sqli_test.go](file://internal/waf/owasp/base64sqli_test.go)
-- [internal/waf/owasp/blazetest_test.go](file://internal/waf/owasp/blazetest_test.go)
-- [internal/waf/owasp/owasp_test.go](file://internal/waf/owasp/owasp_test.go)
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md)
-- [docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md](file://docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md)
-- [docs/安全防护功能/OWASP 检测/检测算法与技术.md](file://docs/安全防护功能/OWASP 检测/检测算法与技术.md)
-- [docs/安全防护功能/OWASP 检测/配置与管理.md](file://docs/安全防护功能/OWASP 检测/配置与管理.md)
+- [phases.go](file://internal/core/rules/phases.go)
+- [phase_skip.go](file://internal/core/rules/phase_skip.go)
+- [owasp.go](file://internal/waf/owasp/owasp.go)
+- [engine.go](file://internal/core/engine/engine.go)
+- [pipeline.go](file://internal/core/pipeline/pipeline.go)
+- [action.go](file://internal/core/action/action.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
-6. [依赖分析](#依赖分析)
-7. [性能考量](#性能考量)
+6. [依赖关系分析](#依赖关系分析)
+7. [性能考虑](#性能考虑)
 8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件系统化梳理 My-OpenWaf 的 OWASP 默认检测阶段，覆盖 OWASP Top 10 常见攻击类型的检测规则与实现，包括 SQL 注入、XSS、命令注入、路径穿越、服务器端请求伪造（SSRF）等。文档重点阐述：
-- 规则分类与优先级（基础规则与扩展规则）
-- 检测精度优化策略（误报抑制、阈值控制、输入归一化）
-- 规则更新与维护机制（新增规则、阈值调整、规则组合）
-- 配置示例与调试方法（敏感度、阈值、动作）
-- 与其他安全机制的协同（ACL、Bot、CVE、速率限制）
+本文件系统梳理 My-OpenWaf 的 `owasp_default` 阶段在 WAF 引擎中的定位与实现。该阶段是全 11 阶段链的第 5 位（`ip_reputation → anti_replay → acl → lua_pre → owasp_default → cve_detection → bot_detection → browser_sign → rate_limit → signature → custom`，engine.go:465-548），在昂贵的深度检测链中承担 OWASP Top 10 类攻击的默认扫描。引擎侧关注三点：如何按防护配置条件入链、`Execute` 如何在管道内组织多源目标扫描并返回动作、命中后如何归一化为 `action.Result`。规则本身的内容与算法不在本篇展开。
+
+> 关键订正：ACL 的 `allow` 动作**不短路**，因此命中 ACL 白名单后请求仍会进入 OWASP；要绕过 OWASP 昂贵检测需使用 IP 信誉**全局白名单**（stop=true）或配置按路径跳过（`GetSkipPathByPhase`）。
 
 ## 项目结构
-My-OpenWaf 采用"控制面 + 数据面"的双服务器架构，OWASP 检测位于数据面处理管线中，通过规则编译器与流水线阶段共同完成请求拦截与放行决策。
+OWASP 检测能力分布在"算法包 + 引擎阶段"两侧：
 
-```mermaid
-graph TB
-subgraph "控制面"
-Admin["管理接口<br/>REST API + 嵌入式前端"]
-end
-subgraph "数据面"
-Listener["监听器"]
-Engine["WAF 引擎"]
-Pipeline["处理流水线"]
-Phases["阶段集合<br/>IPReputation → AntiReplay → ACL → OWASP → CVE → BotDetection → RequestRateLimit → Signature → Custom"]
-OWASP["OWASP 检测引擎<br/>基础/扩展规则"]
-Block["阻断响应渲染"]
-end
-Admin --> Engine
-Listener --> Engine
-Engine --> Pipeline
-Pipeline --> Phases
-Phases --> OWASP
-OWASP --> Block
-```
+| 位置 | 角色 | 说明 |
+|---|---|---|
+| [internal/waf/owasp/owasp.go](file://internal/waf/owasp/owasp.go) | 检测算法 | 归一化、阈值、规则命中，详见子文档 |
+| [internal/core/rules/phases.go](file://internal/core/rules/phases.go) | 引擎阶段 | `owaspPhase` 执行入口与结果构造 |
+| [internal/core/engine/engine.go](file://internal/core/engine/engine.go) | 装配 | 条件入链与阶段缓存 |
 
-**图表来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:43-62](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L43-L62)
+`owasp_default` 阶段在引擎中的相关符号：
+
+| 符号 | 文件:行 | 签名 | 职责 |
+|---|---|---|---|
+| `owaspPhase` | phases.go:593-601 | struct | 持有 cfg、阈值、覆盖等编译期快照 |
+| `NewOWASPPhase` | phases.go:603-614 | `(cfg *store.ProtectionConfig) pipeline.Phase` | 预计算类别敏感度/阈值/上传与协议开关 |
+| `owaspPhase.Name` | phases.go:616 | `() string` | 返回 `"owasp_default"` |
+| `owaspPhase.Execute` | phases.go:618-685 | `(ctx) (action.Result,bool)` | 多源扫描并返回首个接受命中 |
+| `owaspHitResult` | phases.go:687-718 | `(hit,cfg,overrides) action.Result` | 命中→动作/规则名/覆盖归一化 |
 
 **章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:39-73](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L39-L73)
+- [phases.go:593-718](file://internal/core/rules/phases.go#L593-L718)
+- [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498)
 
 ## 核心组件
-- OWASP 默认检测阶段：负责扫描路径、查询串、头部、表单/JSON/Multipart 字段等，支持上传文件名与内容类型校验。
-- OWASP 扩展检测：针对 SSRF、命令注入、XXE、LDAP 注入、NoSQL 注入、模板注入、JNDI/Log4Shell、CRLF、表达式语言注入、反序列化、协议违规等专项规则。
-- 规则编译与匹配：基于 DSL 的规则解析与缓存，支持复合条件（and/or/not）。
-- 流水线与引擎：按固定顺序执行各阶段，首个拦截结果短路后续阶段；支持 ACL 白名单直接放行。
-- 阻断页面渲染：根据站点运行时配置或全局默认模板生成阻断页。
+- 阶段构造：`NewOWASPPhase` 一次性把 `ProtectionConfig` 折算为类别敏感度映射、`CompiledThresholds`、文件上传与协议违规开关，避免每请求重算（phases.go:603-614）。
+- 执行入口：`Execute` 按"上传文件名 → 方法违规 → 主扫描 → 敏感端点兜底"的顺序检查，命中即经 `owaspHitResult` 返回（phases.go:618-685）。
+- 目标缓存：请求体目标经 `extractBodyTargets` 抽取后缓存在 `RequestCtx.BodyTargets`，供 OWASP 与 CVE 复用（pipeline.go:53-56、phases.go:653-657）。
+- 动作归一化：`owaspHitResult` 用规则级覆盖优先、否则用 `cfg.OWASPAction`，并从注册表补 `RuleName`/`RuleDesc`（phases.go:687-718）。
 
 **章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:74-86](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L74-L86)
+- [phases.go:593-718](file://internal/core/rules/phases.go#L593-L718)
+- [pipeline.go:53-56](file://internal/core/pipeline/pipeline.go#L53-L56)
 
 ## 架构总览
-OWASP 检测在数据面以"OWASP 默认阶段"为核心，结合"扩展规则子系统"，在请求进入上游前完成多层过滤与评分。整体流程如下：
+`owasp_default` 仅当 `prot.OWASPEnabled` 为真时入链（engine.go:496-498），且可被按路径跳过装饰包裹。请求在阶段内的判定流转如下：
+
+| 步 | 动作 | 执行位置 | 命中产物 | 短路 |
+|:--:|---|---|---|---|
+| 1 | 上传文件名检查 | phases.go:628-651 | upload 命中 | 终端动作 stop=true |
+| 2 | 抽取并缓存 body 目标 | phases.go:653-657 | `BodyTargets` | - |
+| 3 | 方法违规检查 | phases.go:660-667 | proto 命中 | 终端动作 stop=true |
+| 4 | 主扫描（多目标） | phases.go:669 | `OWASPHit` | 终端动作 stop=true |
+| 5 | 敏感端点兜底 | phases.go:675-680 | endpoint 命中 | 终端动作 stop=true |
 
 ```mermaid
 sequenceDiagram
-participant Client as "客户端"
-participant Listener as "监听器"
-participant Engine as "WAF 引擎"
-participant Pipeline as "流水线"
-participant OWASP as "OWASP 阶段"
-participant Ext as "扩展规则"
-participant Upstream as "上游服务"
-Client->>Listener : HTTP 请求
-Listener->>Engine : 构建 RequestCtx
-Engine->>Pipeline : 执行阶段
-Pipeline->>OWASP : 提取目标并扫描
-OWASP->>Ext : 调用扩展规则检查
-Ext-->>OWASP : 返回命中结果
-OWASP-->>Pipeline : 最佳命中或放行
-alt 命中且动作为拦截/丢弃
-Pipeline-->>Client : 渲染阻断页
-else 放行
-Pipeline-->>Upstream : 转发请求
-end
+  autonumber
+  participant Pipe as "流水线"
+  participant PH as "owasp_default 阶段"
+  participant Eng as "OWASP 引擎"
+  participant Act as "action.Result"
+  Pipe->>PH : "Execute(ctx)"
+  PH->>Eng : "CheckFileUpload / CheckRawMultipartFilenames"
+  PH->>Eng : "CheckMethodViolation"
+  PH->>Eng : "FirstAcceptedOWASPHit(...BodyTargets)"
+  alt 命中且接受
+    Eng-->>PH : "OWASPHit"
+    PH->>Act : "owaspHitResult(动作/覆盖)"
+    Act-->>Pipe : "终端动作,stop=true 短路"
+  else 无命中
+    PH->>Eng : "CheckSensitiveEndpointPathWithBody 兜底"
+    PH-->>Pipe : "Pass() 或兜底命中"
+  end
 ```
 
 **图表来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:89-117](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L89-L117)
+- [phases.go:618-685](file://internal/core/rules/phases.go#L618-L685)
+
+**章节来源**
+- [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498)
+- [phases.go:618-685](file://internal/core/rules/phases.go#L618-L685)
 
 ## 详细组件分析
 
-### OWASP 默认阶段（基础规则）
-- 目标收集：路径、查询串、头部（过滤标准头）、Cookie 值（剔除可能的会话标识）、Referer 查询串与片段。
-- 输入归一化：多轮 URL 解码、HTML 实体解码、JS 转义解码、UTF-7 解码、SQL 注释剥离、空白折叠、大小写统一。
-- 快速通道：纯字母数字 + 安全字符的字符串跳过正则扫描；超长目标截断；重编码深度检测后二次扫描。
-- 敏感度阈值：低/中/高三档，分别对应不同阈值，用于聚合评分与命中判定。
-- 命中后动作：依据站点保护配置选择拦截或丢弃。
+### 阶段注册与入链
+`getOrBuildPhases` 在 `prot.OWASPEnabled` 时调用 `rules.NewOWASPPhase(prot)` 并经 `addPhase` 入链；`addPhase` 会按 `GetSkipPathByPhase()` 决定是否包一层 `skipByPathPhase` 装饰器（engine.go:471-498）。阶段链按 `{policyID,siteID,antiReplayEnabled}` 缓存，命中缓存需同时满足 `prot`/`lua`/`luaRevision`/`deps` 四判据（engine.go:461）。装饰器命中跳过路径时返回 `Pass(), false`——只跳过本阶段，不影响其余阶段（phase_skip.go:19-49）。
+
+入链相关条件速查：
+
+| 条件 | 取值来源 | 效果 |
+|---|---|---|
+| OWASPEnabled | `EffectiveProtection` 合并结果 | 决定是否入链 |
+| 跳过路径 | `GetSkipPathByPhase()["owasp_default"]` | 命中则该阶段短路返回 Pass |
+| 缓存四判据 | prot/lua/luaRevision/deps | 任一变更则重建链 |
+
+**章节来源**
+- [engine.go:461-498](file://internal/core/engine/engine.go#L461-L498)
+- [phase_skip.go](file://internal/core/rules/phase_skip.go)
+
+### 执行入口与判定顺序
+`Execute` 首先检查 `cfg.OWASPEnabled` 兜底，再按固定顺序短路返回。`fileUploadEnabled` 且 Content-Type 含 `multipart/form-data` 且有请求体时，先解析上传文件名逐个 `CheckFileUpload`，并做 `CheckRawMultipartFilenames` 原文兜底，防止 Go multipart 解析器漏掉被 `filepath.Base` 剥掉的路径穿越（phases.go:628-651）。方法违规在主扫描前检查，敏感端点探测刻意放在主扫描之后，只填补原本放行的请求（phases.go:660-680）。
 
 ```mermaid
-flowchart TD
-Start(["开始"]) --> Collect["收集目标<br/>路径/查询/头部/Cookie/Referer"]
-Collect --> CleanCheck{"是否为安全字符串？"}
-CleanCheck --> |是| Skip["跳过正则扫描"]
-CleanCheck --> |否| Normalize["多轮归一化<br/>URL/HTML/JS/UTF7/SQL注释/空白/小写"]
-Normalize --> Threshold["应用敏感度阈值"]
-Threshold --> Scan["基础规则扫描<br/>SQLi/XSS/命令注入/路径遍历等"]
-Scan --> FP["误报抑制<br/>结构化上下文判断"]
-FP --> Hits{"是否有命中？"}
-Hits --> |是| Action["按配置动作拦截/丢弃"]
-Hits --> |否| DeepScan["深度解码扫描<br/>JS转义/URL编码/BASE64提取"]
-DeepScan --> DeepFP["深度误报抑制"]
-DeepFP --> DeepHits{"深度扫描命中？"}
-DeepHits --> |是| Action
-DeepHits --> |否| Done(["结束"])
+stateDiagram-v2
+  state "上传文件名检查" as UP
+  state "方法违规检查" as MTH
+  state "多目标主扫描" as SCAN
+  state "敏感端点兜底" as EP
+  state "放行 Pass" as PASS
+  state "返回命中" as HIT
+  [*] --> UP
+  UP --> MTH: 未命中/跳过规则
+  UP --> HIT: CheckFileUpload 命中
+  MTH --> SCAN: 未命中
+  MTH --> HIT: CheckMethodViolation 命中
+  SCAN --> HIT: FirstAcceptedOWASPHit 命中
+  SCAN --> EP: 无命中
+  EP --> HIT: 端点探测命中
+  EP --> PASS: 仍无命中
+  HIT --> [*]
+  PASS --> [*]
 ```
 
 **图表来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:128-149](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L128-L149)
+- [phases.go:618-685](file://internal/core/rules/phases.go#L618-L685)
 
 **章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:119-155](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L119-L155)
+- [phases.go:618-685](file://internal/core/rules/phases.go#L618-L685)
 
-### OWASP 扩展阶段（专项规则）
-- SSRF：云元数据地址、私有/回环地址、本地套接字、文件/字典/LDAP 等方案、十进制/八进制/十六进制编码 IP、IPv6 映射、IMDSv2 头、Unix 套接字等。
-- 命令注入：管道/分号/反引号/$() 链接、重定向、环境变量赋值、IFS 空白绕过、管道连接、Here-string、ANSI-C 引号、Newline 注入、SSI、Git 参数注入等。
-- XXE：DOCTYPE、SYSTEM、实体展开、参数实体外带、XInclude。
-- LDAP 注入：括号组合、对象类、通配符。
-- NoSQL 注入：$where/$regex/$or/$exists/$lookup 等。
-- 模板注入（SSTI）：Jinja/Django/Twig、Freemarker/Velocity/JSP EL、ERB、Smarty、Python dunder、Pebble、EJS、Handlebars/Mustache、ThinkPHP、DedeCMS 等。
-- JNDI/Log4Shell：jndi:、${env/sys/java/base64:}、Unicode/URL 编码、嵌套表达式。
-- CRLF：回车换行注入、响应拆分。
-- 表达式语言（EL）：SpEL/OGNL/Spring EL、反射链、静态方法调用、上下文访问。
-- 反序列化：Java/PHP/Python/.NET/Ruby/Marshal 等魔数与特征。
-- 协议违规：CL+TE 冲突、重复 Content-Length、超大头部长度。
+### 请求体目标抽取
+`extractBodyTargets` 依 Content-Type 分派抽取器，并对误导性头部做嗅探，防止改头绕过（phases.go:950-1030）。上限常量：
+
+| Content-Type | 抽取器 | 规模上限 | 位置 |
+|---|---|---|---|
+| `application/x-www-form-urlencoded` | `extractFormValues`（键与值均扫） | 整串+分段 | [phases.go:1052-1094](file://internal/core/rules/phases.go#L1052-L1094) |
+| `application/json` | `extractJSONValues` | 深度≤10、值>100 剪枝 | [phases.go:1097-1144](file://internal/core/rules/phases.go#L1097-L1144) |
+| `multipart/form-data` | `extractMultipartFieldValues` | 20 段 × 4096 字节 | [phases.go:1177-1216](file://internal/core/rules/phases.go#L1177-L1216) |
+| `text/*`、`application/xml`、`soap` | 原文截取 | 8192 字节 | [phases.go:970-976](file://internal/core/rules/phases.go#L970-L976) |
+| 其他/缺失 | 嗅探或原始兜底 | `WAFBodyScanLimit` | [phases.go:977-1014](file://internal/core/rules/phases.go#L977-L1014) |
+
+> JSON 键按字典序遍历，使 `BodyTargets` 顺序稳定；OWASP 归因取"首个跨阈 target"，顺序即决定安全事件记录的 RuleID（phases.go:1107-1144）。
+
+**章节来源**
+- [phases.go:943-1144](file://internal/core/rules/phases.go#L943-L1144)
+
+### 命中结果与动作归一化
+`owaspHitResult` 先取 `cfg.OWASPAction` 经 `normalizeConfiguredAction`，若规则级覆盖 `override.Action` 非空则覆盖；补齐 `StatusCode`/`RedirectTo`/`CaptchaType`，且仅当动作为 `captcha_challenge` 时保留 `CaptchaType`。命中归因从注册表 `DefaultOWASPRegistry.Get` 取规则名与描述（phases.go:687-718）。返回值的 `stop` 由 `result.IsTerminal()` 决定，`normalizeConfiguredAction` 会把 `log` 归一化为 `observe`、非法动作回落 `intercept`（phases.go:1301-1310）。
+
+| 命中结果字段 | 来源 | 说明 |
+|---|---|---|
+| `Type` | `owaspHitResult` 归一化 | 配置动作或规则覆盖 |
+| `RuleIDStr` | `hit.RuleID` | 形如 `owasp:sqli:001`，须带 `owasp:` 前缀 |
+| `MatchScore` | `hit.Score` | 累计风险分 |
+| `Category` | `hit.Category` | 攻击类别 |
+
+**章节来源**
+- [phases.go:687-718](file://internal/core/rules/phases.go#L687-L718)
+- [phases.go:1301-1310](file://internal/core/rules/phases.go#L1301-L1310)
+
+### 敏感度与阈值
+引擎把档位折算为类别阈值：`sensitivityThresholdForNormalizedLevel` 定义六档取值（owasp.go:840-892），`NewOWASPPhase` 经 `CompileThresholds` 预计算（phases.go:603-614）。
+
+| 档位 | 阈值 | 语义 | 证据 |
+|---|:--:|---|---|
+| `off` | 停用 | 该类别不参与 | [owasp.go:862-870](file://internal/waf/owasp/owasp.go#L862-L870) |
+| `low` | 7 | 最宽松，误报最少 | [owasp.go:881-882](file://internal/waf/owasp/owasp.go#L881-L882) |
+| `mid`（默认） | 4 | 平衡档 | [owasp.go:889-890](file://internal/waf/owasp/owasp.go#L889-L890) |
+| `high` | 3 | 提高检出 | [owasp.go:883-884](file://internal/waf/owasp/owasp.go#L883-L884) |
+| `very_high` | 2 | 高威胁 | [owasp.go:885-886](file://internal/waf/owasp/owasp.go#L885-L886) |
+| `strict` | 1 | 最严格 | [owasp.go:887-888](file://internal/waf/owasp/owasp.go#L887-L888) |
+
+类别级、规则级覆盖通过 `EffectiveCategorySensitivity` 与 `OWASPRuleOverride` 生效，取值与配置口径详见 [配置与管理](file://docs/安全防护功能/OWASP 检测/配置与管理.md)。
+
+**章节来源**
+- [owasp.go:840-892](file://internal/waf/owasp/owasp.go#L840-L892)
+- [phases.go:603-614](file://internal/core/rules/phases.go#L603-L614)
+
+### 与流水线的短路交互
+`owasp_default` 返回 `(result, stop)` 后由 `pipeline.Run` 统一裁决（pipeline.go:517-560）：
+- `stop=true` 且非挑战类动作（intercept/drop/redirect/rate_limit）：立即返回，后续 `cve_detection`、`bot_detection`、`browser_sign`、`rate_limit`、`signature`、`custom` 均不再执行。
+- `stop=true` 且为挑战类（`challenge`/`captcha_challenge`/`shield_challenge`/`chain_challenge`）：作为 `pendingChallenge` 按 `TerminalPriority` 择优保留，链继续，可能被更高优先级终止动作覆盖。
+- Observe 类命中（`ShouldLog && !IsTerminal`）被收集进 `ObserveHits`，不短路。
+
+| 命中动作 | IsTerminal | 终端优先级 | 链上后续 | 默认状态码 |
+|---|:--:|:--:|---|:--:|
+| `intercept` | 是 | 80 | 立即短路 | 403 |
+| `drop` | 是 | 90 | 立即短路并关 TCP | - |
+| `challenge` | 是 | 60 | 延迟保留，链继续 | 403 |
+| `captcha_challenge` | 是 | 60 | 延迟保留，链继续 | 403 |
+| `redirect` | 是 | 50 | 立即短路 | 302 |
+| `observe` | 否 | 10 | 收集观察命中，链继续 | - |
+
+**章节来源**
+- [pipeline.go:517-560](file://internal/core/pipeline/pipeline.go#L517-L560)
+- [action.go:88-119](file://internal/core/action/action.go#L88-L119)
+- [action.go:168-203](file://internal/core/action/action.go#L168-L203)
+
+## 依赖关系分析
+`owasp_default` 的依赖以"引擎装配 → 阶段 → 算法包"单向流动，无反向依赖。
+
+| 依赖方 | 被依赖对象 | 证据 |
+|---|---|---|
+| engine → owaspPhase | `NewOWASPPhase(prot)` 条件入链 | [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498) |
+| owaspPhase → owasp 算法 | `FirstAcceptedOWASPHit...` 等 | [phases.go:669](file://internal/core/rules/phases.go#L669) |
+| owaspPhase → RequestCtx | `BodyTargets`/`BodyTargetsDone` | [pipeline.go:53-56](file://internal/core/pipeline/pipeline.go#L53-L56) |
+| owaspPhase → action | `IsTerminal`/`Normalize` | [action.go:168-179](file://internal/core/action/action.go#L168-L179) |
 
 ```mermaid
-classDiagram
-class OWASP扩展规则 {
-+SSRF()
-+命令注入()
-+XXE()
-+LDAP注入()
-+NoSQL注入()
-+模板注入()
-+JNDI()
-+CRLF()
-+表达式语言()
-+反序列化()
-+协议违规()
-}
+graph LR
+E["engine.go<br/>getOrBuildPhases"] --> PH["phases.go<br/>owaspPhase.Execute"]
+PH --> ALG["owasp.go<br/>检测算法"]
+PH --> CTX["pipeline.go<br/>RequestCtx.BodyTargets"]
+ALG --> RES["action.go<br/>owaspHitResult"]
+RES --> PIPE["pipeline.go<br/>Run 短路"]
 ```
 
 **图表来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:169-198](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L169-L198)
+- [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498)
+- [phases.go:618-718](file://internal/core/rules/phases.go#L618-L718)
 
 **章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:156-211](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L156-L211)
+- [phases.go:618-718](file://internal/core/rules/phases.go#L618-L718)
+- [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498)
 
-### 规则分类与优先级
-- 基础规则：由 OWASP 默认阶段扫描，覆盖 SQL 注入、XSS、命令注入、路径遍历、WebShell、反向 Shell、SSRF、XXE、LDAP 注入、NoSQL 注入、模板注入、JNDI、CRLF、表达式语言、反序列化、文件上传、协议违规等。
-- 扩展规则：独立模块，针对特定攻击面的更细粒度规则与评分。
-- 优先级：规则按 priority 升序、ID 升序执行；ACL allow 可短路 ACL 之后的后续阶段；首个拦截结果即终止后续阶段。
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:212-220](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L212-L220)
-
-### 检测精度优化策略
-- 误报抑制：针对 XSS、SQLi、命令注入、路径遍历、SSRF、NoSQL 注入、表达式语言、反序列化等，内置上下文判断与结构化抑制逻辑。
-- 敏感度阈值：低/中/高三档阈值，降低误报同时保证高敏模式下的检出率。
-- 输入归一化：多轮解码与标准化，消除编码绕过与注释分割等规避手段。
-- 目标截断与预过滤：超长目标截断、快速安全字符串跳过、关键字预过滤减少正则开销。
-- Cookie 与 Referer 处理：剔除会话标识、仅扫描查询串与片段，避免误报。
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:221-232](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L221-L232)
-
-### 规则更新与维护机制
-- 新增规则：通过规则 DSL（kind:arg 或复合 JSON）定义，编译后按优先级排序执行。
-- 调整现有规则：修改规则的 kind/arg、优先级、动作；复合规则可组合 and/or/not。
-- 阈值调整：通过站点保护配置调整 OWASP 敏感度与动作；也可通过环境变量微调 Bot 与 Drop 阈值。
-- 规则验证：提供大量单元测试覆盖典型误报与漏报场景，确保更新后稳定性。
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:233-244](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L233-L244)
-
-### 配置示例与调试方法
-- 敏感度与动作：通过站点保护配置设置 OWASPEnabled、OWASPSensitivity、OWASPAction；支持 low/mid/high 与拦截/丢弃。
-- 环境变量：可通过 MY_OPENWAF_BOT_THRESHOLD、MY_OPENWAF_DROP_BOT_THRESHOLD 等调整 Bot 与 Drop 阈值。
-- 调试建议：使用测试用例定位误报/漏报；关注归一化前后差异；结合 Body 解析与 Cookie/Referer 处理逻辑验证。
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:245-255](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L245-L255)
-
-### 与其他安全机制的配合使用与最佳实践
-- ACL 白名单：allow 规则可直接放行，跳过 OWASP、签名与自定义阶段。
-- Bot 检测：两阶段评分（PreScreen → DeepScore），恶意分数达到阈值可直接丢弃连接。
-- CVE 检测：在 OWASP 之后执行，针对已知漏洞利用模式自动拦截或升级为丢弃。
-- 速率限制：在 Bot 之后执行，防止滥用。
-- 阻断页面：根据站点运行时配置或全局默认模板渲染，支持自定义状态码与 HTML。
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:256-268](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L256-L268)
-
-## 依赖分析
-OWASP 检测模块与规则系统、引擎、流水线之间存在清晰的依赖关系，遵循"规则编译 → 流水线执行 → 阶段扫描 → 命中动作"的链路。
-
-```mermaid
-graph TB
-OWASP["OWASP 默认阶段<br/>owasp.go"]
-EXT["OWASP 扩展阶段<br/>owasp_extended.go"]
-MATCHER["规则匹配器<br/>matcher.go"]
-PHASES["流水线阶段<br/>phases.go"]
-ENGINE["WAF 引擎<br/>engine.go"]
-PIPE["处理流水线<br/>pipeline.go"]
-MATCHER --> PHASES
-PHASES --> ENGINE
-ENGINE --> PIPE
-PIPE --> OWASP
-OWASP --> EXT
-```
-
-**图表来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:269-294](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L269-L294)
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:269-300](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L269-L300)
-
-## 性能考量
-- 快速预过滤：纯字母数字字符串直接跳过正则；关键字预过滤减少正则匹配次数。
-- 归一化成本控制：多轮解码与正则扫描限制在合理范围内，超长目标截断。
-- 正则缓存：规则编译时缓存正则表达式，避免重复编译。
-- 流水线短路：首个拦截结果立即终止后续阶段，降低整体延迟。
-- 体数据解析：按内容类型解析表单/JSON/Multipart，限制采样大小与递归深度，避免内存与 CPU 泄漏。
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:301-312](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L301-L312)
+## 性能考虑
+- 编译期预计算：`NewOWASPPhase` 在入链时把敏感度、阈值、上传/协议开关算好，运行期不再解析配置（phases.go:603-614）。
+- 目标复用：`BodyTargets` 只抽取一次并缓存，OWASP 与 CVE 共享（pipeline.go:53-56）。
+- 抽取上限约束：JSON 深度 10/值 100、multipart 20 段×4096、XML 8192，避免正则扫描在超大目标上失控（phases.go:1097-1216）。
+- 快速回落：主扫描取"首个跨阈 target"，命中后立即短路后续阶段，减少无谓扫描。
+- 派生头部按需：`needsDerivedHeaders` 仅在含相关 kind 的规则时才计算 TLS/头部派生字段（phases.go:72-104、227-249）。
+- 归一化成本：多轮解码与正则扫描的开销控制属算法侧，详见 [检测算法与技术](file://docs/安全防护功能/OWASP 检测/检测算法与技术.md)。
 
 ## 故障排查指南
-- 误报定位：通过测试用例验证误报场景，逐步缩小到具体规则与误报抑制逻辑。
-- 归一化问题：对比原始输入与归一化后的字符串，确认是否被过度解码或注释剥离导致误判。
-- 敏感度与阈值：根据业务风险调整敏感度档位与阈值，观察命中率与误报率变化。
-- 体数据扫描：检查表单/JSON/Multipart 解析逻辑，确认采样大小与字段提取是否符合预期。
-- Cookie/Referer：确认会话标识被正确剔除，避免误报；仅扫描查询串与片段。
+- 误报/漏报：调整敏感度档位（六档）与类别覆盖，详见 [配置与管理](file://docs/安全防护功能/OWASP 检测/配置与管理.md)。
+- 白名单未绕过 OWASP：ACL allow 不短路；应使用全局 IP 白名单或按路径跳过配置。
+- 上传漏检：确认 `fileUploadEnabled` 开启且 Content-Type 为 multipart；原文兜底可捕获被解析器剥掉的穿越文件名。
+- 归因漂移：同一请求记录成不同 RuleID 时，检查 `BodyTargets` 顺序是否因解析顺序变化（JSON 已按字典序固定）。
+
+| 症状 | 可能原因 | 排查点 |
+|---|---|---|
+| OWASP 未触发 | 全局默认关闭/站点未启用 | `OWASPEnabled`、入链条件 |
+| 上传文件名未拦 | 上传开关关闭 | `fileUploadEnabled` |
+| 动作与配置不符 | 规则级覆盖优先 | `owaspHitResult` 覆盖分支 |
 
 **章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:313-325](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L313-L325)
+- [phases.go:618-718](file://internal/core/rules/phases.go#L618-L718)
+- [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498)
 
 ## 结论
-My-OpenWaf 的 OWASP 检测体系通过"基础规则 + 扩展规则"的双层设计，结合严格的误报抑制、输入归一化与阈值控制，在性能与准确性之间取得平衡。规则 DSL 与流水线机制使得规则更新与维护便捷可控，配合 ACL、Bot、CVE、速率限制等安全机制，形成完整的防护闭环。
+`owasp_default` 阶段以"编译期预计算 + 运行期顺序短路"的方式把 OWASP 检测嵌入 11 阶段链的第 5 位。引擎侧只关心入链条件、执行入口顺序、请求体目标抽取与命中结果归一化；具体规则与算法由 owasp 包与子文档承载。理解 ACL allow 不短路这一语义，是正确配置白名单绕过路径的前提：若需跳过 OWASP，应使用全局 IP 白名单或按路径跳过装饰，而非依赖 ACL 允许规则。
 
 ## 附录
-- 规则 DSL 与复合条件：支持 and/or/not 组合，规则按优先级与 ID 排序执行。
-- 体数据解析：表单/JSON/Multipart 分别解析，键与值均参与扫描；二进制数据按可打印比例阈值决定是否扫描。
-- 阻断页面：支持站点运行时与全局默认模板，可自定义状态码与 HTML。
+
+### 与子文档的分工
+| 主题 | 归属文档 |
+|---|---|
+| 阶段注册/执行入口/流水线交互 | 本篇 |
+| 规则清单与检测算法 | [OWASP 检测](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md) 、[基本 OWASP 规则](file://docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md) |
+| 归一化与误报抑制细节 | [检测算法与技术](file://docs/安全防护功能/OWASP 检测/检测算法与技术.md) |
+| 敏感度/覆盖配置 | [配置与管理](file://docs/安全防护功能/OWASP 检测/配置与管理.md) |
+
+### 阶段属性速查
+| 属性 | 取值 |
+|---|---|
+| 阶段名 | `owasp_default` |
+| 注册位置 | [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498) |
+| 入链前置 | `prot.OWASPEnabled` |
+| 链上位置 | 第 5 位 |
+| 短路策略 | 命中终端动作短路；Challenge 延迟 |
 
 **章节来源**
-- [docs/安全防护功能/OWASP 检测/OWASP 检测.md:329-338](file://docs/安全防护功能/OWASP 检测/OWASP 检测.md#L329-L338)
-
-# OWASP 默认检测阶段技术文档
-
-## 检测流程架构
-
-### 多目标扫描架构
-OWASP 默认检测阶段采用多阶段扫描架构，确保对各种攻击类型的全面覆盖：
-
-```mermaid
-flowchart TD
-A["请求接收"] --> B["目标收集<br/>路径/查询/头部/Cookie/Referer"]
-B --> C["快速预过滤<br/>isCleanTarget/hasSuspiciousContent"]
-C --> D["输入归一化<br/>normalizeWithDecode"]
-D --> E["敏感度阈值<br/>CategoryThreshold"]
-E --> F["基础规则扫描<br/>SQLi/XSS/命令注入"]
-F --> G["误报抑制<br/>上下文判断"]
-G --> H{"命中检测？"}
-H --> |是| I["返回命中结果"]
-H --> |否| J["深度扫描<br/>Base64提取/JS解码"]
-J --> K["深度误报抑制"]
-K --> L{"深度命中？"}
-L --> |是| I
-L --> |否| M["协议级检查<br/>checkProtocolViolation"]
-M --> N["路径危险模式<br/>checkDangerousPath"]
-N --> O["文件上传检查<br/>checkPathFileUpload"]
-O --> P["最终结果"]
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:59-345](file://internal/waf/owasp/owasp.go#L59-L345)
-
-### 归一化处理机制
-系统实现了多层次的输入归一化处理，消除各种编码绕过技术：
-
-```mermaid
-flowchart TD
-A["原始输入"] --> B["过长UTF-8编码处理<br/>%C0%AE → '.'"]
-B --> C["多轮URL解码<br/>QueryUnescape + PathUnescape"]
-C --> D["HTML实体解码<br/>html.UnescapeString"]
-D --> E["JS转义解码<br/>\\xNN/\\uXXXX/八进制"]
-E --> F["UTF-7解码<br/>+ADw- → '<'"]
-F --> G["SQL注释剥离<br/>保留版本特定注释"]
-G --> H["空白折叠与小写化"]
-H --> I["最终归一化结果"]
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:498-566](file://internal/waf/owasp/owasp.go#L498-L566)
-
-### 误报抑制机制
-系统针对不同攻击类型实现了精细化的误报抑制策略：
-
-```mermaid
-classDiagram
-class SQLiFalsePositive {
-+isSQLiFalsePositive(raw, ruleID) bool
-+抑制场景：sleep()/benchmark()<br/>JavaScript函数调用
-+抑制场景：URL参数中的分号<br/>自然语言语句
-+抑制场景：搜索查询中的union<br/>文档内容
-}
-class XSSFalsePositive {
-+isXSSFalsePositive(normalized, ruleID) bool
-+抑制场景：CDN回调参数<br/>onload=callback
-+抑制场景：富文本内容<br/>SVG/iframe/embed
-+抑制场景：被动结构元素<br/>base/link/meta
-}
-class CmdFalsePositive {
-+isCmdInjectionFalsePositive(normalized, ruleID) bool
-+抑制场景：二进制POST主体<br/>空字节注入
-+抑制场景：协议数据<br/>telemetry/analytics
-+抑制场景：编程语言<br/>JavaScript函数调用
-}
-SQLiFalsePositive --> CmdFalsePositive : "类似抑制策略"
-XSSFalsePositive --> CmdFalsePositive : "类似抑制策略"
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:1542-1771](file://internal/waf/owasp/owasp.go#L1542-L1771)
-
-## 攻击类型检测算法
-
-### SQL 注入检测算法
-SQL 注入检测采用多层次的检测策略，包含关键词识别、正则匹配和上下文分析：
-
-```mermaid
-flowchart TD
-A["SQL注入检测"] --> B["关键词预过滤<br/>hasSQLiIndicator"]
-B --> C["正则表达式匹配<br/>sqliPatterns(23+规则)"]
-C --> D["上下文分析<br/>结构化SQL上下文"]
-D --> E["误报抑制<br/>isSQLiFalsePositive"]
-E --> F{"命中且通过抑制？"}
-F --> |是| G["返回OWASPHit"]
-F --> |否| H["继续其他检测"]
-subgraph "SQL检测规则"
-I["sqli:001<br/>UNION SELECT"]
-J["sqli:003<br/>时间延迟注入"]
-K["sqli:004<br/>堆叠查询"]
-L["sqli:005<br/>注释注入"]
-M["sqli:017<br/>OUTFILE/DUMPFILE"]
-end
-C --> I
-C --> J
-C --> K
-C --> L
-C --> M
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:1307-1355](file://internal/waf/owasp/owasp.go#L1307-L1355)
-- [internal/waf/owasp/owasp.go:1881-1953](file://internal/waf/owasp/owasp.go#L1881-L1953)
-
-### XSS 检测算法
-XSS 检测系统针对现代 Web 应用的各种 XSS 攻击变种进行了专门优化：
-
-```mermaid
-flowchart TD
-A["XSS检测"] --> B["事件处理器预过滤<br/>hasXSSIndicator"]
-B --> C["正则表达式匹配<br/>xssPatterns(150+规则)"]
-C --> D["活动执行上下文<br/>hasActiveXSSContext"]
-D --> E["误报抑制<br/>isXSSFalsePositive"]
-E --> F{"命中且通过抑制？"}
-F --> |是| G["返回OWASPHit"]
-F --> |否| H["继续其他检测"]
-subgraph "XSS检测模式"
-I["事件处理器<br/>onclick/onload"]
-J["JavaScript协议<br/>javascript:alert(1)"]
-K["DOM操作<br/>document.write"]
-L["SVG注入<br/><svg onload=alert(1)>"]
-M["表达式注入<br/>expression(alert(1))"]
-end
-C --> I
-C --> J
-C --> K
-C --> L
-C --> M
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:1357-1438](file://internal/waf/owasp/owasp.go#L1357-L1438)
-- [internal/waf/owasp/owasp.go:2069-2169](file://internal/waf/owasp/owasp.go#L2069-L2169)
-
-### 命令注入检测算法
-命令注入检测系统专门针对操作系统命令注入攻击：
-
-```mermaid
-flowchart TD
-A["命令注入检测"] --> B["指令预过滤<br/>hasCmdIndicator"]
-B --> C["正则表达式匹配<br/>cmdInjectPatterns(25+规则)"]
-C --> D["高置信度上下文<br/>管道/重定向/环境变量"]
-D --> E["误报抑制<br/>isCmdInjectionFalsePositive"]
-E --> F{"命中且通过抑制？"}
-F --> |是| G["返回OWASPHit"]
-F --> |否| H["继续其他检测"]
-subgraph "命令注入检测模式"
-I["管道操作符<br/>| id"]
-J["分号连接<br/>id; whoami"]
-K["反引号注入<br/>`whoami`"]
-L["环境变量<br/>PATH=/tmp ls"]
-M["重定向操作<br/>> /tmp/out"]
-end
-C --> I
-C --> J
-C --> K
-C --> L
-C --> M
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:1440-1454](file://internal/waf/owasp/owasp.go#L1440-L1454)
-- [internal/waf/owasp/owasp.go:1612-1679](file://internal/waf/owasp/owasp.go#L1612-L1679)
-
-### 路径穿越检测算法
-路径遍历检测系统专门针对文件系统路径遍历攻击：
-
-```mermaid
-flowchart TD
-A["路径穿越检测"] --> B["路径指示器<br/>hasPathTravIndicator"]
-B --> C["正则表达式匹配<br/>pathTravPatterns(16+规则)"]
-C --> D["敏感路径检查<br/>/etc/passwd/WEB-INF"]
-D --> E["误报抑制<br/>isPathTravFalsePositive"]
-E --> F{"命中且通过抑制？"}
-F --> |是| G["返回OWASPHit"]
-F --> |否| H["继续其他检测"]
-subgraph "路径穿越检测模式"
-I["相对路径<br/>../../../etc/passwd"]
-J["Windows路径<br/>\\windows\\system32\\cmd.exe"]
-K["进程信息<br/>/proc/self/environ"]
-L["Web配置<br/>WEB-INF/web.xml"]
-M["版本控制<br/>.git/config"]
-end
-C --> I
-C --> J
-C --> K
-C --> L
-C --> M
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:1524-1538](file://internal/waf/owasp/owasp.go#L1524-L1538)
-- [internal/waf/owasp/owasp.go:2171-2212](file://internal/waf/owasp/owasp.go#L2171-L2212)
-
-### SSRF 检测算法
-SSRF 检测系统专门针对服务器端请求伪造攻击：
-
-```mermaid
-flowchart TD
-A["SSRF检测"] --> B["SSRF指示器<br/>hasSSRFIndicator"]
-B --> C["正则表达式匹配<br/>ssrfPatterns(14+规则)"]
-C --> D["上下文感知<br/>URL方案/私有地址"]
-D --> E["误报抑制<br/>isSSRFFalsePositive"]
-E --> F{"命中且通过抑制？"}
-F --> |是| G["返回OWASPHit"]
-F --> |否| H["继续其他检测"]
-subgraph "SSRF检测模式"
-I["内部地址<br/>169.254.169.254"]
-J["私有网络<br/>10.0.0.1/192.168.1.1"]
-K["本地主机<br/>localhost/127.0.0.1"]
-L["文件协议<br/>file://etc/passwd"]
-M["Unix套接字<br/>unix:/var/run/mysql.sock"]
-end
-C --> I
-C --> J
-C --> K
-C --> L
-C --> M
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp_extended.go:14-31](file://internal/waf/owasp/owasp_extended.go#L14-L31)
-- [internal/waf/owasp/owasp_extended.go:77-98](file://internal/waf/owasp/owasp_extended.go#L77-L98)
-
-## 检测流程详细分析
-
-### 目标收集与预处理
-OWASP 检测阶段首先进行多源目标收集和预处理：
-
-```mermaid
-sequenceDiagram
-participant Request as "HTTP请求"
-participant Collector as "目标收集器"
-participant Cleaner as "预处理器"
-participant Normalizer as "归一化器"
-Request->>Collector : 提取路径/查询/头部
-Collector->>Collector : 解析Cookie值
-Collector->>Collector : 处理Referer查询串
-Collector->>Cleaner : 过滤标准头(skipHeaders)
-Cleaner->>Cleaner : 剔除会话标识
-Cleaner->>Normalizer : 传递清理后的目标
-Normalizer->>Normalizer : 多轮归一化处理
-Normalizer-->>Request : 返回归一化目标列表
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:628-744](file://internal/waf/owasp/owasp.go#L628-L744)
-
-### 快速过滤与指示器
-系统采用多层次的快速过滤机制：
-
-```mermaid
-flowchart TD
-A["输入字符串"] --> B["isCleanTarget<br/>纯字母数字+安全字符"]
-B --> C{"是否为安全字符串？"}
-C --> |是| D["直接跳过正则扫描"]
-C --> |否| E["hasSuspiciousContent<br/>可疑字符集扫描"]
-E --> F{"是否包含可疑内容？"}
-F --> |否| D
-F --> |是| G["hasSQLiIndicator/hasXSSIndicator<br/>分类指示器"]
-G --> H{"是否包含攻击指示器？"}
-H --> |否| D
-H --> |是| I["进入正则电池匹配"]
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:930-985](file://internal/waf/owasp/owasp.go#L930-L985)
-- [internal/waf/owasp/owasp.go:1307-1538](file://internal/waf/owasp/owasp.go#L1307-L1538)
-
-### 深度解码扫描机制
-针对复杂编码攻击，系统实现深度解码扫描：
-
-```mermaid
-flowchart TD
-A["长文本目标(≥30字符)"] --> B["包含JS转义(≥5个)？"]
-B --> |否| C["跳过深度扫描"]
-B --> |是| D["提取Base64令牌<br/>reBase64Token"]
-D --> E["hasBase64Candidate<br/>快速检查"]
-E --> F["decodeBase64IfSuspicious<br/>可疑Base64解码"]
-F --> G["normalize<br/>二次归一化"]
-G --> H["递归深度解码<br/>decodeTokens"]
-H --> I["正则表达式匹配"]
-I --> J["误报抑制"]
-J --> K{"命中？"}
-K --> |是| L["返回OWASPHit"]
-K --> |否| M["继续其他目标"]
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:1000-1084](file://internal/waf/owasp/owasp.go#L1000-L1084)
-- [internal/waf/owasp/owasp.go:1086-1200](file://internal/waf/owasp/owasp.go#L1086-L1200)
-
-## OWASP 检测配置最佳实践
-
-### 敏感度调节策略
-系统提供四档敏感度级别，每档对应不同的阈值控制：
-
-| 敏感度级别 | 阈值常量 | 适用场景 | 误报控制 |
-|------------|----------|----------|----------|
-| off | 0 | 完全关闭 | 无检测 |
-| low | 7 | 生产环境 | 严格误报抑制 |
-| mid | 4 | 默认推荐 | 平衡误报与检出 |
-| high | 3 | 安全审计 | 适度误报 |
-| very_high | 2 | 高威胁场景 | 较少误报 |
-| strict | 1 | 极致安全 | 最少误报 |
-
-**章节来源**
-- [internal/waf/owasp/owasp.go:573-586](file://internal/waf/owasp/owasp.go#L573-L586)
-
-### 头部跳过列表配置
-系统维护了标准头部跳过列表，避免误报：
-
-```mermaid
-classDiagram
-class SkipHeaders {
-+host : true
-+connection : true
-+content-length : true
-+content-type : false
-+accept : false
-+accept-language : true
-+accept-encoding : true
-+cookie : true
-+authorization : true
-+cache-control : true
-+pragma : true
-+dnt : true
-+te : true
-+origin : true
-+x-client-data : true
-}
-class ExtendedClientHints {
-+sec-ch-ua : true
-+sec-ch-ua-mobile : true
-+sec-ch-ua-platform : true
-+sec-ch-ua-arch : true
-+sec-ch-ua-bitness : true
-+sec-ch-ua-full-version : true
-+sec-ch-ua-full-version-list : true
-+sec-ch-ua-model : true
-+sec-ch-ua-platform-version : true
-}
-SkipHeaders --> ExtendedClientHints : "扩展头部处理"
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:588-626](file://internal/waf/owasp/owasp.go#L588-L626)
-
-### 性能优化策略
-系统采用多项性能优化技术：
-
-```mermaid
-flowchart TD
-A["性能优化策略"] --> B["目标长度限制<br/>maxTargetLen=16384"]
-A --> C["快速路径过滤<br/>isCleanTarget/hasSuspiciousContent"]
-A --> D["正则缓存<br/>regexCache"]
-A --> E["内容类型分支<br/>按类型解析"]
-A --> F["深度扫描阈值<br/>仅对可疑目标"]
-B --> G["避免正则爆炸"]
-C --> H["减少正则匹配次数"]
-D --> I["降低编译成本"]
-E --> J["避免二进制误报"]
-F --> K["平衡准确度与性能"]
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:38-46](file://internal/waf/owasp/owasp.go#L38-L46)
-- [internal/waf/owasp/owasp.go:930-985](file://internal/waf/owasp/owasp.go#L930-L985)
-
-## 检测规则示例与测试用例
-
-### 基础 OWASP 规则示例
-系统为各种攻击类型定义了详细的检测规则：
-
-#### SQL 注入规则示例
-| 规则ID | 检测模式 | 分数 | 描述 | 示例 |
-|--------|----------|------|------|------|
-| sqli:001 | `union\s*(all\s*)?select` | 5 | UNION SELECT 注入 | `1' UNION SELECT * FROM users--` |
-| sqli:003 | `(sleep|benchmark|waitfor\s+delay)\s*\(` | 5 | 时间延迟注入 | `1 AND (SELECT sleep(5))` |
-| sqli:004 | `;\s*(select|drop|alter|create|truncate|delete|update|insert)\s` | 5 | 堆叠查询注入 | `1; DROP TABLE users--` |
-| sqli:005 | `['"\d]\s*(--(?:[\s/]|$)|/\*)` | 3 | 注释注入 | `1' -- comment` |
-| sqli:017 | `(into\s+outfile|dumpfile)` | 5 | 文件写入注入 | `1' INTO OUTFILE '/tmp/shell.php'` |
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md:184-194](file://docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md#L184-L194)
-
-#### XSS 检测规则示例
-| 检测类别 | 检测模式 | 分数 | 示例 | 说明 |
-|----------|----------|------|------|------|
-| 脚本标签 | `<script[\s>]` | 5 | `<script>alert(1)</script>` | 直接脚本注入 |
-| 事件处理器 | `\bon(error|load|click|...)\s*=` | 5 | `onload="alert(1)"` | HTML事件处理器 |
-| JavaScript协议 | `javascript\s*:` | 5 | `javascript:alert(1)` | JavaScript协议 |
-| DOM操作 | `document\.(cookie|location|write|domain)` | 4 | `document.write()` | DOM操作 |
-| SVG注入 | `<svg[\s>]` | 2 | `<svg onload=alert(1)>` | SVG事件处理器 |
-| 表达式注入 | `expression\s*\(` | 3 | `expression(alert(1))` | CSS表达式注入 |
-
-**章节来源**
-- [docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md:241-249](file://docs/安全防护功能/OWASP 检测/基本 OWASP 规则.md#L241-L249)
-
-### 测试用例分析
-系统提供了丰富的测试用例来验证检测效果：
-
-#### 基础检测测试
-- **SQL 注入测试**：验证 UNION SELECT、时间延迟、堆叠查询等攻击模式
-- **XSS 检测测试**：验证脚本标签、事件处理器、JavaScript协议等攻击模式  
-- **命令注入测试**：验证管道操作符、分号连接、反引号注入等攻击模式
-- **路径穿越测试**：验证相对路径、Windows路径、敏感文件等攻击模式
-
-#### 高级检测测试
-- **Base64 SQLi 测试**：验证编码混淆的 SQL 注入攻击
-- **Blaze 测试套件**：使用第三方测试数据集验证检测精度
-- **误报抑制测试**：验证各种误报场景的抑制效果
-
-**章节来源**
-- [internal/waf/owasp/owasp_test.go:8-197](file://internal/waf/owasp/owasp_test.go#L8-L197)
-- [internal/waf/owasp/base64sqli_test.go:7-46](file://internal/waf/owasp/base64sqli_test.go#L7-L46)
-- [internal/waf/owasp/blazetest_test.go:18-156](file://internal/waf/owasp/blazetest_test.go#L18-L156)
-
-## 配置管理与最佳实践
-
-### 敏感度级别配置
-系统支持灵活的敏感度配置，可根据不同场景调整检测严格度：
-
-```mermaid
-flowchart TD
-A["敏感度配置"] --> B["全局敏感度<br/>OWASPSensitivity"]
-A --> C["类别级敏感度<br/>categorySensitivity"]
-A --> D["规则级敏感度<br/>per-rule override"]
-B --> E["low: 阈值7<br/>严格误报抑制"]
-B --> F["mid: 阈值4<br/>默认推荐"]
-B --> G["high: 阈值3<br/>安全审计"]
-B --> H["very_high: 阈值2<br/>高威胁场景"]
-B --> I["strict: 阈值1<br/>极致安全"]
-C --> J["按攻击类型单独配置"]
-D --> K["按规则ID单独配置"]
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp.go:557-586](file://internal/waf/owasp/owasp.go#L557-L586)
-
-### 规则注册与管理
-系统采用注册表模式管理 OWASP 规则：
-
-```mermaid
-classDiagram
-class OWASPRuleRegistry {
-+rules map[string]*OWASPRule
-+mu RWMutex
-+Register(rule)
-+Get(id) *OWASPRule
-+All() []*OWASPRule
-+AllByCategory(category) []*OWASPRule
-+Count() int
-}
-class OWASPRule {
-+ID string
-+Category string
-+Name string
-+Description string
-+Enabled bool
-+CheckFunc func(input) (score, matched, desc)
-}
-class OWASPRuleOverride {
-+Enabled *bool
-+Whitelist []string
-+Action string
-+StatusCode int
-+RedirectTo string
-+Sensitivity string
-}
-OWASPRuleRegistry --> OWASPRule : "管理"
-OWASPRuleRegistry --> OWASPRuleOverride : "配置"
-```
-
-**图表来源**
-- [internal/waf/owasp/owasp_registry.go:31-40](file://internal/waf/owasp/owasp_registry.go#L31-L40)
-- [internal/waf/owasp/owasp_registry.go:207-225](file://internal/waf/owasp/owasp_registry.go#L207-L225)
-
-### 性能优化配置
-系统提供了多项性能优化配置选项：
-
-- **目标长度限制**：maxTargetLen=16384，避免正则爆炸
-- **正则缓存**：regexCache 复用编译结果
-- **内容类型分支**：按 Content-Type 限制扫描范围
-- **深度扫描阈值**：仅对长文本(≥30)且包含较多JS转义(≥5)才触发深度解码
-
-**章节来源**
-- [internal/waf/owasp/owasp.go:38-46](file://internal/waf/owasp/owasp.go#L38-L46)
-- [internal/waf/owasp/owasp.go:176-216](file://internal/waf/owasp/owasp.go#L176-L216)
-
-## 结论
-My-OpenWaf 的 OWASP 默认检测阶段通过精心设计的多层检测架构、上下文感知的误报抑制机制和全面的性能优化策略，实现了对常见 OWASP Top 10 攻击类型的高精度检测。系统采用"快速路径过滤 + 多轮归一化 + 分类指示器 + 正则电池 + 上下文抑制 + 深度解码扫描"的组合，有效平衡了准确性与性能。配合灵活的配置选项和完善的测试体系，为不同场景下的安全防护提供了可靠的解决方案。
+- [phases.go:593-718](file://internal/core/rules/phases.go#L593-L718)
+- [engine.go:496-498](file://internal/core/engine/engine.go#L496-L498)

@@ -359,42 +359,43 @@ func SyncAntiReplayEnabledToProtection(settingsRepo *repository.SystemSettingsRe
 	return SaveProtectionConfig(settingsRepo, cfg)
 }
 
-// SyncProtectionCaptchaToSettings 将 protection 中的 CAPTCHA 开关同步到 bot_settings 投影。
-//
-// @param settingsRepo 系统设置仓库
-// @param enabled protection 中的 CAPTCHA 开关
-// @return 持久化错误
-func SyncProtectionCaptchaToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
-	current := BotSettingsResponse{ScoreThreshold: 60}
-	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &current)
+func syncBotSettingsFields(settingsRepo *repository.SystemSettingsRepo, fields map[string]any) error {
+	value, err := settingsRepo.Get("bot_settings")
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("get bot settings: %w", err)
 	}
-	if current.CaptchaEnabled == enabled {
-		return nil
+
+	settings := make(map[string]json.RawMessage)
+	if err == nil && strings.TrimSpace(value) != "" {
+		if err := json.Unmarshal([]byte(value), &settings); err != nil {
+			return fmt.Errorf("unmarshal bot settings: %w", err)
+		}
+		if settings == nil {
+			settings = make(map[string]json.RawMessage)
+		}
 	}
-	current.CaptchaEnabled = enabled
-	data, err := json.Marshal(current)
+	for key, field := range fields {
+		data, err := json.Marshal(field)
+		if err != nil {
+			return fmt.Errorf("marshal bot setting field %q: %w", key, err)
+		}
+		settings[key] = data
+	}
+	data, err := json.Marshal(settings)
 	if err != nil {
 		return fmt.Errorf("marshal bot settings: %w", err)
 	}
 	return settingsRepo.Set("bot_settings", string(data))
 }
 
+// SyncProtectionCaptchaToSettings 将 protection 中的 CAPTCHA 开关同步到 bot_settings 投影。
+func SyncProtectionCaptchaToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
+	return syncBotSettingsFields(settingsRepo, map[string]any{"captcha_enabled": enabled})
+}
+
 // SyncProtectionAntiReplayToSettings 把 protection 中的 AntiReplayEnabled 同步到 bot_settings。
 func SyncProtectionAntiReplayToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
-	current := BotSettingsResponse{ScoreThreshold: 60}
-	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &current)
-	}
-	if current.AntiReplayEnabled == enabled {
-		return nil
-	}
-	current.AntiReplayEnabled = enabled
-	data, err := json.Marshal(current)
-	if err != nil {
-		return fmt.Errorf("marshal bot settings: %w", err)
-	}
-	return settingsRepo.Set("bot_settings", string(data))
+	return syncBotSettingsFields(settingsRepo, map[string]any{"anti_replay_enabled": enabled})
 }
 
 // ValidateAntiReplayCookieMode 校验反重放 Cookie 校验模式并返回归一化值。
@@ -427,19 +428,7 @@ func SyncAntiReplayCookieModeToProtection(settingsRepo *repository.SystemSetting
 
 // SyncProtectionAntiReplayCookieModeToSettings 把 protection 中的 AntiReplayCookieMode 同步到 bot_settings。
 func SyncProtectionAntiReplayCookieModeToSettings(settingsRepo *repository.SystemSettingsRepo, mode string) error {
-	current := BotSettingsResponse{ScoreThreshold: 60}
-	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &current)
-	}
-	if current.AntiReplayCookieMode == mode {
-		return nil
-	}
-	current.AntiReplayCookieMode = mode
-	data, err := json.Marshal(current)
-	if err != nil {
-		return fmt.Errorf("marshal bot settings: %w", err)
-	}
-	return settingsRepo.Set("bot_settings", string(data))
+	return syncBotSettingsFields(settingsRepo, map[string]any{"anti_replay_cookie_mode": mode})
 }
 
 // SyncBrowserSignToProtection 将 bot_settings 中的浏览器签名配置同步到 protection，
@@ -498,6 +487,14 @@ func SyncBotThresholdToDropPolicy(settingsRepo *repository.SystemSettingsRepo, t
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
+// SyncBotThresholdToDropPolicyRuntime 持久化 bot 阈值，同时避免缺失策略行时物化其他默认字段。
+func SyncBotThresholdToDropPolicyRuntime(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
+	if threshold <= 0 {
+		return nil
+	}
+	return syncDropPolicyFields(settingsRepo, map[string]any{"bot_score_threshold": threshold})
+}
+
 // SyncDropThresholdToBotSettings 更新 bot_settings.ScoreThreshold，
 // 使 drop policy 页修改共用 bot 阈值时 bot 页保持一致。
 func SyncDropThresholdToBotSettings(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
@@ -513,6 +510,37 @@ func SyncDropThresholdToBotSettings(settingsRepo *repository.SystemSettingsRepo,
 	}
 	current.ScoreThreshold = threshold
 	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("marshal bot settings: %w", err)
+	}
+	return settingsRepo.Set("bot_settings", string(data))
+}
+
+// SyncDropThresholdToBotSettingsRuntime 写入共用阈值，避免缺少 bot 配置时写入无关默认值。
+func SyncDropThresholdToBotSettingsRuntime(settingsRepo *repository.SystemSettingsRepo, threshold int) error {
+	if threshold <= 0 {
+		return nil
+	}
+	value, err := settingsRepo.Get("bot_settings")
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("get bot settings: %w", err)
+	}
+
+	settings := make(map[string]json.RawMessage)
+	if err == nil && strings.TrimSpace(value) != "" {
+		if err := json.Unmarshal([]byte(value), &settings); err != nil {
+			return fmt.Errorf("unmarshal bot settings: %w", err)
+		}
+		if settings == nil {
+			settings = make(map[string]json.RawMessage)
+		}
+	}
+	data, err := json.Marshal(threshold)
+	if err != nil {
+		return fmt.Errorf("marshal bot score threshold: %w", err)
+	}
+	settings["score_threshold"] = data
+	data, err = json.Marshal(settings)
 	if err != nil {
 		return fmt.Errorf("marshal bot settings: %w", err)
 	}
@@ -547,22 +575,47 @@ func SyncCVEAutoDropToDropPolicy(settingsRepo *repository.SystemSettingsRepo, cr
 	return settingsRepo.Set("drop_policy", string(data))
 }
 
+// SyncCVEAutoDropToDropPolicyRuntime 持久化 CVE drop 开关，不在缺失策略行时写入其他默认字段。
+func SyncCVEAutoDropToDropPolicyRuntime(settingsRepo *repository.SystemSettingsRepo, critical, high bool) error {
+	return syncDropPolicyFields(settingsRepo, map[string]any{
+		"cve_auto_drop_critical": critical,
+		"cve_auto_drop_high":     high,
+	})
+}
+
+func syncDropPolicyFields(settingsRepo *repository.SystemSettingsRepo, fields map[string]any) error {
+	value, err := settingsRepo.Get("drop_policy")
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("get drop policy: %w", err)
+	}
+
+	policy := make(map[string]json.RawMessage)
+	if err == nil && strings.TrimSpace(value) != "" {
+		if err := json.Unmarshal([]byte(value), &policy); err != nil {
+			return fmt.Errorf("unmarshal drop policy: %w", err)
+		}
+		if policy == nil {
+			policy = make(map[string]json.RawMessage)
+		}
+	}
+	for key, field := range fields {
+		data, err := json.Marshal(field)
+		if err != nil {
+			return fmt.Errorf("marshal drop policy field %q: %w", key, err)
+		}
+		policy[key] = data
+	}
+	data, err := json.Marshal(policy)
+	if err != nil {
+		return fmt.Errorf("marshal drop policy: %w", err)
+	}
+	return settingsRepo.Set("drop_policy", string(data))
+}
+
 // SyncProtectionBotToSettings 更新 bot_settings.Enabled，
 // 使 protection 页切换 bot_detection_enabled 时 bot 页保持一致。
 func SyncProtectionBotToSettings(settingsRepo *repository.SystemSettingsRepo, enabled bool) error {
-	current := BotSettingsResponse{ScoreThreshold: 60}
-	if val, err := settingsRepo.Get("bot_settings"); err == nil && val != "" {
-		_ = json.Unmarshal([]byte(val), &current)
-	}
-	if current.Enabled == enabled {
-		return nil
-	}
-	current.Enabled = enabled
-	data, err := json.Marshal(current)
-	if err != nil {
-		return fmt.Errorf("marshal bot settings: %w", err)
-	}
-	return settingsRepo.Set("bot_settings", string(data))
+	return syncBotSettingsFields(settingsRepo, map[string]any{"enabled": enabled})
 }
 
 // BotSettingsResponse 是 API 返回的 bot 检测配置。
@@ -583,6 +636,7 @@ type BotSettingsResponse struct {
 	BrowserSignEnabled       bool     `json:"browser_sign_enabled"`
 	BrowserSignTTL           int      `json:"browser_sign_ttl"`
 	BrowserSignAction        string   `json:"browser_sign_action"`
+	HTMLToMarkdownEnabled    bool     `json:"html_to_markdown_enabled"`
 	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
 	JSProtectionMode         string   `json:"js_protection_mode,omitempty"`
 	DecryptCacheTTLSeconds   int      `json:"decrypt_cache_ttl_seconds,omitempty"`

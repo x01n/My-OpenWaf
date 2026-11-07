@@ -17,6 +17,8 @@ import (
 	"My-OpenWaf/internal/utils"
 )
 
+const maxImportedRules = 1000
+
 func ListRules(repo *repository.RuleRepo) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -147,9 +149,63 @@ func UpdateRule(repo *repository.RuleRepo, reload func() error) app.HandlerFunc 
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
-		if err := c.BindJSON(existing); err != nil {
+		var body struct {
+			Name           *string           `json:"name"`
+			PolicyID       *uint             `json:"policy_id"`
+			Phase          *store.RulePhase  `json:"phase"`
+			Pattern        *string           `json:"pattern"`
+			Action         *store.RuleAction `json:"action"`
+			Priority       *int              `json:"priority"`
+			Enabled        *bool             `json:"enabled"`
+			StatusCode     *int              `json:"status_code"`
+			RedirectTo     *string           `json:"redirect_to"`
+			CaptchaType    *string           `json:"captcha_type"`
+			WindowSeconds  *int              `json:"window_seconds"`
+			RequestCount   *int              `json:"request_count"`
+			CaptchaMinutes *int              `json:"captcha_minutes"`
+		}
+		if err := c.BindJSON(&body); err != nil {
 			c.JSON(400, map[string]string{"error": err.Error()})
 			return
+		}
+		if body.Name != nil {
+			existing.Name = *body.Name
+		}
+		if body.PolicyID != nil {
+			existing.PolicyID = *body.PolicyID
+		}
+		if body.Phase != nil {
+			existing.Phase = *body.Phase
+		}
+		if body.Pattern != nil {
+			existing.Pattern = *body.Pattern
+		}
+		if body.Action != nil {
+			existing.Action = *body.Action
+		}
+		if body.Priority != nil {
+			existing.Priority = *body.Priority
+		}
+		if body.Enabled != nil {
+			existing.Enabled = *body.Enabled
+		}
+		if body.StatusCode != nil {
+			existing.StatusCode = *body.StatusCode
+		}
+		if body.RedirectTo != nil {
+			existing.RedirectTo = *body.RedirectTo
+		}
+		if body.CaptchaType != nil {
+			existing.CaptchaType = *body.CaptchaType
+		}
+		if body.WindowSeconds != nil {
+			existing.WindowSeconds = *body.WindowSeconds
+		}
+		if body.RequestCount != nil {
+			existing.RequestCount = *body.RequestCount
+		}
+		if body.CaptchaMinutes != nil {
+			existing.CaptchaMinutes = *body.CaptchaMinutes
 		}
 		existing.ID = id
 		exists, err := repo.PolicyExists(existing.PolicyID)
@@ -414,6 +470,10 @@ func ImportRules(repo *repository.RuleRepo, reload func() error) app.HandlerFunc
 		}
 		if len(body.Rules) == 0 {
 			c.JSON(400, map[string]string{"error": "no rules provided"})
+			return
+		}
+		if len(body.Rules) > maxImportedRules {
+			c.JSON(400, map[string]string{"error": "too many rules (max 1000)"})
 			return
 		}
 

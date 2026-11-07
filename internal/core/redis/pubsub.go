@@ -87,14 +87,14 @@ func (cs *ConfigSync) Subscribe(reload func() error) {
 	if cs == nil || cs.client == nil {
 		return
 	}
-
-	subCmd := cs.client.B().Subscribe().Channel(configSyncChannel).Build()
+	dedicated, release := cs.client.Dedicate()
+	subCmd := dedicated.B().Subscribe().Channel(configSyncChannel).Build()
 
 	go func() {
 		<-cs.stopCh
-		cs.client.Close()
+		release()
 	}()
-	_ = cs.client.Receive(context.Background(), subCmd, func(msg rueidis.PubSubMessage) {
+	_ = dedicated.Receive(context.Background(), subCmd, func(msg rueidis.PubSubMessage) {
 		if msg.Message == configSyncActionReload {
 			cs.log.Info("received config sync reload")
 			if err := reload(); err != nil {

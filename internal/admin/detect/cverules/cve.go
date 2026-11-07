@@ -327,6 +327,10 @@ func ToggleCVERule(repo *repository.CVERuleRepo, feedMgr *cve.CVEFeedManager, re
 			c.JSON(404, map[string]string{"error": "not found"})
 			return
 		}
+		if existing.Source != "custom" {
+			c.JSON(403, map[string]string{"error": "only custom rules can be toggled"})
+			return
+		}
 
 		var req struct {
 			Enabled *bool `json:"enabled"`

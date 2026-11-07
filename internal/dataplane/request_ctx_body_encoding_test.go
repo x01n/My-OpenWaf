@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"io"
 	"math/rand"
 	"net/http"
@@ -497,6 +498,102 @@ func TestRequestBodySampleSurvivesMalformedEncodedBody(t *testing.T) {
  * 已完整缓冲（非流式）的请求体走同一条解压口径：上限一致、缓存只解一次、
  * Content-Encoding 不被识别时按未压缩处理。
  */
+type fullBufferProbeStream struct {
+	reader io.Reader
+	reads  int
+}
+
+func (s *fullBufferProbeStream) Read(p []byte) (int, error) {
+	s.reads++
+	return s.reader.Read(p)
+}
+
+func (s *fullBufferProbeStream) Close() error { return nil }
+
+func TestRequestBodySampleFullyBuffersURLFormBody(t *testing.T) {
+	body := append(bytes.Repeat([]byte("A"), 128<<10), []byte("=%3Cscript%3Ealert%281%29%3C%2Fscript%3E")...)
+	stream := &fullBufferProbeStream{reader: bytes.NewReader(body)}
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodPost)
+	ctx.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	ctx.Request.SetBodyStream(stream, len(body))
+
+	sample, truncated, size := requestBodySample(ctx)
+	if truncated {
+		t.Fatal("complete form body must not be reported truncated")
+	}
+	if size != int64(len(body)) {
+		t.Fatalf("size = %d, want %d", size, len(body))
+	}
+	if !bytes.Equal(sample, body) {
+		t.Fatalf("sample length = %d, want %d", len(sample), len(body))
+	}
+	snap, ok := requestBodySnapshotFromContext(ctx)
+	if !ok || !snap.fullyBuffered {
+		t.Fatal("eligible form body was not fully buffered")
+	}
+	readsAfterSample := stream.reads
+	if readsAfterSample == 0 {
+		t.Fatal("full buffering did not read the original stream")
+	}
+
+	replayed, err := io.ReadAll(ctx.Request.BodyStream())
+	if err != nil {
+		t.Fatalf("read replayed body: %v", err)
+	}
+	if !bytes.Equal(replayed, body) {
+		t.Fatalf("replayed body length = %d, want %d", len(replayed), len(body))
+	}
+	if stream.reads != readsAfterSample {
+		t.Fatalf("replay touched the original stream: reads before=%d after=%d", readsAfterSample, stream.reads)
+	}
+	if err := requestBodySnapshotError(ctx); err != nil {
+		t.Fatalf("requestBodySnapshotError() = %v", err)
+	}
+}
+
+func TestRequestBodySampleDoesNotFullyBufferIneligibleFormBody(t *testing.T) {
+	body := bytes.Repeat([]byte("A"), requestBodyFormBufferMaxSize+1)
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodPost)
+	ctx.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	stream := &trackingRequestBodyStream{reader: bytes.NewReader(body)}
+	ctx.Request.SetBodyStream(stream, len(body))
+
+	sample, truncated, _ := requestBodySample(ctx)
+	if len(sample) != requestInspectionBodyLimit || !truncated {
+		t.Fatalf("oversized form sample = (%d, %v), want (%d, true)", len(sample), truncated, requestInspectionBodyLimit)
+	}
+	if snap, _ := requestBodySnapshotFromContext(ctx); snap.fullyBuffered {
+		t.Fatal("form body over the complete-buffer limit must remain streaming")
+	}
+}
+
+func TestRequestBodySampleReportsShortFullyBufferedFormBody(t *testing.T) {
+	body := []byte("field=value")
+	ctx := app.NewContext(0)
+	ctx.Request.Header.SetMethod(http.MethodPost)
+	ctx.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	ctx.Request.SetBodyStream(&unexpectedEOFRequestBodyStream{reader: bytes.NewReader(body)}, len(body)+1)
+
+	sample, truncated, size := requestBodySample(ctx)
+	if truncated {
+		t.Fatal("short form body must not be reported as a scan truncation")
+	}
+	if !bytes.Equal(sample, body) {
+		t.Fatalf("sample = %q, want %q", sample, body)
+	}
+	if size != int64(len(body)+1) {
+		t.Fatalf("size = %d, want %d", size, len(body)+1)
+	}
+	if err := requestBodySnapshotError(ctx); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("requestBodySnapshotError() = %v, want %v", err, io.ErrUnexpectedEOF)
+	}
+	if snap, _ := requestBodySnapshotFromContext(ctx); snap.fullyBuffered {
+		t.Fatal("short form body must not be marked fully buffered")
+	}
+}
+
 func TestRequestBodySampleBufferedEncodings(t *testing.T) {
 	payload := []byte(`{"note":"<script>alert(1)</script>"}`)
 
@@ -520,10 +617,16 @@ func TestRequestBodySampleBufferedEncodings(t *testing.T) {
 		t.Fatal("buffered decode result was not cached on the request context")
 	}
 
-	oversize := newBufferedRequestBodyContext(encodeGzip(t, bytes.Repeat([]byte("A"), 4<<20)), "gzip")
+	oversizeBody := bytes.Repeat([]byte("A"), 4<<20)
+	oversize := newBufferedRequestBodyContext(encodeGzip(t, oversizeBody), "gzip")
 	sample, truncated, _ := requestBodySample(oversize)
 	if len(sample) != requestInspectionBodyLimit {
 		t.Fatalf("oversize buffered sample = %d bytes, want %d", len(sample), requestInspectionBodyLimit)
+	}
+	head := requestInspectionBodyLimit / 2
+	tail := requestInspectionBodyLimit - head - 1
+	if !bytes.Equal(sample[:head], oversizeBody[:head]) || !bytes.Equal(sample[head+1:], oversizeBody[len(oversizeBody)-tail:]) {
+		t.Fatal("oversize buffered sample must preserve both body edges")
 	}
 	if !truncated {
 		t.Fatal("oversize buffered decoded body must be reported truncated")

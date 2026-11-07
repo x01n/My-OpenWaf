@@ -31,6 +31,7 @@ import (
 	"My-OpenWaf/internal/core/action"
 	"My-OpenWaf/internal/core/engine"
 	"My-OpenWaf/internal/core/pipeline"
+	"My-OpenWaf/internal/dataplane/logredact"
 	dpmetrics "My-OpenWaf/internal/dataplane/metrics"
 	"My-OpenWaf/internal/observability"
 	"My-OpenWaf/internal/snapshot"
@@ -568,7 +569,7 @@ func TestHandleDynamicProtectionKeyRecordsErrorStatuses(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := app.NewContext(0)
 			ctx.Request.SetMethod(tt.method)
-			ctx.Request.SetRequestURI(dynamicProtectionKeyPath + "?token=dynamic-key-secret&mode=test")
+			ctx.Request.SetRequestURI(logredact.GroupKeyPath + "?token=dynamic-key-secret&mode=test")
 			ctx.Request.Header.SetHost(tt.host)
 			if len(tt.body) > 0 {
 				ctx.Request.SetBody(tt.body)
@@ -590,7 +591,7 @@ func TestHandleDynamicProtectionKeyRecordsErrorStatuses(t *testing.T) {
 
 	writer.Close()
 	var entries []store.AccessLog
-	if err := db.Where("path = ?", dynamicProtectionKeyPath).Find(&entries).Error; err != nil {
+	if err := db.Where("path = ?", logredact.GroupKeyPath).Find(&entries).Error; err != nil {
 		t.Fatalf("read dynamic key access logs: %v", err)
 	}
 	if len(entries) != len(cases) {
@@ -634,7 +635,7 @@ func TestRequestBodySamplePreservesBodyStreamForForwarding(t *testing.T) {
 		t.Fatalf("sample size = %d, want %d", size, len(body))
 	}
 	if !bytes.Equal(sample, body[:requestInspectionBodyLimit]) {
-		t.Fatal("sample prefix mismatch")
+		t.Fatal("streaming sample must preserve the prefetched prefix")
 	}
 
 	replayed, err := io.ReadAll(ctx.Request.BodyStream())

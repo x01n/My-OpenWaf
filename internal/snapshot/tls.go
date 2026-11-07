@@ -11,12 +11,13 @@ import (
 )
 
 type NetworkDefaults struct {
-	IPv6Enabled    bool   `json:"ipv6_enabled"`
-	HTTP2Enabled   bool   `json:"http2_enabled"`
-	HTTP3Enabled   bool   `json:"http3_enabled"`
-	HTTP3Bind      string `json:"http3_bind"`
-	DefaultALPN    string `json:"default_alpn"`
-	DefaultNetwork string `json:"default_network"`
+	IPv6Enabled         bool   `json:"ipv6_enabled"`
+	HTTP2Enabled        bool   `json:"http2_enabled"`
+	HTTP3Enabled        bool   `json:"http3_enabled"`
+	HTTP3Bind           string `json:"http3_bind"`
+	HTTP3PerPortEnabled bool   `json:"http3_per_port_enabled"`
+	DefaultALPN         string `json:"default_alpn"`
+	DefaultNetwork      string `json:"default_network"`
 }
 
 type TLSDefaults struct {
@@ -28,6 +29,8 @@ type TLSDefaults struct {
 	CurvePreferences         string `json:"curve_preferences"`
 	PreferServerCipherSuites bool   `json:"prefer_server_cipher_suites"`
 	SessionTicketsEnabled    bool   `json:"session_tickets_enabled"`
+	Allow0RTT                bool   `json:"allow_0rtt"`
+	HasExplicitAllow0RTT     bool   `json:"-"`
 	SelfSignedOnIP           bool   `json:"self_signed_on_ip"`
 }
 
@@ -160,6 +163,24 @@ func normalizeNetworkDefaults(defaults NetworkDefaults) NetworkDefaults {
 	return defaults
 }
 
+/**
+ * HTTP3BindFromTCPBind 由 TCP 监听地址推导「每端口一个 HTTP/3 监听」时的 UDP 监听地址。
+ *
+ * @param tcpBind 站点 TCP 监听地址。
+ * @return 规范化后的 UDP 监听地址与是否可解析。
+ */
+func HTTP3BindFromTCPBind(tcpBind string) (string, bool) {
+	_, portRaw, err := net.SplitHostPort(strings.TrimSpace(tcpBind))
+	if err != nil {
+		return "", false
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portRaw))
+	if err != nil || port < 1 || port > 65535 {
+		return "", false
+	}
+	return net.JoinHostPort("", strconv.Itoa(port)), true
+}
+
 func LoadNetworkDefaults(raw string) NetworkDefaults {
 	cfg := DefaultNetworkDefaults()
 	if strings.TrimSpace(raw) == "" {
@@ -202,6 +223,7 @@ func LoadTLSDefaults(raw string) TLSDefaults {
 	var explicit struct {
 		DefaultALPN           *string `json:"default_alpn"`
 		SessionTicketsEnabled *bool   `json:"session_tickets_enabled"`
+		Allow0RTT             *bool   `json:"allow_0rtt"`
 	}
 	if err := json.Unmarshal([]byte(raw), &explicit); err != nil {
 		return DefaultTLSDefaults()
@@ -226,7 +248,59 @@ func LoadTLSDefaults(raw string) TLSDefaults {
 	if explicit.SessionTicketsEnabled == nil {
 		cfg.SessionTicketsEnabled = DefaultTLSDefaults().SessionTicketsEnabled
 	}
+	// allow_0rtt 三态：未显式配置时保持零值并把继承交给 EffectiveAllow0RTT，
+	// 由它回落 SessionTicketsEnabled，使未配置的历史配置行为逐字节不变。
+	cfg.HasExplicitAllow0RTT = explicit.Allow0RTT != nil
+	if explicit.Allow0RTT != nil {
+		cfg.Allow0RTT = *explicit.Allow0RTT
+	} else {
+		cfg.Allow0RTT = false
+	}
 	return cfg
+}
+
+/**
+ * EffectiveAllow0RTT 返回 HTTP/3 监听实际采用的 0-RTT 决策。
+ *
+ * 显式开为 true 但会话票据关闭时，服务端不会签发 NewSessionTicket，
+ * 客户端拿不到 PSK，0-RTT 自然不可用；这是协议前提，不是本函数的判定。
+ *
+ * @return 是否接受 HTTP/3 0-RTT 早期数据。
+ */
+func (d TLSDefaults) EffectiveAllow0RTT() bool {
+	if d.HasExplicitAllow0RTT {
+		return d.Allow0RTT
+	}
+	return d.SessionTicketsEnabled
+}
+
+// H3Allow0RTTEnvKey 是覆盖 HTTP/3 0-RTT 判定的环境变量名。
+//
+// 数据面监听决策与 Admin 运行态自检共用该常量与 H3Allow0RTT，
+// 避免同一套 env 语义在两处各写一份而漂移。
+const H3Allow0RTTEnvKey = "MY_OPENWAF_H3_ALLOW_0RTT"
+
+/**
+ * H3Allow0RTT 按环境变量取值与 TLS 默认配置计算 HTTP/3 0-RTT 的最终判定。
+ *
+ * 语义（`*EnvValue` 为该环境变量的原始字符串）：
+ *   - `"0"`：恒关，仅收紧重放面，不改会话票据配置。
+ *   - `"1"`：显式开，但仍受会话票据约束——票据关闭时不签发 NewSessionTicket。
+ *   - 其他取值（含未设置与非法值）：透传 `EffectiveAllow0RTT()`，未显式配置
+ *     `allow_0rtt` 时回落 `SessionTicketsEnabled`，与历史行为逐 case 等价。
+ * @param envValue 环境变量原始取值；不读进程环境，便于调用方与测试显式传入。
+ * @param d 当前 TLS 全局默认配置。
+ * @return 是否接受 HTTP/3 0-RTT 早期数据。
+ */
+func H3Allow0RTT(envValue string, d TLSDefaults) bool {
+	switch strings.TrimSpace(envValue) {
+	case "1":
+		return d.SessionTicketsEnabled
+	case "0":
+		return false
+	default:
+		return d.EffectiveAllow0RTT()
+	}
 }
 
 func EffectiveSiteNetwork(siteALPN string, siteNetwork string, defaults NetworkDefaults, tlsDefaults TLSDefaults) (string, string) {

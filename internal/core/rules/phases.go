@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,8 @@ type MatchCtx struct {
 	Headers          map[string]string
 	HeadersLowercase bool
 	Host             string
+	SiteID           uint
+	Bind             string
 	HeaderOrder      string
 	TLSALPN          string
 	TLSCipherSuites  string
@@ -48,6 +51,24 @@ type MatchCtx struct {
 	reqCtx *pipeline.RequestCtx
 }
 
+/**
+ * RateLimitKey 构造限流/频次计数键：bind|siteID|归一化 Host|客户端 IP。
+ *
+ * @param bind     监听器绑定地址（如 ":443"）。
+ * @param siteID   站点 ID。
+ * @param host     请求 Host（可带端口）。
+ * @param clientIP 客户端 IP，nil 时按空串处理。
+ * @return 计数键。
+ */
+func RateLimitKey(bind string, siteID uint, host string, clientIP net.IP) string {
+	client := ""
+	if clientIP != nil {
+		client = clientIP.String()
+	}
+	return bind + "|" + strconv.FormatUint(uint64(siteID), 10) + "|" +
+		snapshot.NormalizeMatchHost(host) + "|" + client
+}
+
 func fillMatchCtxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool, mc *MatchCtx) {
 	mc.reqCtx = ctx
 	mc.ClientIP = ctx.ClientIP
@@ -57,6 +78,8 @@ func fillMatchCtxFromPipeline(ctx *pipeline.RequestCtx, needsDerivedHeaders bool
 	mc.Headers = ctx.Headers
 	mc.HeadersLowercase = ctx.HeadersLowercase
 	mc.Host = ctx.Host
+	mc.SiteID = ctx.SiteID
+	mc.Bind = ctx.Bind
 	mc.TLS = &ctx.TLS
 	mc.Body = ctx.Body
 	if needsDerivedHeaders {
@@ -282,10 +305,35 @@ func compoundConditionNeedsDerivedHeaders(cond compoundCondition) bool {
 type reqRateLimitPhase struct {
 	limiter ratelimit.RateLimiterBackend
 	act     action.Type
+	// window/max 是该站点生效的配额（0 表示沿用后端自身的全局配额）。
+	// 限流后端是进程级单例，其 Reconfigure 只反映全局配置；站点级
+	// rate_limit_window / rate_limit_max 必须在这里携带，否则站点覆盖值
+	// 写进快照后没有任何运行时读取者。
+	window int
+	max    int
 }
 
 func NewReqRateLimitPhase(limiter ratelimit.RateLimiterBackend, act action.Type) pipeline.Phase {
 	return &reqRateLimitPhase{limiter: limiter, act: act}
+}
+
+/**
+ * NewReqRateLimitPhaseWithQuota 构造携带站点级配额的请求限流阶段。
+ *
+ * window 与 max 同时大于 0 时走站点配额路径，用该配额独立计数；任一非正
+ * 表示站点未覆盖，等价于 NewReqRateLimitPhase，沿用后端全局配额。
+ *
+ * @param limiter 限流后端。
+ * @param act     超限时执行的动作。
+ * @param window  站点级生效窗口（秒）；<=0 表示继承全局。
+ * @param max     站点级生效配额（窗口内请求数）；<=0 表示继承全局。
+ * @return 请求限流阶段。
+ */
+func NewReqRateLimitPhaseWithQuota(limiter ratelimit.RateLimiterBackend, act action.Type, window, max int) pipeline.Phase {
+	if window <= 0 || max <= 0 {
+		return &reqRateLimitPhase{limiter: limiter, act: act}
+	}
+	return &reqRateLimitPhase{limiter: limiter, act: act, window: window, max: max}
 }
 
 func (p *reqRateLimitPhase) Name() string { return "rate_limit" }
@@ -294,12 +342,21 @@ func (p *reqRateLimitPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bo
 	if p.limiter == nil || !p.limiter.Enabled() {
 		return action.Pass(), false
 	}
-	key := ""
-	if ctx.ClientIP != nil {
-		key = ctx.ClientIP.String()
+	key := RateLimitKey(ctx.Bind, ctx.SiteID, ctx.Host, ctx.ClientIP)
+	// 二者只取其一：Allow 与 AllowWithQuota 都会使计数自增一次，
+	// 同时调用会把一次请求记成两次。
+	allow := false
+	if p.window > 0 && p.max > 0 {
+		if q, ok := p.limiter.(ratelimit.SiteQuotaLimiter); ok {
+			allow = q.AllowWithQuota(key, p.window, p.max)
+		} else {
+			// 后端未声明可选能力：沿用其全局配额，而非放行全部。
+			allow = p.limiter.Allow(key)
+		}
+	} else {
+		allow = p.limiter.Allow(key)
 	}
-	key += "|" + ctx.Host
-	if p.limiter.Allow(key) {
+	if allow {
 		return action.Pass(), false
 	}
 	act := normalizeConfiguredAction(string(p.act))
@@ -484,11 +541,7 @@ func (p *botPhase) behaviorScore(ctx *pipeline.RequestCtx) int {
 	if limiter == nil || !limiter.Enabled() || p.rateMax <= 0 {
 		return 0
 	}
-	key := ""
-	if ctx.ClientIP != nil {
-		key = ctx.ClientIP.String()
-	}
-	key += "|" + ctx.Host + botBehaviorKeySuffix
+	key := RateLimitKey(ctx.Bind, ctx.SiteID, ctx.Host, ctx.ClientIP) + botBehaviorKeySuffix
 	count := limiter.Increment(key)
 	return bot.BehaviorScoreFromCount(int(count), p.rateMax)
 }
@@ -510,6 +563,8 @@ func (p *botPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		br.HeaderOrder = ctx.DerivedHeaderOrder(func() string { return strings.Join(ctx.HeaderKeys, ",") })
 	}
 	br.TLS = ctx.TLS
+	// Host 参与「TLS 指纹 + 上下文」一致性判定（域名必发 SNI、IP 字面量不得发 SNI）。
+	br.HostHeader = ctx.Host
 
 	v, bs := bot.CheckBotTwoPhaseWithBehavior(br, p.rep, p.geo, p.threshold, p.behaviorScore(ctx))
 	p.storeBotScore(ctx, v, bs)
@@ -580,6 +635,7 @@ type owaspPhase struct {
 	thresholds          owasp.CompiledThresholds
 	fileUploadEnabled   bool
 	protoEnabled        bool
+	ciscoASAMode        string
 }
 
 func NewOWASPPhase(cfg *store.ProtectionConfig) pipeline.Phase {
@@ -590,6 +646,11 @@ func NewOWASPPhase(cfg *store.ProtectionConfig) pipeline.Phase {
 		phase.thresholds = owasp.CompileThresholds(cfg.OWASPSensitivity, phase.categorySensitivity)
 		_, phase.fileUploadEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatFileUpload, phase.categorySensitivity)
 		_, phase.protoEnabled = owasp.CategoryThreshold(cfg.OWASPSensitivity, owasp.CatProtoViol, phase.categorySensitivity)
+		ciscoOverride := owasp.RuleOverride("owasp:path:006", phase.overrides).CiscoASAMode
+		if strings.TrimSpace(ciscoOverride) == "" {
+			ciscoOverride = owasp.CiscoASAModeScoped
+		}
+		phase.ciscoASAMode = owasp.NormalizeCiscoASAMode(ciscoOverride)
 	}
 	return phase
 }
@@ -647,8 +708,18 @@ func (p *owaspPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool) {
 		}
 	}
 
-	hit, ok := owasp.FirstAcceptedOWASPHitWithThresholds(p.thresholds, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, overrides, categorySensitivity)
+	hit, ok := owasp.FirstAcceptedOWASPHitWithThresholdsAndMode(p.thresholds, ctx.Path, ctx.RawQuery, ctx.Headers, bodyTargets, overrides, p.ciscoASAMode, categorySensitivity)
 	if !ok {
+		// 敏感端点探测（无显式载荷）作为兜底检查：这些样本的请求行合法、
+		// 目标串不含攻击特征，主扫描必然放行，只能靠「请求了哪个端点」判定。
+		// 放在主扫描之后是刻意的：主扫描一旦产生命中就保持原判定与归因，
+		// 这条新规则只填补原本放行的请求，不改变既有命中的结果与归因方向。
+		if endpointHit, eok := owasp.CheckSensitiveEndpointPathWithRequest(ctx.Path, ctx.Method, ctx.RawQuery, ctx.Headers, ctx.Body); eok {
+			if owasp.EndpointHitPassesFilters(endpointHit, ctx.Path, p.cfg.OWASPSensitivity, overrides, categorySensitivity) {
+				result := owaspHitResult(endpointHit, p.cfg, overrides)
+				return result, result.IsTerminal()
+			}
+		}
 		return action.Pass(), false
 	}
 	result := owaspHitResult(hit, p.cfg, overrides)
@@ -873,6 +944,60 @@ func looksLikeFormEncoded(body []byte) bool {
 	return hasEq
 }
 
+// looksLikeStrictFormEncoded 判断请求体是否严格形如 form-urlencoded 表单
+// （`a=1&b=2`）。用于缺失 Content-Type 的请求：此时不能仅凭「含一个等号」就按
+// 表单解析，否则 JSON / 自由文本里的等号会被误拆，凭空放大扫描目标。
+//
+// 判据：按 & 分段（跳过 HTML 实体 `&#...;`），每段都有等号且键名只含表单键
+// 常见字符（字母、数字、`_-.%[]`）。至少一段。
+func looksLikeStrictFormEncoded(body []byte) bool {
+	if !looksLikeFormEncoded(body) {
+		return false
+	}
+	s := string(body)
+	segments := 0
+	for {
+		pair := s
+		if i := indexFormSeparator(s); i >= 0 {
+			pair, s = s[:i], s[i+1:]
+		} else {
+			s = ""
+		}
+		if pair == "" {
+			if s == "" {
+				break
+			}
+			continue
+		}
+		key, _, hasEq := strings.Cut(pair, "=")
+		if !hasEq || !isFormKeyToken(key) {
+			return false
+		}
+		segments++
+		if s == "" {
+			break
+		}
+	}
+	return segments > 0
+}
+
+// isFormKeyToken 判断 s 是否只由表单键名常见字符组成（非空）。
+func isFormKeyToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_' || c == '-' || c == '.' || c == '%' || c == '[' || c == ']':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func shouldScanOpaqueBodyTarget(body []byte) bool {
 	for _, b := range body {
 		switch b {
@@ -910,6 +1035,11 @@ func shouldScanOpaqueBodyTarget(body []byte) bool {
 		containsFoldASCIIBytes(body, "objectinputstream") ||
 		containsFoldASCIIBytes(body, "deserializ")
 }
+
+// javaSerializedMagic 是 Java 原生序列化流头的字节形式，用于请求体抽取阶段
+// 识别二进制序列化对象流。字面量来源为 owasp.JavaSerializationMagic，
+// 保持与 deser:001 判据同一份定义。
+var javaSerializedMagic = []byte(owasp.JavaSerializationMagic)
 
 /**
  * extractBodyTargets 依据 Content-Type 解析请求体，返回可逐一扫描攻击载荷的
@@ -964,7 +1094,12 @@ func extractBodyTargets(body []byte, contentType string) []string {
 					printable++
 				}
 			}
-			if float64(printable)/float64(len(sample)) >= 0.9 && shouldScanOpaqueBodyTarget(body[:limit]) {
+			// Java 原生序列化流天然是二进制，可打印率必然远低于 0.9；
+			// 但它是 deser:001 的唯一判据，必须在抽取阶段放行，否则
+			// `application/x-java-serialized-object` / `application/octet-stream`
+			// 携带的序列化 gadget 永远进不了规则扫描。
+			if float64(printable)/float64(len(sample)) >= 0.9 && shouldScanOpaqueBodyTarget(body[:limit]) ||
+				bytes.HasPrefix(body, javaSerializedMagic) {
 				primary = []string{string(body[:limit])}
 				parsedOK = true
 			} else {
@@ -991,7 +1126,13 @@ func extractBodyTargets(body []byte, contentType string) []string {
 			primary = append(primary, extra...)
 		}
 	}
-	if !containsFoldASCII(ct, "form-urlencoded") && !containsFoldASCII(ct, "multipart/form-data") && ct != "" && looksLikeFormEncoded(body) {
+	// 缺失 Content-Type 或声明为文本/二进制时，形如 `a=1&b=2` 的请求体仍会被
+	// 多数后端按表单解析：`+` 代表空格、`%XX` 是转义。必须按表单语义解码后再
+	// 扫描，否则 `host=%24%28sudo+reboot%3B...` 这类载荷会以字面量 `+` 漏检。
+	// 判据必须严格（见 looksLikeStrictFormEncoded）：只凭「含一个等号」采信会把
+	// JSON / 自由文本里的等号误拆，并把随机串中的 `$(word+` 解成 `$(word `
+	// （实测遥测样本 8d620 因此误报 owasp:cmd:022）。
+	if !containsFoldASCII(ct, "form-urlencoded") && !containsFoldASCII(ct, "multipart/form-data") && looksLikeStrictFormEncoded(body) {
 		if extra := extractFormValues(string(body)); len(extra) > 0 {
 			primary = append(primary, extra...)
 		}
@@ -1030,7 +1171,7 @@ func extractFormValues(body string) []string {
 	}
 	for body != "" {
 		pair := body
-		if i := strings.IndexByte(pair, '&'); i >= 0 {
+		if i := indexFormSeparator(pair); i >= 0 {
 			pair, body = pair[:i], pair[i+1:]
 		} else {
 			body = ""
@@ -1042,9 +1183,7 @@ func extractFormValues(body string) []string {
 		if hasEq {
 			dv := value
 			if strings.IndexByte(value, '%') >= 0 || strings.IndexByte(value, '+') >= 0 {
-				if decoded, err := url.QueryUnescape(value); err == nil {
-					dv = decoded
-				}
+				dv = queryUnescapeTolerant(value)
 			}
 			if dv != "" {
 				vals = append(vals, dv)
@@ -1053,9 +1192,7 @@ func extractFormValues(body string) []string {
 		// 参数名同样要扫描，攻击者可在其中注入载荷。
 		dk := paramKey
 		if strings.IndexByte(paramKey, '%') >= 0 || strings.IndexByte(paramKey, '+') >= 0 {
-			if decoded, err := url.QueryUnescape(paramKey); err == nil {
-				dk = decoded
-			}
+			dk = queryUnescapeTolerant(paramKey)
 		}
 		if dk != "" {
 			vals = append(vals, dk)
@@ -1064,7 +1201,77 @@ func extractFormValues(body string) []string {
 	return vals
 }
 
-// extractJSONValues 递归收集 JSON 对象中的全部字符串值。
+// queryUnescapeTolerant 按 form-urlencoded 语义解码（`+` → 空格，`%XX` → 字节），
+// 但与 url.QueryUnescape 不同：遇到非法百分号序列（`%%27`、`%zz`、孤立 `%`）
+// 时只把该 `%` 转义为字面量，其余部分继续解码，而不是整串放弃。
+//
+// 攻击者只要在载荷任意位置插入一个 `%%` 就能让严格解码失败；若这里退回原始
+// 字符串，表单值里的 `+` 就保持字面量，`host=%24%28sudo+reboot%3B...` 这类
+// 载荷会整体漏检。
+func queryUnescapeTolerant(s string) string {
+	if out, err := url.QueryUnescape(s); err == nil {
+		return out
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && (i+2 >= len(s) || !isHexNibbleByte(s[i+1]) || !isHexNibbleByte(s[i+2])) {
+			b.WriteString("%25")
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	out, err := url.QueryUnescape(b.String())
+	if err != nil {
+		return s
+	}
+	return out
+}
+
+func isHexNibbleByte(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+func indexFormSeparator(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '&' {
+			continue
+		}
+		j := i + 1
+		if j < len(s) && s[j] == '#' {
+			j++
+			start := j
+			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+				j++
+			}
+			if j > start && isFormEntityTerminator(s, j) {
+				continue
+			}
+			return i
+		}
+		start := j
+		for j < len(s) && (s[j] >= 'a' && s[j] <= 'z' || s[j] >= 'A' && s[j] <= 'Z') {
+			j++
+		}
+		if j > start && j-start <= 32 && isFormEntityTerminator(s, j) {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+// isFormEntityTerminator 判断 HTML 实体名是否在位置 i 结束。
+// URL 编码器会把实体结尾的分号转成 %3B，两种形态都必须识别，
+// 否则 &gt%3B 会被误当作参数分隔符。
+func isFormEntityTerminator(s string, i int) bool {
+	if i < len(s) && s[i] == ';' {
+		return true
+	}
+	return i+2 < len(s) && s[i] == '%' && s[i+1] == '3' && (s[i+2] == 'B' || s[i+2] == 'b')
+}
+
+// extractJSONValues 递归收集 JSON 对象中的全部字符串值.
 func extractJSONValues(body []byte) []string {
 	var raw any
 	if json.Unmarshal(body, &raw) != nil {
@@ -1105,6 +1312,14 @@ func walkJSON(v any, vals *[]string, depth int) {
 			if k != "" {
 				*vals = append(*vals, k)
 			}
+			// NoSQL 操作符键（$gt/$ne/...）与标量取值的组合形态：单独扫描
+			// 键名无法区分「匹配任意值」的注入形态（$gt=0、$ne=null）与
+			// 正常范围查询（$gt=5），故为 $ 开头的键额外产出 k=v 组合 target。
+			if len(k) > 1 && k[0] == '$' {
+				if scalar, ok := formatJSONScalar(val[k]); ok {
+					*vals = append(*vals, k+"="+scalar)
+				}
+			}
 			walkJSON(val[k], vals, depth+1)
 		}
 	case []any:
@@ -1112,6 +1327,26 @@ func walkJSON(v any, vals *[]string, depth int) {
 			walkJSON(child, vals, depth+1)
 		}
 	}
+}
+
+// formatJSONScalar 把 JSON 标量值格式化为短文本，供 NoSQL 操作符组合
+// target（`$gt=0`、`$ne=null`）使用。对象与数组不参与：它们由 walkJSON
+// 递归展开，组合形态对检测没有额外价值。
+func formatJSONScalar(v any) (string, bool) {
+	switch val := v.(type) {
+	case nil:
+		return "null", true
+	case string:
+		return val, true
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64), true
+	case bool:
+		if val {
+			return "true", true
+		}
+		return "false", true
+	}
+	return "", false
 }
 
 // extractMultipartFilenames 解析 multipart 表单数据，提取文件名。

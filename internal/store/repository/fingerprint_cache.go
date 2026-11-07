@@ -15,9 +15,7 @@ import (
 )
 
 const (
-	// fingerprintResultCacheTTL 限制绕过 AccessLogRepo 写入时的短暂陈旧窗口；
-	// 通过仓储自身写入会立即递增代际并失效。
-	fingerprintResultCacheTTL                  = 5 * time.Second
+	fingerprintResultCacheTTL                  = 20 * time.Second
 	fingerprintResultCacheMaxEntries           = 64
 	fingerprintResultCacheMaxKeyBytes          = 64 << 10
 	fingerprintResultCacheMaxGenerationRetries = 1
@@ -243,9 +241,9 @@ func newFingerprintCacheNamespace() string {
 	return strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + strconv.FormatUint(sequence, 10)
 }
 
-func fingerprintHotCacheKey(namespace string, generation uint64, key fingerprintResultCacheKey) string {
+func fingerprintHotCacheKey(namespace string, key fingerprintResultCacheKey) string {
 	canonical := fingerprintResultCacheCanonical(key.Offset, key.Limit, key.Filter)
 	keyMaterial := namespace + "|" + canonical
 	digest := sha256.Sum256([]byte(keyMaterial))
-	return "fp_list:v1:n" + namespace + ":g" + strconv.FormatUint(generation, 10) + ":" + hex.EncodeToString(digest[:])
+	return "fp_list:v1:n" + namespace + ":" + hex.EncodeToString(digest[:])
 }

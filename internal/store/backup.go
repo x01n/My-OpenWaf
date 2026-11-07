@@ -18,6 +18,7 @@ import (
 	"My-OpenWaf/internal/store/owasp"
 	"My-OpenWaf/internal/store/threatintel"
 	"My-OpenWaf/internal/waf/challenge"
+	owaspdetect "My-OpenWaf/internal/waf/owasp"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -328,6 +329,9 @@ func validateBackupRuleCaptchaTypes(data *BackupData) error {
 		}
 		if config.Note != nil && len(*config.Note) > 4096 {
 			return fmt.Errorf("%w: policy OWASP rule note exceeds 4096 bytes", ErrInvalidBackupRuleConfig)
+		}
+		if config.CiscoASAMode != nil && !owaspdetect.IsValidCiscoASAMode(*config.CiscoASAMode) {
+			return fmt.Errorf("%w: policy OWASP rule cisco_asa_mode %q", ErrInvalidBackupRuleConfig, *config.CiscoASAMode)
 		}
 	}
 	for i := range data.CVERuleScopeOverrides {

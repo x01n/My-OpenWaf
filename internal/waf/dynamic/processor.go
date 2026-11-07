@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"My-OpenWaf/internal/imagery"
 )
 
 // KeyTicketSigner 为每个动态保护信封签发密钥兑换票据。
@@ -190,6 +192,10 @@ func (p *Processor) ProcessJS(path string, js []byte) ([]byte, error) {
 }
 
 // ProcessImage 对图片响应进行处理（添加水印）。
+//
+// 图像处理实现已迁至 internal/imagery，这里只做一行转发：dynamic 不再持有
+// 任何图像编解码代码，依赖方向保持单向 dynamic → imagery。签名与既有契约一致
+// （旧实现同样丢弃输出格式），因此调用方无需改动。
 func (p *Processor) ProcessImage(path string, img []byte) ([]byte, error) {
 	if !p.cfg.ImageWatermarkEnabled {
 		return img, nil
@@ -201,7 +207,8 @@ func (p *Processor) ProcessImage(path string, img []byte) ([]byte, error) {
 	if text == "" {
 		text = "Protected"
 	}
-	return addWatermark(img, text)
+	out, _, err := imagery.Watermark(img, text)
+	return out, err
 }
 
 // Process 根据 Content-Type 自动选择合适的处理方式。

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"My-OpenWaf/internal/appresource"
+	"My-OpenWaf/internal/imagery"
 	"My-OpenWaf/internal/store"
 	"My-OpenWaf/internal/waf/dynamic"
 	"My-OpenWaf/internal/waf/iprep"
@@ -93,11 +94,22 @@ type SiteRuntime struct {
 	// nil = 使用全局 ProtectionConfig。
 	EffectiveProtection *store.ProtectionConfig
 
+	// ProtectionDerived 是 EffectiveProtection 中需要 JSON 解析的字段在
+	// 构建期编译出的只读视图；nil 表示手工构造的测试快照，数据面回退解析。
+	ProtectionDerived *ProtectionDerived
+
 	// 站点级应用路由规则（随快照编译）。
 	AppRouteRules []appresource.CompiledRule
 
 	// DynamicProtection 是动态防护配置（HTML 混淆、JS 混淆、图片水印）。
 	DynamicProtection dynamic.ProtectionConfig
+
+	// ImageTransform 是图像转换配置（image_process 参数与自适应 WebP）。
+	//
+	// 与 DynamicProtection 相互独立：前者由 URL 查询参数逐请求触发，后者由
+	// 站点开关加路径通配符控制，两者在响应变换链上的位置也不同（图像转换必须在
+	// 动态防护之前，因为变换需要原图）。
+	ImageTransform imagery.Config
 
 	// AccessControl 是站点访问控制网关配置（nil = 未启用）。
 	AccessControl *AccessControlConfig
@@ -110,12 +122,28 @@ type SiteRuntime struct {
 	ResponseCompressionMinBytes       int
 	BrotliEnabled                     bool
 
+	// HTMLToMarkdownEnabled 是全局的「HTML 响应可协商为 Markdown」开关。
+	//
+	// 语义是「客户端能不能要」而非「站点要不要」，因此不做站点级三态覆盖：
+	// 这是客户端与服务端之间的表示协商（Accept: text/markdown），不是站点策略。
+	// 构建期从全局 bot_settings 烤入，数据面只读。
+	HTMLToMarkdownEnabled bool
+
 	// 上游 Host 头覆盖（用于显式指定上游 Host 的解析）。
 	UpstreamHostHeader string
 
 	// 站点级 IP 黑白名单（仅对该站点生效）。
 	SiteIPWhitelist []iprep.IPListEntry
 	SiteIPBlacklist []iprep.IPListEntry
+}
+
+// ProtectionDerived 是 ProtectionConfig 中需要 JSON 解析的字段在快照构建期
+// 编译出的只读视图。数据面每请求直接读取，不再重复反序列化大 JSON 文本。
+type ProtectionDerived struct {
+	// CiscoASAModeOverride 是 owasp:path:006 的档位覆盖原文；空串表示未配置。
+	CiscoASAModeOverride string
+	// SkipPathByPhase 是按 phase 名索引的跳过路径列表。
+	SkipPathByPhase map[string][]string
 }
 
 // AccessControlConfig 站点访问控制运行时配置。
@@ -214,6 +242,10 @@ type Snapshot struct {
 	// 从 SystemSettings 加载的保护配置。
 	Protection store.ProtectionConfig
 
+	// ProtectionDerived 是全局 Protection 中需要 JSON 解析的字段在构建期
+	// 编译出的只读视图，供站点未覆盖时回退读取。
+	ProtectionDerived *ProtectionDerived
+
 	// LuaPlugins 是已编译的自定义 Lua 策略脚本。
 	//
 	// 在 snapshot 构建期编译而非请求期：编译有成本，且语法错误应在 reload 时
@@ -260,6 +292,12 @@ type Snapshot struct {
 
 	// Brotli
 	BrotliEnabled bool
+
+	// HTMLToMarkdownEnabled 是全局的「HTML 响应可协商为 Markdown」开关。
+	//
+	// 语义是「客户端能不能要」而非「站点要不要」，因此不做站点级三态覆盖：
+	// 这是客户端与服务端之间的表示协商（Accept: text/markdown），不是站点策略。
+	HTMLToMarkdownEnabled bool
 
 	// ExcludeRecordHeaders 记录的是应跳过资源记录的头部名。
 	ExcludeRecordHeaders []string

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"My-OpenWaf/internal/store/approute"
+	"My-OpenWaf/internal/store/migrations"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -96,8 +97,14 @@ func TestAutoMigrateLogsBackfillsAndIndexesAccessLogFingerprintKey(t *testing.T)
 	if err := db.Model(&AccessLog{}).Where("id = ?", legacy.ID).UpdateColumn("fingerprint_key", "").Error; err != nil {
 		t.Fatalf("clear fingerprint key: %v", err)
 	}
-	if err := AutoMigrateLogs(db); err != nil {
-		t.Fatalf("repeat auto migrate logs: %v", err)
+	// 生产启动路径的回填是异步的；这里显式跑同步入口验证回填本身，
+	// 异步调度由 migrations 包的专门测试覆盖。先清掉启动期可能已写入
+	// 的完成标记，否则同步入口会按设计短路。
+	if err := db.Exec("DELETE FROM log_schema_migrations WHERE key = ?", "migration_v12_access_log_fingerprint_key").Error; err != nil {
+		t.Fatalf("reset backfill marker: %v", err)
+	}
+	if err := migrations.V12MigrateAccessLogFingerprintKey(db); err != nil {
+		t.Fatalf("backfill fingerprint key: %v", err)
 	}
 
 	var got AccessLog

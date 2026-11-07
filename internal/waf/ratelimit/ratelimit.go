@@ -16,6 +16,19 @@ type RateLimiterBackend interface {
 	Close()
 }
 
+/**
+ * SiteQuotaLimiter 是限流后端的可选能力：以调用方给定的窗口与配额判定。
+ *
+ * 后端自身持有的是「全局配额」，而站点级 rate_limit_window / rate_limit_max
+ * 是每站点不同的覆盖值——把它们 Reconfigure 进进程级单例会互相踩踏。实现本
+ * 接口的后端按 (key, window, max) 独立计数，使站点覆盖值能真正生效。
+ *
+ * 未实现本接口的后端由调用方回退到 Allow（沿用全局配额）。
+ */
+type SiteQuotaLimiter interface {
+	AllowWithQuota(key string, windowSec, maxReqs int) bool
+}
+
 // RateLimiter 实现以 (clientIP + host) 为键的固定窗口限流。
 type RateLimiter struct {
 	mu        sync.Mutex
@@ -138,6 +151,43 @@ func (rl *RateLimiter) Increment(key string) int64 {
 	}
 	rl.mu.Unlock()
 	return w.count.Add(1)
+}
+
+/**
+ * AllowWithQuota 用调用方给定的窗口与配额判定，用于站点级覆盖值。
+ *
+ * 与 Allow 的差别只有配额来源：窗口与上限来自参数而非后端自身的全局配置，
+ * 因此同一后端可同时服务多个站点而互不干扰。计数窗口与 Allow 共用同一张
+ * windows 表——键里已含站点维度，不会串桶；仅当站点配额与全局配额一致时
+ * 两者才指向同一个桶，此时语义也相同。
+ *
+ * enabled 仍取后端的全局开关：站点级字段只覆盖窗口与配额，不单独表达启停。
+ *
+ * @param key       计数键。
+ * @param windowSec 窗口长度（秒）；<=0 时按未启用处理。
+ * @param maxReqs   窗口内允许的请求数；<=0 时按未启用处理。
+ * @return 未超限返回 true。
+ */
+func (rl *RateLimiter) AllowWithQuota(key string, windowSec, maxReqs int) bool {
+	if rl == nil {
+		return true
+	}
+	rl.configMu.RLock()
+	enabled := rl.enabled.Load()
+	rl.configMu.RUnlock()
+	if !enabled || windowSec <= 0 || maxReqs <= 0 {
+		return true
+	}
+	now := time.Now().Unix()
+	rl.mu.Lock()
+	w, ok := rl.windows[key]
+	if !ok || w.expiry <= now {
+		w = &window{expiry: now + int64(windowSec)}
+		rl.windows[key] = w
+	}
+	rl.mu.Unlock()
+	n := w.count.Add(1)
+	return n <= int64(maxReqs)
 }
 
 // IsOverLimit 检查当前计数是否已超过 max。

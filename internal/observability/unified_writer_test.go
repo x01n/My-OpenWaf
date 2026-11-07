@@ -518,3 +518,36 @@ func TestUnifiedWriterInvalidatesOnlyCommittedAccessNamespaces(t *testing.T) {
 		t.Fatal("security event cache should remain after access log commit")
 	}
 }
+
+// fingerprintCacheInvalidationProbe 记录统一写入器触发的指纹聚合缓存失效次数。
+type fingerprintCacheInvalidationProbe struct {
+	count atomic.Int64
+}
+
+func (p *fingerprintCacheInvalidationProbe) InvalidateFingerprintCache() {
+	p.count.Add(1)
+}
+
+func TestUnifiedWriterInvalidatesFingerprintCacheAfterCommittedAccessLog(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "logs.db")), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := store.AutoMigrateLogs(db); err != nil {
+		t.Fatalf("migrate logs: %v", err)
+	}
+
+	opts := DefaultUnifiedWriterOptions()
+	opts.FlushInterval = time.Hour
+	writer := NewUnifiedWriterWithOptions(db, slog.New(slog.NewTextHandler(io.Discard, nil)), opts)
+	probe := &fingerprintCacheInvalidationProbe{}
+	writer.SetFingerprintCacheInvalidator(probe)
+	writer.RecordAccessLog(store.AccessLog{RequestID: "fingerprint-cache-writer", Host: "fingerprint-cache.example.test"})
+	writer.Close()
+
+	if got := probe.count.Load(); got != 1 {
+		t.Fatalf("fingerprint cache invalidations = %d, want 1 after committed access log", got)
+	}
+}

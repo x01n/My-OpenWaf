@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -199,9 +200,14 @@ func newTestListHotCache() *testListHotCache {
 
 func (c *testListHotCache) Get(string, any) bool           { return false }
 func (c *testListHotCache) Set(string, any, time.Duration) {}
-func (c *testListHotCache) Invalidate(string)              {}
-func (c *testListHotCache) InvalidatePattern(string)       {}
-func (c *testListHotCache) Available() bool                { return true }
+func (c *testListHotCache) SetIfAbsent(string, any, time.Duration) bool {
+	return false
+}
+func (c *testListHotCache) Invalidate(key string) {
+	delete(c.entries, key)
+}
+func (c *testListHotCache) InvalidatePattern(string) {}
+func (c *testListHotCache) Available() bool          { return true }
 func (c *testListHotCache) GetListRaw(key string) ([]byte, int64, bool) {
 	entry, ok := c.entries[key]
 	return entry.items, entry.total, ok
@@ -1803,5 +1809,171 @@ func TestSiteListenerRepoCreateWithLegacyPromotion(t *testing.T) {
 	}
 	if len(listeners) != 2 || listeners[0].Bind != ":443" || listeners[1].Bind != ":80" {
 		t.Fatalf("expected promoted legacy and new listener, got %v", listeners)
+	}
+}
+
+// testKVHotCache 是同时支持 KV 与列表形态的测试替身。
+//
+// 与 testListHotCache 的区别：后者的 Get 恒为 false，专门用于验证列表回填
+// 后的二次查询不再访问数据库；本替身需要真实的 KV 读写来验证短 TTL 统计缓存。
+type testKVHotCache struct {
+	mu     sync.Mutex
+	values map[string]any
+}
+
+func newTestKVHotCache() *testKVHotCache {
+	return &testKVHotCache{values: make(map[string]any)}
+}
+
+func (c *testKVHotCache) Get(key string, dest any) bool {
+	c.mu.Lock()
+	v, ok := c.values[key]
+	c.mu.Unlock()
+	if !ok {
+		return false
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(raw, dest) == nil
+}
+
+func (c *testKVHotCache) Set(key string, value any, _ time.Duration) {
+	c.mu.Lock()
+	c.values[key] = value
+	c.mu.Unlock()
+}
+
+func (c *testKVHotCache) SetIfAbsent(key string, value any, _ time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.values[key]; ok {
+		return false
+	}
+	c.values[key] = value
+	return true
+}
+
+func (c *testKVHotCache) Invalidate(key string) {
+	c.mu.Lock()
+	delete(c.values, key)
+	c.mu.Unlock()
+}
+
+func (c *testKVHotCache) InvalidatePattern(string)                  {}
+func (c *testKVHotCache) Available() bool                           { return true }
+func (c *testKVHotCache) GetListRaw(string) ([]byte, int64, bool)   { return nil, 0, false }
+func (c *testKVHotCache) SetList(string, any, int64, time.Duration) {}
+
+// TestStatsBySiteCachesWithinMinuteWindow 验证站点统计按分钟窗口缓存：
+// 同一分钟内不同秒的调用不再回源，跨分钟边界后重新查询。
+func TestStatsBySiteCachesWithinMinuteWindow(t *testing.T) {
+	log := newCountingSQLLogger()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: log})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&store.AccessLog{}); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
+	if err := db.Create(&store.AccessLog{
+		SiteID: 7, RequestID: "stats-1", WAFAction: "block", CacheState: "hit",
+		CreatedAt: time.Date(2026, 1, 2, 3, 4, 10, 0, time.UTC),
+	}).Error; err != nil {
+		t.Fatalf("seed access log: %v", err)
+	}
+
+	repo := NewAccessLogRepo(db)
+	repo.SetHotCache(newTestKVHotCache())
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	first, err := repo.StatsBySite(7, base)
+	if err != nil {
+		t.Fatalf("first stats: %v", err)
+	}
+	if first.Requests != 1 || first.Intercepts != 1 || first.CacheHits != 1 {
+		t.Fatalf("first stats = %+v, want requests=1 intercepts=1 cache_hits=1", first)
+	}
+
+	log.reset()
+	second, err := repo.StatsBySite(7, base.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("cached stats: %v", err)
+	}
+	if second != first {
+		t.Fatalf("cached stats = %+v, want %+v", second, first)
+	}
+	if got := log.count(); got != 0 {
+		t.Fatalf("cached stats executed %d SQL statements, want 0", got)
+	}
+
+	if _, err := repo.StatsBySite(7, base.Add(2*time.Minute)); err != nil {
+		t.Fatalf("next-minute stats: %v", err)
+	}
+	if got := log.count(); got == 0 {
+		t.Fatal("cross-minute window reused the previous cache entry")
+	}
+}
+
+// TestStatsBySiteWithoutHotCacheQueriesDB 验证未配置热缓存时统计仍直接回源，
+// 不因缓存缺失而返回零值。
+func TestStatsBySiteWithoutHotCacheQueriesDB(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.Create(&store.AccessLog{
+		SiteID: 9, RequestID: "stats-2", WAFAction: "observe", CacheState: "miss",
+		CreatedAt: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC),
+	}).Error; err != nil {
+		t.Fatalf("seed access log: %v", err)
+	}
+	stats, err := NewAccessLogRepo(db).StatsBySite(9, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.Requests != 1 || stats.Observes != 1 || stats.CacheMisses != 1 {
+		t.Fatalf("stats = %+v, want requests=1 observes=1 cache_misses=1", stats)
+	}
+}
+
+// TestListFingerprintsInvalidationBypassesStaleHotList 验证指纹聚合缓存的失效
+// 必须穿透 Redis 热列表：数据面直写日志后只递增进程内代际，若热列表仍被读取，
+// 「先查聚合 → 新日志落库 → 再查聚合」仍会返回旧结果，失效等于没做。
+func TestListFingerprintsInvalidationBypassesStaleHotList(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewAccessLogRepo(db)
+	hot := newTestListHotCache()
+	repo.SetHotCache(hot)
+
+	seed := func(requestID, ja4 string) {
+		t.Helper()
+		if err := db.Create(&store.AccessLog{
+			SiteID: 1, RequestID: requestID, Host: "fp.example.test",
+			Path: "/fp", Method: "GET", StatusCode: 200, WAFAction: "observe",
+			HTTPProtocol: "h2", TLSVersion: "TLS13", TLSALPN: "h2",
+			TLSSNI: "fp.example.test", TLSJA3Hash: "ja3-" + ja4, TLSJA4: ja4,
+			CreatedAt: time.Now(),
+		}).Error; err != nil {
+			t.Fatalf("seed access log: %v", err)
+		}
+	}
+	seed("fp-first", "t13d1516h2_old")
+
+	if _, _, err := repo.ListFingerprints(0, 20, FingerprintFilter{}); err != nil {
+		t.Fatalf("first fingerprints query: %v", err)
+	}
+	if len(hot.entries) != 1 {
+		t.Fatalf("hot list entries after first query = %d, want 1", len(hot.entries))
+	}
+
+	// 模拟数据面直写：绕过本仓储的写入方法，只通过统一写入器通知失效。
+	seed("fp-second", "t13d1516h2_new")
+	repo.InvalidateFingerprintCache()
+
+	items, _, err := repo.ListFingerprints(0, 20, FingerprintFilter{})
+	if err != nil {
+		t.Fatalf("second fingerprints query: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("fingerprint groups after invalidation = %d, want 2 (stale hot list leaked through)", len(items))
 	}
 }

@@ -448,7 +448,12 @@ func GetACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 }
 
 // UpdateACMEConfig 更新 ACME 配置。
-func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
+//
+// 写库成功后调用 reload：ACME 配置本身不进快照，但 Manager() 的缓存键
+// （acmeManagerCacheKey，含 Email/DirectoryURL/CAA 三项）会随本次修改变化，
+// 而已发布的 TLS/监听计划也需要即刻重协调。不触发 reload 时，改动要等到
+// 下一次 renewDue tick 才被读取。
+func UpdateACMEConfig(repo *repository.SystemSettingsRepo, reload func() error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var req struct {
 			Enabled           *bool   `json:"enabled"`
@@ -514,6 +519,12 @@ func UpdateACMEConfig(repo *repository.SystemSettingsRepo) app.HandlerFunc {
 		if err := saveACMEConfig(repo, cfg); err != nil {
 			c.JSON(500, map[string]string{"error": sanitizeACMEErrorText(err.Error())})
 			return
+		}
+		if reload != nil {
+			if err := reload(); err != nil {
+				c.JSON(500, map[string]any{"error": "config applied but reload failed: " + sanitizeACMEErrorText(err.Error()), "item": cfg})
+				return
+			}
 		}
 		c.JSON(200, cfg)
 	}

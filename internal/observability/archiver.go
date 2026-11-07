@@ -39,6 +39,7 @@ type Archiver struct {
 	repo         *repository.SecurityEventRepo
 	accessRepo   *repository.AccessLogRepo
 	dropRepo     *repository.DropEventRepo
+	botScoreRepo *repository.BotScoreRepo
 	syncLogRepo  *repository.ThreatIntelSyncLogRepo
 	settingsRepo *repository.SystemSettingsRepo
 	db           *gorm.DB
@@ -190,6 +191,15 @@ func (a *Archiver) SetSyncLogRepo(repo *repository.ThreatIntelSyncLogRepo) {
 		return
 	}
 	a.syncLogRepo = repo
+}
+
+// SetBotScoreRepo 注入 Bot 评分日志仓库，启用评分历史保留清理。
+// 保留天数复用 AccessLogDays（评分日志与访问日志同为逐请求流量日志）。
+func (a *Archiver) SetBotScoreRepo(repo *repository.BotScoreRepo) {
+	if a == nil {
+		return
+	}
+	a.botScoreRepo = repo
 }
 
 /** SetRetention 动态更新保留配置。 */
@@ -380,6 +390,21 @@ func (a *Archiver) cleanup() {
 		} else if dropDeleted > 0 {
 			a.logger().Info("archiver: cleaned old drop events",
 				slog.Int64("deleted", dropDeleted),
+				slog.String("older_than", cutoff.Format(time.RFC3339)))
+		}
+	}
+
+	// Bot 评分日志复用 AccessLogDays 的保留期（同为逐请求流量日志）。
+	if cfg.AccessLogDays > 0 && a.botScoreRepo != nil {
+		cutoff := time.Now().Add(-time.Duration(cfg.AccessLogDays) * 24 * time.Hour)
+		botDeleted, err := runArchiverDelete(func() (int64, error) {
+			return a.botScoreRepo.DeleteOlderThan(cutoff)
+		})
+		if err != nil {
+			a.logger().Error("archiver: failed to delete old bot score logs", slog.Any("err", err))
+		} else if botDeleted > 0 {
+			a.logger().Info("archiver: cleaned old bot score logs",
+				slog.Int64("deleted", botDeleted),
 				slog.String("older_than", cutoff.Format(time.RFC3339)))
 		}
 	}

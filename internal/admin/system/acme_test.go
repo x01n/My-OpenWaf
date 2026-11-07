@@ -66,7 +66,7 @@ func TestLoadACMEConfigDefaultsCAAAllowedIssuers(t *testing.T) {
 
 func TestUpdateACMEConfigRejectsCAAEnabledWithoutDNSServer(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
-	ctx := invokeSystemConfigHandler(t, UpdateACMEConfig(repo), "POST", "/api/v1/certificates/acme/config", []byte(`{"caa_check_enabled":true,"caa_allowed_issuers":"letsencrypt.org"}`))
+	ctx := invokeSystemConfigHandler(t, UpdateACMEConfig(repo, nil), "POST", "/api/v1/certificates/acme/config", []byte(`{"caa_check_enabled":true,"caa_allowed_issuers":"letsencrypt.org"}`))
 	if ctx.Response.StatusCode() != 400 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}
@@ -74,7 +74,7 @@ func TestUpdateACMEConfigRejectsCAAEnabledWithoutDNSServer(t *testing.T) {
 
 func TestUpdateACMEConfigPersistsCAASettings(t *testing.T) {
 	repo := newSystemSettingsRepoForTest(t)
-	ctx := invokeSystemConfigHandler(t, UpdateACMEConfig(repo), "POST", "/api/v1/certificates/acme/config", []byte(`{"enabled":true,"email":"admin@example.com","caa_check_enabled":true,"caa_allowed_issuers":"letsencrypt.org, pki.goog","caa_dns_server":"127.0.0.1:5353"}`))
+	ctx := invokeSystemConfigHandler(t, UpdateACMEConfig(repo, nil), "POST", "/api/v1/certificates/acme/config", []byte(`{"enabled":true,"email":"admin@example.com","caa_check_enabled":true,"caa_allowed_issuers":"letsencrypt.org, pki.goog","caa_dns_server":"127.0.0.1:5353"}`))
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("unexpected status %d: %s", ctx.Response.StatusCode(), bytes.TrimSpace(ctx.Response.Body()))
 	}

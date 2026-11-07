@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"My-OpenWaf/internal/proxy"
+	proxytransport "My-OpenWaf/internal/proxy/transport"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store"
 )
@@ -238,7 +238,7 @@ func TestBuildTLSCapabilityStatusesOrdersSSLVersionsNumerically(t *testing.T) {
 }
 
 func TestRuntimeTransportPoolsSummarizesProxyPools(t *testing.T) {
-	got := runtimeTransportPools(proxy.UpstreamTransportPoolStats{
+	got := runtimeTransportPools(proxytransport.UpstreamTransportPoolStats{
 		HTTPTransports:           2,
 		HTTP2CleartextTransports: 1,
 		HTTP3Transports:          3,

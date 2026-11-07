@@ -217,6 +217,52 @@ func (s *RedisSessionStore) Revoke(token string) error {
 	return lastErr
 }
 
+/**
+ * RevokeAll 全量吊销所有会话，用于备份恢复这类配置整体替换后的权限重置。
+ */
+func (s *RedisSessionStore) RevokeAll() error {
+	var lastErr error
+	if err := s.local.RevokeAll(); err != nil {
+		lastErr = err
+	}
+	if redis := s.redisClient(); redis != nil {
+		if err := s.revokeAllInRedis(redis); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+/**
+ * revokeAllInRedis 用 SCAN 游标遍历会话键前缀并分批删除。
+ *
+ * 不使用 KEYS：KEYS 会一次性遍历整个键空间并阻塞 Redis 主线程，在会话量大的
+ * 实例上是可观测的停顿。也不复用 accessCleanupScript：那段 Lua 的语义是
+ * 「按 expires_at 判过期后删除」，需要逐键 GET 并在 Lua 内解析 JSON，全量吊销
+ * 不需要判过期，直接把 SCAN 命中的键交给 DEL 即可。
+ */
+func (s *RedisSessionStore) revokeAllInRedis(redis rueidis.Client) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cursor := uint64(0)
+	for {
+		entry, err := redis.Do(ctx, redis.B().Scan().Cursor(cursor).Match(accessSessionKeyPrefix+"*").Count(128).Build()).AsScanEntry()
+		if err != nil {
+			return err
+		}
+		keys, next := entry.Elements, entry.Cursor
+		if len(keys) > 0 {
+			if err := redis.Do(ctx, redis.B().Del().Key(keys...).Build()).Error(); err != nil && err != rueidis.Nil {
+				return err
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
+}
+
 // CleanExpired 清理过期会话：本地内存始终清理；Redis 可用时经 SCAN+Lua 原子清理。
 func (s *RedisSessionStore) CleanExpired() error {
 	if err := s.local.CleanExpired(); err != nil {

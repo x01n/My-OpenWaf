@@ -357,6 +357,11 @@ function AccessLogsContent() {
                   {row.upstream_http_protocol || "-"}
                 </span>
               ) : null}
+              {row.zero_rtt ? (
+                <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 text-[10px] text-amber-600 dark:text-amber-400">
+                  0-RTT
+                </span>
+              ) : null}
               {row.cache_state ? <span>· {row.cache_state}</span> : null}
             </div>
           </div>

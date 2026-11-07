@@ -3,407 +3,320 @@
 # CVE 数据源同步
 
 <cite>
-**本文引用的文件**
+**本文档引用的文件**
 - [feed.go](file://internal/waf/cve/feed.go)
 - [detector.go](file://internal/waf/cve/detector.go)
-- [cve.go](file://internal/store/cve.go)
-- [cve_rule.go](file://internal/store/repository/cve_rule.go)
-- [cve.go](file://internal/admin/detect/cve.go)
-- [cve_rules.go](file://internal/admin/detect/cve_rules.go)
-- [helpers.go](file://internal/admin/shared/helpers.go)
+- [catalog.go](file://internal/waf/cve/catalog.go)
+- [cve.go](file://internal/store/cve/cve.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
 - [config.go](file://internal/core/config.go)
 - [server.go](file://internal/app/server.go)
-- [api.ts](file://frontend/lib/api.ts)
+- [registry.go](file://internal/core/configoverride/registry.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
-7. [性能考量](#性能考量)
-8. [故障排除指南](#故障排除指南)
+7. [性能考虑](#性能考虑)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件面向 CVE 数据源同步系统，围绕 NVD API 与 GitHub Advisory API 的集成实现进行深入技术说明。内容涵盖数据获取、解析、转换与存储的完整流程，解释增量同步策略与全量同步触发条件，提供数据质量控制机制（验证、去重、异常处理），说明同步频率配置、错误重试与超时处理策略，并给出数据源配置选项与故障排除指南，帮助读者理解如何处理 API 限制与网络异常。
+
+CVE 数据源同步由 `CVEFeedManager` 承担：后台定时从 NVD API 2.0 与 GitHub Advisory API 拉取最近漏洞，按 CWE 类型或描述关键词映射为「正则 `pattern` + 目标域」规则写入 `cve_rules` 表，再把已批准规则热加载进 `CVEDetector`。本文给出可实测的数据源参数、CWE→正则映射、severity 阈值与同步状态机，并说明增量窗口、去重、限流与错误处理。
+
+一个关键澄清：本实现把 CVE 归约为**内容正则**，不携带受影响版本区间（version range）；`CVSSScore` 只用于推导 `severity`，与版本判定无关。
 
 ## 项目结构
-该系统位于 internal/waf/cve 下，采用分层设计：
-- 数据源同步层：负责定时拉取 NVD 与 GitHub Advisory 的漏洞信息，生成规则并写入数据库。
-- 规则加载层：将数据库中已批准且启用的规则注入到 CVEDetector，供请求检测使用。
-- 管理接口层：提供规则列表、启用/禁用、批量更新、立即同步、状态查询等 API。
-- 配置层：通过环境变量控制是否启用 CVE 功能、同步间隔、NVD API Key、自动审批等。
+
+同步逻辑集中在 `feed.go`，模型在 `store/cve`，仓库在 `store/repository/cve`，管理入口在 `admin/detect/cverules`，配置与装配在 `core/config.go` 与 `app/server.go`。
+
+| 模块 | 文件 | 角色 |
+|---|---|---|
+| 同步管理器 | feed.go | 循环、拉取、解析、入库、注入 |
+| 目录对账 | catalog.go | 内置规则以 `source=catalog` 落表 |
+| 数据模型 | store/cve/cve.go | `CVERuleModel`、`CVESyncLog` |
+| 规则仓库 | repository/cve/cve_rule.go | CRUD + 审批计数 + 规范快照 |
+| 管理 API | admin/detect/cverules/cve.go | `SyncCVERules`、`GetCVEFeedStatus` |
+| 配置装配 | config.go:396-405 / server.go:448-454 | 环境变量与启动 |
 
 ```mermaid
 graph TB
-subgraph "数据源同步层"
-F["CVEFeedManager<br/>定时任务/手动触发"]
-NVD["NVD API v2.0"]
+subgraph "数据源"
+NVD["NVD API 2.0"]
 GH["GitHub Advisory API"]
 end
-subgraph "规则存储层"
-DB["GORM 数据库<br/>cve_rules 表"]
-REPO["CVERuleRepo<br/>规则仓库"]
+subgraph "CVEFeedManager"
+LOOP["loop/doSync"]
+GEN["generateRule/cweToPattern"]
+LOAD["loadRulesIntoDetector"]
 end
-subgraph "规则加载层"
-DET["CVEDetector<br/>自定义规则注入"]
+subgraph "存储与检测"
+DB["cve_rules 表"]
+DET["CVEDetector"]
 end
-subgraph "管理接口层"
-API["管理 API<br/>规则 CRUD/同步/状态"]
+subgraph "配置"
+ENV["MY_OPENWAF_CVE_FEED_*"]
 end
-F --> NVD
-F --> GH
-F --> DB
-REPO --> DB
-DET --> REPO
-API --> REPO
-API --> F
+ENV --> LOOP
+LOOP --> NVD
+LOOP --> GH
+NVD --> GEN
+GH --> GEN
+GEN --> DB
+DB --> LOAD
+LOAD --> DET
 ```
 
-图表来源
-- [feed.go:83-100](file://internal/waf/cve/feed.go#L83-L100)
-- [cve.go:16-29](file://internal/store/cve.go#L16-L29)
-- [cve_rule.go:10-14](file://internal/store/repository/cve_rule.go#L10-L14)
-- [detector.go:159-167](file://internal/waf/cve/detector.go#L159-L167)
-- [cve.go:215-227](file://internal/admin/detect/cve.go#L215-L227)
+**图表来源**
+- [feed.go:140-199](file://internal/waf/cve/feed.go#L140-L199)
+- [feed.go:608-666](file://internal/waf/cve/feed.go#L608-L666)
+- [feed.go:201-228](file://internal/waf/cve/feed.go#L201-L228)
 
-章节来源
-- [feed.go:16-30](file://internal/waf/cve/feed.go#L16-L30)
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
-- [cve_rule.go:10-14](file://internal/store/repository/cve_rule.go#L10-L14)
-- [detector.go:159-167](file://internal/waf/cve/detector.go#L159-L167)
-- [cve.go:215-227](file://internal/admin/detect/cve.go#L215-L227)
+**章节来源**
+- [feed.go:16-87](file://internal/waf/cve/feed.go#L16-L87)
+- [config.go:396-405](file://internal/core/config.go#L396-L405)
 
 ## 核心组件
-- CVEFeedManager：后台定时同步器，负责拉取 NVD 与 GitHub Advisory 数据，生成规则并写入数据库，同时将已批准规则注入 CVEDetector。
-- CVEDetector：检测引擎，聚合通用与语言特异（PHP/Java/Node）子检测器，并加载自定义规则参与实时检测。
-- CVERuleModel/CVERuleRecord：规则数据模型，包含 CVE 编号、分类、目标、严重性、动作、描述、来源、CVSS 分数、CWE 类型等字段。
-- CVERuleRepo：规则仓库，提供列表、查询、创建、更新、删除、启用切换、待审统计等操作。
-- 管理 API：提供规则管理与同步控制的 HTTP 接口，支持立即同步与状态查询。
 
-章节来源
-- [feed.go:16-30](file://internal/waf/cve/feed.go#L16-L30)
-- [detector.go:12-22](file://internal/waf/cve/detector.go#L12-L22)
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
-- [cve_rule.go:10-14](file://internal/store/repository/cve_rule.go#L10-L14)
-- [cve.go:215-227](file://internal/admin/detect/cve.go#L215-L227)
+| 组件/方法 | 职责 | 行号 |
+|---|---|---|
+| `NewCVEFeedManagerWithFeed` | 按 `feedEnabled` 构造管理器 | feed.go:73-87 |
+| `Start` | 迁移表 + 载入规则 + 启循环 | feed.go:90-106 |
+| `loop`/`doSync` | 定时与并发保护同步 | feed.go:140-199 |
+| `fetchFromNVD`/`fetchNVDPage` | NVD 分页拉取 | feed.go:295-412 |
+| `fetchFromGitHubAdvisory` | GitHub 单次拉取 | feed.go:527-605 |
+| `processNVDCVE` | NVD 条目去重与入库 | feed.go:414-469 |
+| `generateRule`/`cweToPattern` | CWE→正则映射与 severity | feed.go:608-666 |
+| `loadRulesIntoDetector` | 注入已批准规则 | feed.go:201-228 |
+
+**章节来源**
+- [feed.go:73-228](file://internal/waf/cve/feed.go#L73-L228)
 
 ## 架构总览
-系统以 CVEFeedManager 为核心，周期性或手动触发同步，将外部数据映射为内部规则模型并持久化。CVEDetector 在启动时与每次同步后重新加载规则，确保检测逻辑与数据库状态一致。
+
+启动时 `Start` 先 `AutoMigrate` 建表、载入既有规则；若 `feedEnabled` 为真，`loop` 立即执行一次 `doSync` 再按 `syncInterval` 触发。`doSync` 用互斥量保证同一时刻只有一个同步在跑，依次拉 NVD、拉 GitHub，最后 `loadRulesIntoDetector`，并更新内存态 `lastSync`/`lastError`。
 
 ```mermaid
 sequenceDiagram
-participant T as "定时器/手动触发"
+participant T as "定时器/手动"
 participant M as "CVEFeedManager"
 participant N as "NVD API"
-participant G as "GitHub Advisory API"
-participant D as "数据库"
+participant G as "GitHub API"
+participant D as "cve_rules"
 participant E as "CVEDetector"
-T->>M : "Start()/SyncNow()"
-M->>N : "HTTP GET /rest/json/cves/2.0"
-N-->>M : "JSON 响应"
-M->>M : "解析/去重/生成规则"
-M->>D : "Create(CVERuleModel)"
-M->>G : "HTTP GET /advisories"
-G-->>M : "JSON 响应"
-M->>M : "解析/过滤/生成规则"
-M->>D : "Create(CVERuleModel)"
-M->>E : "ReloadCustomRules(已批准+启用)"
-E-->>M : "就绪"
+T->>M : doSync()
+M->>M : 抢 syncing 锁
+M->>N : GET /rest/json/cves/2.0（近24h, web application）
+loop 分页 ≤50 页
+N-->>M : vulnerabilities[]
+M->>M : processNVDCVE 去重+generateRule
+M->>D : Create(source=nvd)
+end
+M->>G : GET /advisories（reviewed, per_page=30）
+G-->>M : advisories[]
+M->>M : 生态过滤+generateRule
+M->>D : Create(source=github)
+M->>D : 读取 approved & source<>catalog
+M->>E : ReloadCustomRules(自定义规则)
+M->>M : 更新 lastSync/lastError
 ```
 
-图表来源
-- [feed.go:129-143](file://internal/waf/cve/feed.go#L129-L143)
-- [feed.go:145-188](file://internal/waf/cve/feed.go#L145-L188)
-- [feed.go:253-302](file://internal/waf/cve/feed.go#L253-L302)
-- [feed.go:381-459](file://internal/waf/cve/feed.go#L381-L459)
-- [detector.go:452-466](file://internal/waf/cve/detector.go#L452-L466)
+**图表来源**
+- [feed.go:156-199](file://internal/waf/cve/feed.go#L156-L199)
+- [feed.go:295-336](file://internal/waf/cve/feed.go#L295-L336)
+- [feed.go:527-605](file://internal/waf/cve/feed.go#L527-L605)
+
+**章节来源**
+- [feed.go:90-199](file://internal/waf/cve/feed.go#L90-L199)
 
 ## 详细组件分析
 
-### CVEFeedManager：数据源同步与规则生成
-- 启动与生命周期
-  - 自动迁移规则表，启动时加载现有规则到检测器。
-  - 若 feedEnabled=false，则跳过后台循环，仅支持手动同步。
-  - 提供 Stop() 关闭后台循环。
-- 同步策略
-  - 定时同步：基于 syncInterval 的 ticker 循环。
-  - 手动同步：SyncNow() 阻塞执行一次完整同步。
-  - 并发保护：doSync() 内部通过互斥锁防止并发重复执行。
-- 数据源集成
-  - NVD API v2.0：按最近 24 小时发布日期范围拉取，关键字限定为 web application，每页 50 条。
-  - GitHub Advisory API：列出 reviewed 类型，按更新时间倒序，筛选 npm/composer/maven/pip/go 等生态。
-- 数据解析与转换
-  - NVD：提取描述、CVSS v3.1/v3.0 分数、CWE 列表，生成规则并设定严重性等级。
-  - GitHub：提取 CVE 编号、描述、CVSS 分数、CWE 列表，过滤空 CVE 的记录。
-- 去重与写入
-  - 按 CVEID + 来源(source) 去重，避免重复写入。
-  - 自动生成规则时，若 autoApprove=true 则直接批准并启用。
-- 规则注入
-  - 每次同步后，从数据库加载 enabled=true 且 approved=true 的规则，注入 CVEDetector。
+### 数据源参数
+
+两个数据源的请求参数均可在 `feed.go` 中实测：
+
+| 参数 | NVD | GitHub |
+|---|---|---|
+| 基础 URL | `https://services.nvd.nist.gov/rest/json/cves/2.0`（feed.go:278） | `https://api.github.com/advisories`（feed.go:530） |
+| 查询 | pubStartDate/pubEndDate、keywordSearch=web+application、resultsPerPage、startIndex | type=reviewed、per_page=30、sort=updated、direction=desc |
+| 时间窗口 | 最近 24 小时（feed.go:298-299） | 按 updated 倒序（无显式窗口） |
+| 每页条数 | 50（feed.go:281） | 30（feed.go:530） |
+| 单次最大页 | 50 页（feed.go:292，约 2500 条上限） | 单页（不翻页） |
+| 鉴权头 | `apiKey`（配置 Key 时，feed.go:366） | `Accept`、`X-GitHub-Api-Version: 2022-11-28`（feed.go:536-537） |
+| 页间延时 | 无 Key 6s / 有 Key 1.2s（feed.go:285、289） | 不适用 |
+| HTTP 超时 | 30s（feed.go:296） | 30s（feed.go:528） |
+| 响应体上限 | 5 MiB（feed.go:380） | 5 MiB（feed.go:550） |
+
+> GitHub Advisory 当前不发送认证头，可能受匿名速率限制影响（feed.go:532-537 未设置 `Authorization`）。
+
+**章节来源**
+- [feed.go:276-336](file://internal/waf/cve/feed.go#L276-L336)
+- [feed.go:527-560](file://internal/waf/cve/feed.go#L527-L560)
+
+### NVD 拉取与去重
+
+`fetchFromNVD` 以 `startIndex` 递增翻页，停页条件为：本页空、`startIndex+50 ≥ totalResults`、或旧式响应缺 `totalResults` 且本页不足 50（feed.go:402-411）。`processNVDCVE` 先按 `cve_id + source='nvd'` 查重（feed.go:417），再取英文描述、优先 CVSS v3.1、首个 `CWE-` 类型，生成规则后把 `Source` 显式改回 `nvd`（feed.go:456）——否则与查重条件不一致会导致每页重复插入。参考链接经 `formatNVDReferences` 截断为最多 10 条、单条 512 字节，发布时间并入描述尾部并截断 500 字节（feed.go:459-461、471-497）。
+
+**章节来源**
+- [feed.go:360-412](file://internal/waf/cve/feed.go#L360-L412)
+- [feed.go:414-497](file://internal/waf/cve/feed.go#L414-L497)
+
+### GitHub Advisory 过滤
+
+`fetchFromGitHubAdvisory` 拉取 reviewed 公告后，仅保留存在 `cve_id`、且漏洞包生态属于 `npm/composer/maven/pip/go` 的条目（feed.go:562-576），按 `cve_id + source='github'` 去重后入库（feed.go:580、593-599）。CWE 取首个 `cwes[].cwe_id`。
+
+**章节来源**
+- [feed.go:499-605](file://internal/waf/cve/feed.go#L499-L605)
+
+### CWE 到正则映射与 severity 阈值
+
+`generateRule` 调 `cweToPattern` 把 CWE 映射为通用检测正则；映射不到时退回 `descriptionToPattern` 关键词提取，仍无法生成则丢弃该 CVE（feed.go:608-612、669-687）。
+
+| CWE | 目标 | 类别 | 正则意图 |
+|---|---|---|---|
+| CWE-89 | all | general | SQL 注入关键词组合 |
+| CWE-79 | all | general | `<script>`/`javascript:`/事件属性 |
+| CWE-78、CWE-77 | all | general | 分号/管道后命令词 |
+| CWE-22 | url | general | 两段以上路径遍历编码 |
+| CWE-611 | body | general | DOCTYPE/ENTITY 外部实体 |
+| CWE-918 | all | general | 内网/回环/元数据 SSRF |
+| CWE-502 | all | general | 反序列化 gadget 指示 |
+| CWE-94、CWE-95 | all | general | eval/exec/system/child_process |
+| CWE-113 | all | general | `%0d%0a` CRLF |
+| CWE-352 | — | — | 返回空，跳过（对 WAF 价值有限） |
+
+CVSS 到 severity 的阈值映射（feed.go:614-623）：
+
+| CVSS | severity |
+|---|---|
+| ≥ 9.0 | critical |
+| ≥ 7.0 | high |
+| ≥ 4.0 | medium |
+| > 0 | low |
+| = 0 | medium（缺省） |
+
+**章节来源**
+- [feed.go:608-687](file://internal/waf/cve/feed.go#L608-L687)
+
+### 同步状态机
+
+`doSync` 用 `syncing` 标志实现单飞：已同步则直接返回，成功清 `lastError`，聚合失败写入 `lastError`。`SyncNow` 供管理面手动触发，同样经由 `doSync`（feed.go:121-123、156-199）。
 
 ```mermaid
-flowchart TD
-Start(["开始 doSync"]) --> Lock{"是否正在同步?"}
-Lock --> |是| Exit["返回"]
-Lock --> |否| SetFlag["标记 syncing=true"]
-SetFlag --> FetchNVD["fetchFromNVD()"]
-FetchNVD --> FetchGH["fetchFromGitHubAdvisory()"]
-FetchGH --> Reload["loadRulesIntoDetector()"]
-Reload --> UpdateTime["更新 lastSync/lastError"]
-UpdateTime --> Unlock["标记 syncing=false"]
-Unlock --> End(["结束"])
+stateDiagram-v2
+[*] --> 空闲
+空闲 --> 同步中: loop/SyncNow 触发
+同步中 --> 同步中: 已在跑则直接返回
+同步中 --> 空闲: 拉取NVD→拉取GitHub→注入检测器
+同步中 --> 带错误空闲: 某源失败聚合 lastError
+带错误空闲 --> 同步中: 下次触发
 ```
 
-图表来源
-- [feed.go:145-188](file://internal/waf/cve/feed.go#L145-L188)
-- [feed.go:190-212](file://internal/waf/cve/feed.go#L190-L212)
+**图表来源**
+- [feed.go:156-199](file://internal/waf/cve/feed.go#L156-L199)
+- [feed.go:140-154](file://internal/waf/cve/feed.go#L140-L154)
 
-章节来源
-- [feed.go:83-100](file://internal/waf/cve/feed.go#L83-L100)
-- [feed.go:129-143](file://internal/waf/cve/feed.go#L129-L143)
-- [feed.go:145-188](file://internal/waf/cve/feed.go#L145-L188)
-- [feed.go:190-212](file://internal/waf/cve/feed.go#L190-L212)
+**章节来源**
+- [feed.go:121-199](file://internal/waf/cve/feed.go#L121-L199)
 
-### NVD API 集成细节
-- 请求参数
-  - 时间窗口：最近 24 小时，UTC。
-  - 关键字：web application。
-  - 结果数量：每页 50。
-- 请求头
-  - 若配置了 NVD API Key，则添加 apiKey 头。
-- 响应处理
-  - 仅接受 200 OK；非 200 返回读取前 512 字节错误体并报错。
-  - 限制响应体大小为 5MB，防止异常大包。
-  - 解析 vulnerabilities 数组，逐条处理。
-- 规则生成
-  - 描述优先取英文，否则取第一条。
-  - CVSS 优先取 v3.1，其次 v3.0。
-  - CWE 类型提取首个以 CWE- 开头的描述。
-  - 通过 generateRule 映射到通用规则模板，设定严重性等级。
+### 同步状态与 CVESyncLog
 
-章节来源
-- [feed.go:253-302](file://internal/waf/cve/feed.go#L253-L302)
-- [feed.go:304-349](file://internal/waf/cve/feed.go#L304-L349)
-- [feed.go:461-491](file://internal/waf/cve/feed.go#L461-L491)
+管理面 `GetCVEFeedStatus` 返回 `last_sync`、`last_error`、`syncing` 与 `pending_review`（待审批数），数据来自内存 `SyncStatus` 与 `PendingApprovalCount`（cve.go(admin):387-409、feed.go:126-134）。
 
-### GitHub Advisory API 集成细节
-- 请求参数
-  - 类型：reviewed。
-  - 分页：per_page=30。
-  - 排序：按 updated 倒序。
-- 生态过滤
-  - 仅保留 npm、composer、maven、pip、go 等 Web 相关生态。
-- 去重与写入
-  - 仅当存在 CVE 编号且来源为 github 时才写入。
-  - 自动批准与启用取决于 autoApprove 配置。
-- 规则生成
-  - 使用描述与 CVSS 分数生成规则，CWE 类型取首个条目。
+| 字段 | 来源 |
+|---|---|
+| last_sync | `m.lastSync`（feed.go:187） |
+| last_error | `m.lastError`（feed.go:189） |
+| syncing | `m.syncing`（feed.go:162） |
+| pending_review | `approved=false` 计数（cve_rule.go:289-293） |
 
-章节来源
-- [feed.go:381-459](file://internal/waf/cve/feed.go#L381-L459)
-- [feed.go:461-491](file://internal/waf/cve/feed.go#L461-L491)
+> `CVESyncLog` 模型与 `CVESyncLogRepo`（store/cve/cve.go:38-46、cve_rule.go:297-311）已定义，但当前 `CVEFeedManager` 同步循环**未写入该表**，同步状态仅存在于内存 `SyncStatus`。这是可核实的实现现状，非文档臆测。
 
-### 规则模型与存储
-- CVERuleModel 字段
-  - 标识：ID、CVEID、Category、Pattern、Target、Severity、Action、Enabled、Description、Source、Approved、CVSSScore、CWEType。
-  - 索引：CVEID、Source 等。
-- CVERuleRecord
-  - 与前端交互的记录结构，包含同步日志字段。
-- CVERuleRepo
-  - 提供分页列表、查询、创建、更新、删除、启用切换、待审统计等。
-- CVESyncLog
-  - 记录每次同步的来源、状态、新增规则数、错误信息、起止时间。
+**章节来源**
+- [feed.go:126-199](file://internal/waf/cve/feed.go#L126-L199)
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve.go](file://internal/store/cve/cve.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
 
-章节来源
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
-- [cve_rule.go:16-77](file://internal/store/repository/cve_rule.go#L16-L77)
-- [cve.go:31-40](file://internal/store/cve.go#L31-L40)
+### 与目录对账的边界
 
-### CVEDetector：规则注入与检测
-- 规则注入
-  - ReloadCustomRules：将数据库中已批准且启用的规则编译为正则表达式，注入检测器。
-  - AddCustomRule/RemoveCustomRule：支持运行时增删。
-- 检测流程
-  - BuildCVERequest：标准化请求，包含解码后的路径、查询、头部、主体等。
-  - Detect：按类别敏感度开关依次调用子检测器，再匹配自定义规则，最后匹配注册表规则。
-  - hasCVESuspiciousContent：快速预过滤，避免对干净请求进行昂贵检测。
+`ReconcileBuiltinCatalog` 把内置可执行规则以 `source='catalog'` 落入 `cve_rules` 供管理面展示，但 `loadRulesIntoDetector` 的过滤条件 `source <> 'catalog'` 明确排除它们（feed.go:203、catalog.go:11-113）。因此自动同步规则、手工/自定义规则参与运行时注入，目录规则只做展示与元信息对账，两者互不覆盖。
 
-章节来源
-- [detector.go:452-466](file://internal/waf/cve/detector.go#L452-L466)
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
-
-### 管理 API：规则与同步控制
-- 规则管理
-  - 列表、创建、更新、删除、启用/禁用、批量更新、统计。
-  - 更新时校验正则表达式合法性，规范化动作类型。
-- 同步控制
-  - 立即同步：SyncNow()，返回同步结果。
-  - 状态查询：GetSyncStatus()，包含上次同步时间、错误、是否正在同步、待审数量。
-- 前端对接
-  - 前端通过 /api/v1/cve-rules/sync 与 /api/v1/cve-feed/status 调用后端接口。
-
-章节来源
-- [cve.go:16-75](file://internal/admin/detect/cve.go#L16-L75)
-- [cve.go:77-213](file://internal/admin/detect/cve.go#L77-L213)
-- [cve_rules.go:95-190](file://internal/admin/detect/cve_rules.go#L95-L190)
-- [cve.go:215-251](file://internal/admin/detect/cve.go#L215-L251)
-- [helpers.go:73-78](file://internal/admin/shared/helpers.go#L73-L78)
-- [api.ts:899-905](file://frontend/lib/api.ts#L899-L905)
+**章节来源**
+- [catalog.go:17-113](file://internal/waf/cve/catalog.go#L17-L113)
+- [feed.go:201-228](file://internal/waf/cve/feed.go#L201-L228)
 
 ## 依赖关系分析
-- CVEFeedManager 依赖 GORM 数据库与 CVEDetector。
-- 管理 API 依赖 CVERuleRepo 与 CVEFeedManager。
-- CVEDetector 依赖各语言子检测器与自定义规则集合。
-- 配置通过环境变量注入，运行时由 server.go 初始化并传递给 CVEFeedManager。
 
-```mermaid
-classDiagram
-class CVEFeedManager {
-+Start()
-+Stop()
-+SyncNow()
-+GetSyncStatus()
-+ReloadRules()
-}
-class CVEDetector {
-+ReloadCustomRules()
-+Detect()
-}
-class CVERuleRepo {
-+List()
-+Get()
-+Create()
-+Update()
-+Delete()
-+Toggle()
-+PendingApprovalCount()
-}
-class CVERuleModel
-class CVERuleRecord
-class CVESyncLog
-CVEFeedManager --> CVEDetector : "注入规则"
-CVEFeedManager --> CVERuleModel : "创建/查询"
-CVERuleRepo --> CVERuleModel : "CRUD"
-CVERuleRepo --> CVESyncLog : "日志"
-CVERuleModel <|-- CVERuleRecord : "存储结构"
-```
+| 依赖方 | 被依赖 | 用途 |
+|---|---|---|
+| `CVEFeedManager` | `gorm.DB` | 读写 `cve_rules` |
+| `CVEFeedManager` | `CVEDetector` | `ReloadCustomRules` 注入 |
+| `CVEFeedManager` | NVD/GitHub HTTP | 拉取 |
+| `server.go` | `config.CVEConfig` | 装配 interval/key/autoApprove/feedEnabled |
+| 管理 API | `CVEFeedManager` | `SyncNow`/`GetSyncStatus` |
 
-图表来源
-- [feed.go:16-30](file://internal/waf/cve/feed.go#L16-L30)
-- [detector.go:12-22](file://internal/waf/cve/detector.go#L12-L22)
-- [cve_rule.go:10-14](file://internal/store/repository/cve_rule.go#L10-L14)
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
-- [cve.go:31-40](file://internal/store/cve.go#L31-L40)
+配置项注册于 `configoverride/registry.go`（`cve_feed_enabled`、`cve_feed_interval`），环境变量前缀 `MY_OPENWAF_CVE_FEED_`。
 
-章节来源
-- [feed.go:16-30](file://internal/waf/cve/feed.go#L16-L30)
-- [detector.go:12-22](file://internal/waf/cve/detector.go#L12-L22)
-- [cve_rule.go:10-14](file://internal/store/repository/cve_rule.go#L10-L14)
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
-- [cve.go:31-40](file://internal/store/cve.go#L31-L40)
+**章节来源**
+- [feed.go:17-33](file://internal/waf/cve/feed.go#L17-L33)
+- [server.go:448-454](file://internal/app/server.go#L448-L454)
+- [registry.go](file://internal/core/configoverride/registry.go)
 
-## 性能考量
-- 同步频率
-  - 默认 6 小时，可通过环境变量配置；建议结合业务风险与 API 限额调整。
-- 并发与锁
-  - doSync() 内部互斥锁避免重复执行；后台循环使用 ticker，单次同步耗时较长时不会叠加下一次执行。
-- 响应体限制
-  - 限制 NVD/GitHub 响应体最大 5MB，防止内存膨胀。
-- 正则编译
-  - 自定义规则注入时编译正则，无效模式会被跳过；检测时按类别敏感度开关减少不必要的子检测器调用。
-- 快速预过滤
-  - hasCVESuspiciousContent 在大多数情况下跳过昂贵检测，显著降低 CPU 占用。
+## 性能考虑
 
-章节来源
-- [config.go:148-157](file://internal/core/config.go#L148-L157)
-- [server.go:155-160](file://internal/app/server.go#L155-L160)
-- [feed.go:284](file://internal/waf/cve/feed.go#L284)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
-- [detector.go:452-466](file://internal/waf/cve/detector.go#L452-L466)
+- **礼貌限流**：无 Key 时 NVD 每页间隔 6s（滚动 30 秒 5 次配额），有 Key 降到 1.2s（feed.go:282-289）。
+- **单次上限**：NVD 最多 50 页，防止无 Key 场景同步被无限拉长（feed.go:290-292）。
+- **响应体封顶**：两源均 `LimitReader` 5 MiB，非 200 只读 512 字节错误摘要（feed.go:376、380）。
+- **查重前置**：入库前按 `cve_id+source` 查重，避免每次同步重复写同一 CVE（feed.go:417、580）。
+- **注入过滤**：只载入 `approved & source<>catalog`，缩小热重载正则集（feed.go:203）。
 
-## 故障排除指南
-- 同步失败
-  - NVD/GitHub 返回非 200：查看日志中的状态码与截断错误体。
-  - 网络超时/读取失败：检查网络连通性与代理设置；必要时增加超时或重试。
-  - JSON 解析失败：确认响应体结构未被中间层篡改。
-- 规则未生效
-  - 确认规则已批准且启用；待审数量可通过状态接口查询。
-  - 手动触发 Reload 或等待下次同步。
-- API 限制
-  - NVD API Key：配置 MY_OPENWAF_NVD_API_KEY 以提升配额。
-  - GitHub API：当前实现未使用认证头，可能受速率限制影响；可考虑引入认证或降频。
-- 配置问题
-  - CVE 功能开关：MY_OPENWAF_CVE_ENABLED、MY_OPENWAF_CVE_FEED_ENABLED。
-  - 同步间隔：MY_OPENWAF_CVE_FEED_INTERVAL（如 6h）。
-  - 自动审批：MY_OPENWAF_CVE_AUTO_APPROVE 控制生成规则是否自动批准与启用。
+**章节来源**
+- [feed.go:276-293](file://internal/waf/cve/feed.go#L276-L293)
+- [feed.go:375-412](file://internal/waf/cve/feed.go#L375-L412)
 
-章节来源
-- [feed.go:162-170](file://internal/waf/cve/feed.go#L162-L170)
-- [feed.go:279-282](file://internal/waf/cve/feed.go#L279-L282)
-- [feed.go:399-402](file://internal/waf/cve/feed.go#L399-L402)
-- [cve.go:229-251](file://internal/admin/detect/cve.go#L229-L251)
-- [config.go:148-157](file://internal/core/config.go#L148-L157)
+## 故障排查指南
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| 同步无新规则 | 24h 窗口内无匹配 Web 的 CVE | 正常；或临时扩窗（需改代码） |
+| NVD 429/慢 | 未配 `MY_OPENWAF_NVD_API_KEY` | 配 Key 切 1.2s 延时 |
+| GitHub 403 | 匿名速率限制 | 降低频率或引入认证（当前无） |
+| 规则入库但不生效 | `approved=false` | 审批或开 `MY_OPENWAF_CVE_AUTO_APPROVE` |
+| status 无 last_sync | `feedEnabled=false` 且未手动同步 | 调 `POST /cve-rules/sync` |
+
+**章节来源**
+- [feed.go:295-336](file://internal/waf/cve/feed.go#L295-L336)
+- [feed.go:527-560](file://internal/waf/cve/feed.go#L527-L560)
+- [config.go:396-405](file://internal/core/config.go#L396-L405)
 
 ## 结论
-该 CVE 数据源同步系统通过定时与手动两种方式拉取 NVD 与 GitHub Advisory 的漏洞信息，基于 CWE 与描述映射生成规则，自动去重并写入数据库，随后注入检测引擎。系统具备完善的配置项、状态查询与管理 API，能够满足日常运维与安全运营需求。建议结合业务风险合理设置同步频率与自动审批策略，并关注 API 限额与网络稳定性。
+
+CVE 数据源同步以最小可实现方式把外部漏洞情报转成可执行的内容正则规则：NVD 分页礼貌拉取近 24 小时 Web 相关 CVE，GitHub 过滤 Web 生态公告，二者统一经 CWE/描述映射与 CVSS 阈值生成规则，去重入库后按审批状态注入检测器。同步状态来自内存 `SyncStatus`，`CVESyncLog` 表当前未接入循环。建议生产开启 NVD Key 与合理 `auto_approve` 策略，并关注匿名 GitHub 限流。
 
 ## 附录
 
-### 数据质量控制机制
-- 去重
-  - 按 CVEID + 来源(source) 去重，避免重复写入。
-- 规则生成
-  - 描述优先英文，CVSS 优先 v3.1，CWE 类型提取首个有效值。
-  - 无法映射到模式时丢弃，避免无效规则进入检测。
-- 异常处理
-  - 非 200 状态、超时、解析失败均记录错误并继续下一个数据源。
-  - 自定义规则正则无效时跳过编译，不影响其他规则。
+### 同步触发与配置速查
 
-章节来源
-- [feed.go:307-309](file://internal/waf/cve/feed.go#L307-L309)
-- [feed.go:433-436](file://internal/waf/cve/feed.go#L433-L436)
-- [feed.go:461-491](file://internal/waf/cve/feed.go#L461-L491)
-- [detector.go:452-466](file://internal/waf/cve/detector.go#L452-L466)
+| 项 | 值/来源 |
+|---|---|
+| 触发 | 启动立即一次、ticker 周期、`POST /cve-rules/sync` |
+| 默认间隔 | 6h（config.go:404、server.go:450） |
+| feed 开关 | `MY_OPENWAF_CVE_FEED_ENABLED`（默认关） |
+| 间隔覆盖 | `MY_OPENWAF_CVE_FEED_INTERVAL` |
+| NVD Key | `MY_OPENWAF_NVD_API_KEY` |
+| 自动审批 | `MY_OPENWAF_CVE_AUTO_APPROVE` |
+| 手动同步 | `SyncCVERules`（feed.go:121 `SyncNow`） |
 
-### 同步频率与触发条件
-- 频率：默认 6 小时，可通过环境变量配置。
-- 触发：
-  - 启动时立即执行一次。
-  - 定时器到期。
-  - 管理 API 触发立即同步。
-- 全量/增量：
-  - 当前实现按最近 24 小时窗口拉取 NVD，GitHub 按更新排序拉取，属于增量式同步。
-  - 如需全量，可在 NVD 请求中扩大时间窗口或引入历史扫描逻辑（需扩展）。
-
-章节来源
-- [config.go:148-157](file://internal/core/config.go#L148-L157)
-- [server.go:155-160](file://internal/app/server.go#L155-L160)
-- [feed.go:256-257](file://internal/waf/cve/feed.go#L256-L257)
-- [feed.go:384](file://internal/waf/cve/feed.go#L384)
-
-### 配置选项清单
-- MY_OPENWAF_CVE_ENABLED：是否启用 CVE 功能。
-- MY_OPENWAF_CVE_FEED_ENABLED：是否启用后台同步。
-- MY_OPENWAF_CVE_FEED_INTERVAL：同步间隔（如 6h）。
-- MY_OPENWAF_NVD_API_KEY：NVD API Key。
-- MY_OPENWAF_CVE_AUTO_APPROVE：是否自动批准并启用生成规则。
-
-章节来源
-- [config.go:148-157](file://internal/core/config.go#L148-L157)
-
-### API 与前端对接
-- 管理 API
-  - POST /api/v1/cve-rules/sync：立即同步。
-  - GET /api/v1/cve-feed/status：获取同步状态与待审数量。
-- 前端
-  - 调用 syncCVERules() 与 getCVEFeedStatus() 实现同步与状态展示。
-
-章节来源
-- [cve.go:215-251](file://internal/admin/detect/cve.go#L215-L251)
-- [api.ts:899-905](file://frontend/lib/api.ts#L899-L905)
+**章节来源**
+- [feed.go:90-154](file://internal/waf/cve/feed.go#L90-L154)
+- [config.go:396-405](file://internal/core/config.go#L396-L405)
+- [server.go:448-454](file://internal/app/server.go#L448-L454)

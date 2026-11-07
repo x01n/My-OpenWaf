@@ -3,20 +3,23 @@
 # CVE 规则管理
 
 <cite>
-**本文引用的文件**
+**本文档引用的文件**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_scope.go](file://internal/admin/detect/cverules/cve_scope.go)
+- [cve_rules.go](file://internal/admin/detect/cverules/cve_rules.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
+- [cve.go](file://internal/store/cve/cve.go)
+- [cve_scope.go](file://internal/store/cve/cve_scope.go)
+- [feed.go](file://internal/waf/cve/feed.go)
 - [detector.go](file://internal/waf/cve/detector.go)
-- [cve.go](file://internal/waf/cve/general.go)
-- [java.go](file://internal/waf/cve/java.go)
-- [node.go](file://internal/waf/cve/node.go)
-- [php.go](file://internal/waf/cve/php.go)
-- [cve.go](file://internal/admin/detect/cve.go)
-- [cve_rule.go](file://internal/store/repository/cve_rule.go)
-- [cve.go](file://internal/store/cve.go)
 - [helpers.go](file://internal/admin/shared/helpers.go)
-- [page.tsx](file://frontend/app/(dashboard)/rules/cve/page.tsx)
+- [router.go](file://internal/admin/router.go)
+- [types.ts](file://frontend/lib/types.ts)
+- [api.ts](file://frontend/lib/api.ts)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
@@ -24,229 +27,198 @@
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
 7. [性能考虑](#性能考虑)
-8. [故障排除指南](#故障排除指南)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件系统性阐述 CVE 规则管理系统的数据结构设计、生命周期管理、编译器工作机制、验证机制、持久化存储与加载机制，以及规则管理 API 的使用方法与最佳实践。该系统支持自定义规则与订阅规则两类来源，具备热重载能力，能够对通用漏洞与特定语言/框架漏洞进行实时检测。
+
+CVE 规则管理覆盖规则的**数据模型、作用域三态继承、验证约束、持久化与热重载、管理 API**。所有规则（自定义、自动同步、目录）统一存于 `cve_rules` 表；作用域覆盖（global / policy / site）单独存于 `cve_rule_scope_overrides` 表，以可空字段实现「继承 / 覆盖启用 / 覆盖关闭」三态语义。管理 API 变更后通过 `shared.ReloadCVERules` 触发热重载，并经快照失效使控制面视图与数据面一致。
 
 ## 项目结构
-CVE 规则管理涉及以下关键模块：
-- 规则检测器：负责检测通用漏洞与特定技术栈漏洞（Java、Node.js、PHP），并支持自定义规则的热重载
-- 规则模型：定义自定义规则与订阅规则的数据结构
-- 规则管理 API：提供规则的增删改查、启用/禁用、同步与状态查询
-- 存储层：基于 GORM 的数据库持久化，支持规则的 CRUD 与统计查询
-- 前端管理界面：提供规则列表、筛选、编辑与操作入口
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 管理 API | admin/detect/cverules/{cve,cve_scope,cve_rules}.go | CRUD、批量、作用域、状态 |
+| 路由 | admin/router.go | 端点注册（见附录） |
+| 数据模型 | store/cve/cve.go、cve_scope.go | `CVERuleRecord`、`CVERuleScopeOverride` |
+| 运行时模型 | waf/cve/feed.go | `CVERuleModel`（映射同一 `cve_rules` 表） |
+| 仓库 | store/repository/cve/cve_rule.go | 规范快照 + CRUD + 审批计数 |
+| 热重载 | admin/shared/helpers.go | `ReloadCVERules` |
+
+> `store/cve.CVERuleRecord`（负责 AutoMigrate 建表/加列）与 `waf/cve.CVERuleModel`（负责运行时读写）映射同一张 `cve_rules` 表，字段集必须保持一致，否则会出现列不存在（见 store/cve/cve.go:28-32 注释）。
 
 ```mermaid
 graph TB
-subgraph "前端"
-FE["前端管理界面<br/>CVE 规则页面"]
-end
-subgraph "后端"
-API["规则管理 API<br/>创建/更新/删除/切换"]
-DET["CVE 检测器<br/>通用/Java/Node/PHP"]
-REPO["规则仓库<br/>GORM 持久化"]
-STORE["存储模型<br/>CVERuleRecord/CVESyncLog"]
-end
-subgraph "外部"
-FE --> API
-API --> DET
-API --> REPO
-DET --> STORE
-REPO --> STORE
-end
+FE["前端 CVE 页面"] --> API["cverules 管理 API"]
+API --> VAL["validateCustomCVERule / validateStoredCVEScopeOverride"]
+API --> REPO["CVERuleRepo"]
+REPO --> RULES["cve_rules 表"]
+REPO --> OVR["cve_rule_scope_overrides 表"]
+API --> RELOAD["shared.ReloadCVERules"]
+RELOAD --> DET["CVEDetector.ReloadCustomRules"]
 ```
 
-图表来源
-- [cve.go:16-252](file://internal/admin/detect/cve.go#L16-L252)
-- [detector.go:14-549](file://internal/waf/cve/detector.go#L14-L549)
-- [cve_rule.go:10-96](file://internal/store/repository/cve_rule.go#L10-L96)
-- [cve.go:9-41](file://internal/store/cve.go#L9-L41)
-- [page.tsx](file://frontend/app/(dashboard)/rules/cve/page.tsx#L50-L62)
+**图表来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_scope.go](file://internal/admin/detect/cverules/cve_scope.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
+- [helpers.go](file://internal/admin/shared/helpers.go)
 
-章节来源
-- [cve.go:16-252](file://internal/admin/detect/cve.go#L16-L252)
-- [detector.go:14-549](file://internal/waf/cve/detector.go#L14-L549)
-- [cve_rule.go:10-96](file://internal/store/repository/cve_rule.go#L10-L96)
-- [cve.go:9-41](file://internal/store/cve.go#L9-L41)
-- [page.tsx](file://frontend/app/(dashboard)/rules/cve/page.tsx#L50-L62)
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve.go](file://internal/store/cve/cve.go)
 
 ## 核心组件
-- CustomCVERule：自定义 CVE 规则模型，支持正则模式、目标字段、严重级别、动作与启用状态
-- CVERule：颗粒化 CVE 规则模型，包含唯一标识、名称、描述、CVE 编号、严重级别、类别、启用状态、敏感度覆盖与检测函数
-- CVEMatch：检测结果模型，包含 CVEID、类别、严重级别、描述、匹配部分、模式与动作
-- CVEDetector：CVE 检测器，聚合通用与特定技术栈检测器，并管理自定义规则的热重载
-- CVERuleRegistry：全局注册表，支持规则注册、覆盖应用与并发安全的检测
-- 规则管理 API：提供列表、创建、更新、删除、切换启用状态、同步与状态查询等接口
-- 存储模型：CVERuleRecord 与 CVESyncLog，分别用于规则数据与同步日志的持久化
 
-章节来源
-- [detector.go:34-142](file://internal/waf/cve/detector.go#L34-L142)
-- [cve.go:9-41](file://internal/store/cve.go#L9-L41)
+| 组件 | 职责 | 关键行号 |
+|---|---|---|
+| `CVERuleModel` | 规则行模型（`cve_rules`） | feed.go:36-59 |
+| `CVERuleScopeOverride` | 作用域可空覆盖 | store/cve/cve_scope.go:12-25 |
+| `ListCVERules` | 作用域有效视图 + 过滤分页 | admin/cve.go:112-158 |
+| `CreateCVERule`/`UpdateCVERule`/`DeleteCVERule` | 仅自定义规则可增删改 | admin/cve.go:160-315 |
+| `ToggleCVERule` | 启用切换 | admin/cve.go:317-367 |
+| `UpdateSingleCVERule`/`BatchUpdateCVERules` | 作用域覆盖写入 | admin/cve_rules.go:67-179 |
+| `effectiveCVERule` | 三层合并计算有效配置 | admin/cve_scope.go:110-159 |
+| `CanonicalSnapshot` | 10s TTL 深拷贝快照 | cve_rule.go:73-105 |
+
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_scope.go](file://internal/admin/detect/cverules/cve_scope.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
 
 ## 架构总览
-CVE 规则管理采用“前端可视化 + 后端 API + 检测器 + 存储”的分层架构。前端通过管理 API 对规则进行 CRUD 操作，后端在创建/更新/删除/切换时触发规则热重载，检测器在请求处理时按阶段执行检测。
+
+管理写路径遵循「校验 → 持久化 → 失效快照 → 热重载」。读路径基于 `CanonicalSnapshot` 取规则与覆盖，按作用域逐层合并出 `effective` 视图。任何写操作后都调用 `InvalidateCanonicalSnapshot`（cve_rule.go:109-114）与 `ReloadCVERules`（helpers.go），使数据面 `CVEDetector.ReloadCustomRules` 与展示视图同步。
 
 ```mermaid
 sequenceDiagram
-participant FE as "前端管理界面"
-participant API as "规则管理 API"
-participant DET as "CVE 检测器"
-participant REPO as "规则仓库"
-participant STORE as "存储模型"
-FE->>API : 创建/更新/删除/切换规则
-API->>REPO : 持久化规则变更
-REPO->>STORE : 写入/更新规则记录
-API->>DET : 触发规则热重载
-DET->>DET : 重新编译/加载规则
-DET-->>FE : 规则状态更新完成
+participant FE as "前端"
+participant API as "管理 API"
+participant VAL as "校验"
+participant REPO as "CVERuleRepo"
+participant DB as "cve_rules / overrides"
+participant DET as "CVEDetector"
+FE->>API : 创建/更新/切换/批量
+API->>VAL : validateCustomCVERule / ScopePatch
+VAL-->>API : 归一化 action / captcha_type
+API->>REPO : Create/Update/Delete/Toggle
+REPO->>DB : 写入
+REPO->>REPO : InvalidateCanonicalSnapshot
+API->>DET : ReloadCVERules → ReloadCustomRules
+API-->>FE : 结果 + effective
 ```
 
-图表来源
-- [cve.go:41-171](file://internal/admin/detect/cve.go#L41-L171)
-- [detector.go:452-496](file://internal/waf/cve/detector.go#L452-L496)
-- [cve_rule.go:56-70](file://internal/store/repository/cve_rule.go#L56-L70)
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
+**图表来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
+- [detector.go:2251-2265](file://internal/waf/cve/detector.go#L2251-L2265)
 
-章节来源
-- [cve.go:41-171](file://internal/admin/detect/cve.go#L41-L171)
-- [detector.go:452-496](file://internal/waf/cve/detector.go#L452-L496)
-- [cve_rule.go:56-70](file://internal/store/repository/cve_rule.go#L56-L70)
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [helpers.go](file://internal/admin/shared/helpers.go)
 
 ## 详细组件分析
 
-### 数据结构设计与字段含义
-- CustomCVERule
-  - ID：规则唯一标识
-  - CVEID：关联的 CVE 编号
-  - Category：规则类别（如 cve_general/cve_java/cve_node/cve_php）
-  - Pattern：正则表达式模式
-  - Target：匹配目标（url/body/header/cookie/all）
-  - Severity：严重级别（critical/high/medium/low）
-  - Action：动作（drop/block/log 等）
-  - Enabled：是否启用
-  - Description：规则描述
-- CVERule
-  - ID：规则唯一标识
-  - Name：规则名称
-  - Description：规则描述
-  - CVE：CVE 编号
-  - Severity：严重级别
-  - Category：规则类别
-  - Enabled：是否启用
-  - Sensitivity：敏感度覆盖
-  - CheckFunc：检测函数
-- CVEMatch
-  - CVEID：匹配到的 CVE 编号
-  - Category：规则类别
-  - Severity：严重级别
-  - Description：匹配描述
-  - MatchedPart：匹配的部分
-  - Pattern：使用的模式
-  - Action：采取的动作
+### 规则字段明细（CVERuleModel / CVERuleRecord）
 
-章节来源
-- [detector.go:34-63](file://internal/waf/cve/detector.go#L34-L63)
-- [detector.go:24-32](file://internal/waf/cve/detector.go#L24-L32)
+| 字段 | 列 | 类型/默认 | 说明 |
+|---|---|---|---|
+| ID | id | uint PK | 作用域覆盖按数字 ID 引用 |
+| CVEID | cve_id | size:32, index | CVE 编号 |
+| Category | category | size:32 | `cve_general`/`cve_java`/... 或 feed 生成的 `general` |
+| Pattern | pattern | text | 检测正则（`(?i)` 前缀在热重载时补齐） |
+| Target | target | size:32 | all/url/url_body/body/header/cookie |
+| Severity | severity | size:16 | critical/high/medium/low |
+| Action | action | size:32, default `drop` | 命中动作 |
+| CaptchaType | captcha_type | size:16 | 仅 `captcha_challenge` 动作下有义 |
+| Enabled | enabled | default `false` | 是否启用 |
+| Source | source | size:32 | `custom`/`nvd`/`github`/`auto_generated`/`catalog` |
+| Approved | approved | default `false` | 审批门；未批准不注入检测器 |
+| CVSSScore | cvss_score | float | 仅用于推导 severity |
+| CWEType | cwe_type | size:32 | CWE 分类 |
+| References | references | text | NVD 参考链接，换行分隔 |
 
-### 规则生命周期管理
-- 创建：API 接收请求，校验正则与动作，写入数据库，触发热重载
-- 验证：API 对正则进行编译校验，规范化动作
-- 编译：检测器对规则进行预编译（正则预编译），构建可执行的规则集
-- 热重载：通过 ReloadCVERules 触发检测器重新加载规则
-- 删除：仅允许删除自定义规则，删除后触发热重载
+**章节来源**
+- [cve.go](file://internal/store/cve/cve.go)
+- [feed.go:36-59](file://internal/waf/cve/feed.go#L36-L59)
+- [detector.go:2251-2258](file://internal/waf/cve/detector.go#L2251-L2258)
+
+### 作用域三态覆盖（CVERuleScopeOverride）
+
+覆盖表以 `(rule_id, scope_type, scope_id)` 唯一索引存行，每个字段都是指针类型：`nil` 表示继承上层，非 `nil` 表示在当前作用域覆盖。
+
+| 字段 | 类型 | 三态语义 |
+|---|---|---|
+| ScopeType | string | `global` / `policy` / `site`（store/cve/cve_scope.go:5-9） |
+| Enabled | `*bool` | nil=继承，false=覆盖关闭，true=覆盖启用 |
+| Action | `*string` | nil=继承；非空=覆盖动作 |
+| Sensitivity | `*string` | nil=继承；档位 low/mid/medium/high/very_high/strict/off |
+| StatusCode | `*int` | nil=继承；100–599 |
+| RedirectTo | `*string` | `redirect` 动作必填 |
+| CaptchaType | `*string` | 仅 `captcha_challenge` 有效 |
+
+合并顺序为 global(0) → policy → site，逐层用非空指针覆盖 `effective`，并记录 `inherited_from`（admin/cve_scope.go:110-159）。非 CAPTCHA 动作时会清空 `CaptchaType`，避免前端展示运行时不会渲染的挑战类型（152-157）。
 
 ```mermaid
 flowchart TD
-Start(["开始"]) --> Create["创建规则"]
-Create --> Validate["正则与动作验证"]
-Validate --> Persist["持久化到数据库"]
-Persist --> Reload["触发热重载"]
-Reload --> End(["完成"])
-subgraph "删除流程"
-DelStart["删除规则"] --> CheckSource{"是否为自定义规则?"}
-CheckSource --> |否| DelErr["拒绝删除"]
-CheckSource --> |是| DelPersist["从数据库删除"]
-DelPersist --> DelReload["触发热重载"]
-DelReload --> DelEnd["完成"]
-end
+Start(["计算 effective"]) --> Base["基线: 规则行 Enabled/Action/CaptchaType"]
+Base --> G["应用 global 覆盖(非空指针)"]
+G --> P{"作用域含 policy?"}
+P --> |是| PApply["应用 policy 覆盖"]
+P --> |否| Check
+PApply --> S{"作用域含 site?"}
+S --> |是| SApply["应用 site 覆盖"]
+S --> |否| Check
+SApply --> Check{"effective.action == captcha_challenge?"}
+Check --> |否| Clear["清空 CaptchaType"]
+Check --> |是| Out["输出 effective/override/overridden"]
+Clear --> Out
 ```
 
-图表来源
-- [cve.go:41-74](file://internal/admin/detect/cve.go#L41-L74)
-- [cve.go:144-171](file://internal/admin/detect/cve.go#L144-L171)
-- [helpers.go:73-78](file://internal/admin/shared/helpers.go#L73-L78)
+**图表来源**
+- [cve_scope.go](file://internal/admin/detect/cverules/cve_scope.go)
+- [cve_scope.go](file://internal/store/cve/cve_scope.go)
 
-章节来源
-- [cve.go:41-74](file://internal/admin/detect/cve.go#L41-L74)
-- [cve.go:144-171](file://internal/admin/detect/cve.go#L144-L171)
-- [helpers.go:73-78](file://internal/admin/shared/helpers.go#L73-L78)
+**章节来源**
+- [cve_scope.go](file://internal/admin/detect/cverules/cve_scope.go)
 
-### 规则编译器工作原理
-- 预编译正则：在规则加载时对 Pattern 进行预编译，避免每次匹配时重复编译
-- 线程安全：通过互斥锁保护规则列表与编译结果，支持并发读写
-- 精准匹配：根据 Target 选择匹配目标（URL、Body、Header、Cookie 或全部）
-- 快速过滤：在检测前进行可疑内容预过滤，跳过明显安全的请求
+### 验证约束
 
-```mermaid
-classDiagram
-class CVEDetector {
-+customRules []CustomCVERule
-+compiledCustom []compiledCustomRule
-+Detect(req, categorySensitivity) []CVEMatch
-+ReloadCustomRules(rules)
-+AddCustomRule(rule)
-+RemoveCustomRule(id)
-}
-class compiledCustomRule {
-+rule CustomCVERule
-+re *regexp.Regexp
-}
-class CVERule {
-+ID string
-+Name string
-+Description string
-+CVE string
-+Severity string
-+Category string
-+Enabled bool
-+Sensitivity string
-+CheckFunc(uri, body, ua, headers) *CVEMatch
-}
-CVEDetector --> compiledCustomRule : "管理"
-CVEDetector --> CVERule : "注册表检测"
-```
+自定义规则（`validateCustomCVERule`）与作用域覆盖（`validateStoredCVEScopeOverride`）分别校验：
 
-图表来源
-- [detector.go:14-50](file://internal/waf/cve/detector.go#L14-L50)
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
+| 约束 | 规则 CRUD | 作用域覆盖 |
+|---|---|---|
+| Target 枚举 | all/url/url_body/body/header/cookie | — |
+| 长度上限 | cve_id 32、category 32、target 32、severity 16、captcha_type 16、pattern 64KiB、description 64KiB | — |
+| 正则合法性 | 必须能编译 | — |
+| 动作 | `ValidateActionWithoutRedirectTarget` | `ValidateActionWithRedirectTarget`（带 redirect_to） |
+| 状态码 | — | 非 0 时 100–599 |
+| 敏感度 | — | low/mid/medium/high/very_high/strict/off |
+| captcha_type | 须 `captcha_challenge` 动作 | 须同请求选 `captcha_challenge` |
+| redirect_to | — | `redirect` 动作必填 |
 
-章节来源
-- [detector.go:452-496](file://internal/waf/cve/detector.go#L452-L496)
-- [detector.go:214-297](file://internal/waf/cve/detector.go#L214-L297)
+部分更新用指针区分「未提交」与「显式 false/空」，避免把省略字段误写成 false（admin/cve.go:210-260、cve_scope.go:286-323）。
 
-### 规则验证机制
-- 语法检查：对 Pattern 进行正则编译，失败则返回错误
-- 动作规范化：对动作进行标准化与有效性校验
-- 冲突检测：通过注册表与热重载机制，确保规则变更后的一致性
-- 性能评估：通过预过滤与正则缓存降低匹配开销
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_scope.go](file://internal/admin/detect/cverules/cve_scope.go)
 
-章节来源
-- [cve.go:49-55](file://internal/admin/detect/cve.go#L49-L55)
-- [cve.go:97-103](file://internal/admin/detect/cve.go#L97-L103)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
+### 权限边界：仅自定义规则可改删
 
-### 持久化存储与加载机制
-- 存储模型：CVERuleRecord 用于保存规则信息，CVESyncLog 用于记录同步状态
-- 仓库接口：提供列表、获取、创建、更新、删除、启用切换与待审批计数等操作
-- 加载流程：API 调用仓库进行持久化，检测器通过热重载加载最新规则
+`UpdateCVERule`/`DeleteCVERule`/`ToggleCVERule` 均先检查 `existing.Source == "custom"`，否则返回 403（admin/cve.go:205-208、297-300、330-333）。`CreateCVERule` 固定写入 `source="custom"`、`approved=true`（173-174）。目录规则与同步规则不得经此路径编辑，只能通过作用域覆盖调整生效状态。删除自定义规则时在同一事务内清理其作用域覆盖，避免重建规则继承旧配置（cve_rule.go:264-278）。
+
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
+
+### 持久化与热重载
+
+`CVERuleRepo` 提供 `List/Get/Create/Update/Delete/Toggle/PendingApprovalCount`，写方法都会 `InvalidateCanonicalSnapshot`（cve_rule.go:248-293）。`CanonicalSnapshot` 以 10 秒 TTL 缓存规则与覆盖的深拷贝，冷读用 singleflight 合并（15-16、73-105）；`loadCanonicalSnapshot` 上限 10000 条规则（cve_rule.go:136）。数据面重载经 `shared.ReloadCVERules → CVEFeedManager.ReloadRules → loadRulesIntoDetector`，仅注入 `approved & source<>catalog` 的规则并重新编译（feed.go:201-228、detector.go:2251-2265）。
 
 ```mermaid
 erDiagram
-CVERULE_RECORD {
+cve_rules {
 uint id PK
 string cve_id
 string category
@@ -254,14 +226,28 @@ text pattern
 string target
 string severity
 string action
+string captcha_type
 bool enabled
 text description
 string source
 bool approved
-float64 cvss_score
+float cvss_score
 string cwe_type
+text references
 }
-CVESYNCLOG {
+cve_rule_scope_overrides {
+uint id PK
+uint rule_id FK
+string scope_type
+uint scope_id
+bool enabled_null "nil=继承"
+string action_null
+string sensitivity_null
+int status_code_null
+string redirect_to_null
+string captcha_type_null
+}
+cve_sync_logs {
 uint id PK
 string source
 string status
@@ -270,92 +256,95 @@ string error
 datetime started_at
 datetime finished_at
 }
+cve_rules ||--o{ cve_rule_scope_overrides : "被覆盖"
 ```
 
-图表来源
-- [cve.go:9-27](file://internal/store/cve.go#L9-L27)
-- [cve.go:31-40](file://internal/store/cve.go#L31-L40)
+**图表来源**
+- [cve.go](file://internal/store/cve/cve.go)
+- [cve_scope.go](file://internal/store/cve/cve_scope.go)
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
 
-章节来源
-- [cve_rule.go:24-77](file://internal/store/repository/cve_rule.go#L24-L77)
-- [cve.go:9-41](file://internal/store/cve.go#L9-L41)
+> `cve_sync_logs` 表结构（`CVESyncLog`）已在 `store/cve/cve.go:38-46` 定义，但当前 CVE feed 循环不落该表，同步状态走内存 `SyncStatus`（见《CVE 数据源同步》）。
 
-### 规则管理 API 使用方法与最佳实践
-- 列表与筛选：支持按类别、严重级别、启用状态与来源筛选
-- 创建规则：校验正则与动作，设置来源为 custom，自动批准并触发重载
-- 更新规则：可选择性更新字段，支持动作规范化
-- 删除规则：仅允许删除自定义规则
-- 切换启用状态：支持单次切换或显式启用/禁用
-- 同步与状态：支持手动同步订阅规则并查询同步状态
+**章节来源**
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
+- [feed.go:201-228](file://internal/waf/cve/feed.go#L201-L228)
 
-章节来源
-- [cve.go:16-38](file://internal/admin/detect/cve.go#L16-L38)
-- [cve.go:41-141](file://internal/admin/detect/cve.go#L41-L141)
-- [cve.go:144-213](file://internal/admin/detect/cve.go#L144-L213)
-- [cve.go:215-251](file://internal/admin/detect/cve.go#L215-L251)
+### 统计与列表视图
+
+`ListCVERules` 支持 `page/page_size`（默认 1/20）与 `category/severity/enabled/source/q` 过滤，`q` 超 256 字节返回 400（admin/cve.go:112-158）。`GetCVERuleStats` 汇总 `total/enabled_count/disabled_count/by_category/by_severity` 及作用域（cve_rules.go:18-64）。列表基于作用域有效视图，故同一规则在不同 `scope` 下 `effective` 可能不同。
+
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_rules.go](file://internal/admin/detect/cverules/cve_rules.go)
 
 ## 依赖关系分析
-- 规则检测器依赖存储模型与动作类型，通过注册表与热重载机制集成
-- 规则管理 API 依赖仓库接口与共享工具，负责规则的生命周期管理
-- 前端通过页面组件与 API 交互，实现规则的可视化管理
 
-```mermaid
-graph TB
-DET["CVEDetector"] --> REG["CVERuleRegistry"]
-DET --> CC["compiledCustomRule"]
-API["规则管理 API"] --> REPO["CVERuleRepo"]
-API --> HELP["ReloadCVERules"]
-REPO --> STORE["CVERuleRecord"]
-FE["前端页面"] --> API
-```
+| 依赖方 | 被依赖 |
+|---|---|
+| 管理 API | `CVERuleRepo`、`CVEFeedManager`、`shared.ReloadCVERules` |
+| 作用域计算 | `store/cve` 模型、`action.Normalize` |
+| 前端类型 | `CVEEffectiveConfig`/`CVERuleItem`/`CVERuleWriteInput`（types.ts:327-394） |
+| 前端调用 | `cveApi.*`（api.ts:1001-1033） |
 
-图表来源
-- [detector.go:74-142](file://internal/waf/cve/detector.go#L74-L142)
-- [cve.go:73-73](file://internal/admin/detect/cve.go#L73-L73)
-- [cve_rule.go:10-14](file://internal/store/repository/cve_rule.go#L10-L14)
-- [cve.go:29-29](file://internal/store/cve.go#L29-L29)
-- [page.tsx](file://frontend/app/(dashboard)/rules/cve/page.tsx#L50-L62)
+前端 `CVERuleItem.effective/inherited_from/overridden` 字段与后端 `cveScopedRuleView` 对齐，避免把内置规则作用域覆盖与全局自定义规则写入混用（types.ts:338-358、360-376）。
 
-章节来源
-- [detector.go:74-142](file://internal/waf/cve/detector.go#L74-L142)
-- [cve.go:73-73](file://internal/admin/detect/cve.go#L73-L73)
-- [cve_rule.go:10-14](file://internal/store/repository/cve_rule.go#L10-L14)
-- [cve.go:29-29](file://internal/store/cve.go#L29-L29)
-- [page.tsx](file://frontend/app/(dashboard)/rules/cve/page.tsx#L50-L62)
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [types.ts](file://frontend/lib/types.ts)
+- [api.ts](file://frontend/lib/api.ts)
 
 ## 性能考虑
-- 正则预编译：在规则加载时完成正则编译，避免运行时重复编译
-- 快速过滤：通过 hasCVESuspiciousContent 快速跳过明显安全的请求
-- 并发安全：使用互斥锁保护规则列表与编译结果，支持并发读取
-- 目标选择：根据 Target 精准选择匹配目标，减少不必要的匹配
 
-章节来源
-- [detector.go:452-496](file://internal/waf/cve/detector.go#L452-L496)
-- [detector.go:299-450](file://internal/waf/cve/detector.go#L299-L450)
+- **快照缓存**：列表/统计共用 10s TTL 的 `CanonicalSnapshot`，减少聚合查询数据库往返（cve_rule.go:15-105）。
+- **按需失效**：写后仅 `InvalidateCanonicalSnapshot` 递增代次，不做全量预热，下次读再重建（109-114）。
+- **过滤下推**：`List` 的 DB 层过滤用 category/severity/enabled/source/LOWER LIKE（cve_rule.go:212-241）；作用域视图在内存过滤后再分页。
+- **正则预编译**：热重载一次性编译，非法模式跳过，避免运行期成本（detector.go:2251-2265）。
 
-## 故障排除指南
-- 正则无效：创建/更新时若正则编译失败，API 将返回错误提示
-- 动作无效：动作必须为有效值，否则返回错误
-- 删除受限：仅允许删除自定义规则，订阅规则不可删除
-- 热重载失败：检查共享工具中的 ReloadCVERules 是否正常调用
+**章节来源**
+- [cve_rule.go](file://internal/store/repository/cve/cve_rule.go)
+- [detector.go:2251-2265](file://internal/waf/cve/detector.go#L2251-L2265)
 
-章节来源
-- [cve.go:49-55](file://internal/admin/detect/cve.go#L49-L55)
-- [cve.go:97-103](file://internal/admin/detect/cve.go#L97-L103)
-- [cve.go:158-162](file://internal/admin/detect/cve.go#L158-L162)
-- [helpers.go:73-78](file://internal/admin/shared/helpers.go#L73-L78)
+## 故障排查指南
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| 更新报 403 | 规则 `source!=custom` | 改用作用域覆盖调整 |
+| 布尔字段被误清空 | 部分更新未用指针 | 确认前端提交 `enabled` 显式值 |
+| 保存 captcha_type 报错 | 动作非 captcha_challenge | 同时提交动作（admin/cve.go:98-100、cve_scope.go:226-236） |
+| redirect 保存失败 | 缺 redirect_to | 补齐目标（cve_scope.go:279-282） |
+| 覆盖后不生效 | 未触发热重载 | 检查 `ReloadCVERules` 与快照失效 |
+
+**章节来源**
+- [cve.go](file://internal/admin/detect/cverules/cve.go)
+- [cve_scope.go](file://internal/admin/detect/cverules/cve_scope.go)
 
 ## 结论
-CVE 规则管理系统通过清晰的数据结构设计、严格的验证机制、高效的编译与热重载流程，以及完善的持久化与 API 支持，实现了对通用与特定技术栈漏洞的实时检测与管理。系统在保证安全性的同时，兼顾性能与可维护性，适合在生产环境中稳定运行。
+
+CVE 规则管理以单一 `cve_rules` 表承载全部规则来源，以 `cve_rule_scope_overrides` 的可空字段实现 global/policy/site 三态继承，验证层严格约束枚举、长度、正则与动作-验证码一致性，写路径统一走「持久化 → 失效快照 → 热重载」，读路径基于带 TTL 的规范快照计算有效视图。权限边界明确限定自定义规则方可增删改，目录与同步规则只经作用域覆盖调整。
 
 ## 附录
-- 前端页面组件：提供 CVE 规则的列表展示、筛选与操作入口
-- 规则类别：支持通用漏洞与 Java/Node/PHP 特定漏洞检测
-- 动作类型：支持 drop、block、log 等动作，满足不同安全需求
 
-章节来源
-- [page.tsx](file://frontend/app/(dashboard)/rules/cve/page.tsx#L50-L62)
-- [cve.go:8-731](file://internal/waf/cve/general.go#L8-L731)
-- [java.go:7-130](file://internal/waf/cve/java.go#L7-L130)
-- [node.go:8-57](file://internal/waf/cve/node.go#L8-L57)
-- [php.go:8-55](file://internal/waf/cve/php.go#L8-L55)
+### 管理 API 端点
+
+| 方法 | 路径 | 处理器 | 路由 |
+|---|---|---|---|
+| GET | `/api/v1/cve-rules` | `ListCVERules` | router.go:220 |
+| GET | `/api/v1/cve-rules/stats` | `GetCVERuleStats` | router.go:221 |
+| GET | `/api/v1/cve-feed/status` | `GetCVEFeedStatus` | router.go:222 |
+| POST | `/api/v1/cve-rules/:id/toggle` | `ToggleCVERule` | router.go:317 |
+| POST | `/api/v1/cve-rules/:id/patch` | `UpdateSingleCVERule` | router.go:318 |
+| POST | `/api/v1/cve-rules/:id/reset` | `ResetCVERuleOverride` | router.go:319 |
+| POST | `/api/v1/cve-rules/batch` | `BatchUpdateCVERules` | router.go:320 |
+| POST | `/api/v1/cve-rules/sync` | `SyncCVERules` | router.go:321 |
+| POST | `/api/v1/cve-rules` | `CreateCVERule` | router.go:410 |
+| POST | `/api/v1/cve-rules/:id/update` | `UpdateCVERule` | router.go:411 |
+| POST | `/api/v1/cve-rules/:id/delete` | `DeleteCVERule` | router.go:412 |
+
+### 动作取值
+
+规则动作字段经 `ValidateAction*` 归一，可取 `intercept`、`observe`、`drop`、`challenge`、`captcha_challenge`、`shield_challenge`、`chain_challenge`、`redirect` 等；`block` 为 legacy 兼容值。`CVEMatch.Action` 注释标注内置取值 drop/block/log（detector.go:52）。
+
+**章节来源**
+- [router.go](file://internal/admin/router.go)
+- [detector.go:52](file://internal/waf/cve/detector.go#L52)

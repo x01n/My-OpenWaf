@@ -54,6 +54,21 @@ type UpstreamMetricsSnapshot struct {
 	LatencySamples   int64
 }
 
+type UpstreamRequestGuardStatsSnapshot struct {
+	// DroppedHeaderNames 是被丢弃的非法头名个数。
+	DroppedHeaderNames uint64
+	// DroppedHeaderValues 是被丢弃的非法头值个数。
+	DroppedHeaderValues uint64
+	// SanitizedPaths 是被转义过裸 '%' 的请求个数。
+	SanitizedPaths uint64
+	// DroppedSecurityHeaderNames 是被整体丢弃的安全相关头个数
+	// （Authorization / Cookie / X-Forwarded-* 等）。
+	DroppedSecurityHeaderNames uint64
+}
+
+// UpstreamRequestGuardStatsProvider 返回出站请求净化器的累计计数。
+type UpstreamRequestGuardStatsProvider func() UpstreamRequestGuardStatsSnapshot
+
 // CacheLayerStats 保存单个具名缓存层的累计命中/未命中计数器。
 type CacheLayerStats struct {
 	Name   string
@@ -103,27 +118,50 @@ type DataPlaneMetricsSnapshotProvider func() DataPlaneMetricsSnapshot
 // UpstreamMetricsSnapshotProvider 返回当前的上游快照。
 type UpstreamMetricsSnapshotProvider func() UpstreamMetricsSnapshot
 
+// ImageTransformStatsSnapshot 是图像转换子系统的时点视图。
+//
+// 之所以要有 WebPDynamicAvailable：gen2brain/webp 加载不到系统 libwebp 时会
+// 静默回退到 wasm2go 纯 Go 转译路径（功能正常、只是慢 3 倍以上），部署镜像
+// 漏装共享库时没有任何其它信号。这条 gauge 就是那件事的报警器。
+type ImageTransformStatsSnapshot struct {
+	// WebPDynamicAvailable 为 1 表示系统 libwebp 已加载（native 快速路径）。
+	WebPDynamicAvailable bool
+	// Applied 是成功产出新字节的次数。
+	Applied uint64
+	// Skipped 是因解码/编码/参数问题或并发闸门而原图直通的次数。
+	Skipped uint64
+	// TimedOut 是因墙钟预算耗尽而放弃转换的次数。
+	TimedOut uint64
+	// GateLimit 是并发闸门额度。
+	GateLimit int
+	// GateInUse 是当前占用的额度。
+	GateInUse int
+	// GateSkipped 是因并发超限而原图直通的累计次数。
+	GateSkipped uint64
+}
+
+// ImageTransformStatsProvider 返回图像转换子系统的指标快照。
+type ImageTransformStatsProvider func() ImageTransformStatsSnapshot
+
 // Metrics 收集 WAF 运行期指标，供 /metrics（Prometheus）端点使用。
 type Metrics struct {
-	RequestsTotal atomic.Int64
-	Uptime        time.Time
+	Uptime time.Time
 
-	unifiedWriterStatsProvider atomic.Value
-	writeQueueStatsProvider    atomic.Value
-	dataPlaneMetricsProvider   atomic.Value
-	upstreamMetricsProvider    atomic.Value
-	cacheStatsProvider         atomic.Value
-	luaScriptStatsProvider     atomic.Value
-	httpTraceStatsProvider     atomic.Value
+	unifiedWriterStatsProvider  atomic.Value
+	writeQueueStatsProvider     atomic.Value
+	dataPlaneMetricsProvider    atomic.Value
+	upstreamMetricsProvider     atomic.Value
+	upstreamGuardStatsProvider  atomic.Value
+	cacheStatsProvider          atomic.Value
+	luaScriptStatsProvider      atomic.Value
+	httpTraceStatsProvider      atomic.Value
+	imageTransformStatsProvider atomic.Value
 }
 
 // NewMetrics 创建一个新的指标收集器。
 func NewMetrics() *Metrics {
 	return &Metrics{Uptime: time.Now()}
 }
-
-// RecordRequest 递增请求总数计数器。
-func (m *Metrics) RecordRequest() { m.RequestsTotal.Add(1) }
 
 // SetUnifiedWriterStatsProvider 把异步写入器诊断数据挂到 /metrics。
 func (m *Metrics) SetUnifiedWriterStatsProvider(provider UnifiedWriterStatsProvider) {
@@ -157,6 +195,14 @@ func (m *Metrics) SetUpstreamMetricsProvider(provider UpstreamMetricsSnapshotPro
 	m.upstreamMetricsProvider.Store(provider)
 }
 
+// SetUpstreamRequestGuardStatsProvider 把出站请求净化器的计数挂到 /metrics。
+func (m *Metrics) SetUpstreamRequestGuardStatsProvider(provider UpstreamRequestGuardStatsProvider) {
+	if provider == nil {
+		return
+	}
+	m.upstreamGuardStatsProvider.Store(provider)
+}
+
 // SetCacheStatsProvider 把各层缓存的命中/未命中指标挂到 /metrics。
 func (m *Metrics) SetCacheStatsProvider(provider CacheStatsSnapshotProvider) {
 	if provider == nil {
@@ -184,6 +230,14 @@ func (m *Metrics) SetHTTPTraceStatsProvider(provider HTTPTraceStatsProvider) {
 	m.httpTraceStatsProvider.Store(provider)
 }
 
+// SetImageTransformStatsProvider 把图像转换子系统的指标挂到 /metrics。
+func (m *Metrics) SetImageTransformStatsProvider(provider ImageTransformStatsProvider) {
+	if provider == nil {
+		return
+	}
+	m.imageTransformStatsProvider.Store(provider)
+}
+
 // PrometheusHandler 返回以 Prometheus 文本格式提供 /metrics 的 Hertz 处理函数。
 func PrometheusHandler(m *Metrics) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
@@ -206,20 +260,18 @@ func PrometheusBody(m *Metrics) string {
 
 	uptimeSec := time.Since(m.Uptime).Seconds()
 
-	// 本结构体只保留「进程级」指标（请求总数、存活时长、goroutine、内存、GC）。
-	// 拦截/观察/内置命中/缓存命中未命中/上游错误这些计数器不在本结构体，
-	// 唯一真实来源是 dataplane.Metrics（prometheusDataPlaneMetrics 输出的
-	// openwaf_dataplane_* 系列）与 CacheStatsSnapshotProvider
-	// （owaf_cache_* 系列）；此处曾输出恒为 0 的同名指标，已移除。
+	// 本结构体只保留「进程级」指标（存活时长、goroutine、内存、GC）。请求总数、
+	// 拦截/观察/内置命中/缓存命中未命中/上游错误这些计数器都不在本结构体：唯一
+	// 真实来源是 dataplane.Metrics（prometheusDataPlaneMetrics 输出的
+	// openwaf_dataplane_* 系列）与 CacheStatsSnapshotProvider（owaf_cache_* 系列）。
 	//
-	// 注意：下面的 openwaf_requests_total 同样未接线——本包的 RecordRequest
-	// 没有任何生产调用点，app 只把 promMetrics 用于 Set*Provider 与 /metrics
-	// handler。真实请求数见 openwaf_dataplane_requests_total。
-	body := fmt.Sprintf(`# HELP openwaf_requests_total Total HTTP requests processed
-# TYPE openwaf_requests_total counter
-openwaf_requests_total %d
-
-# HELP openwaf_uptime_seconds Seconds since process start
+	// 这里曾输出 openwaf_requests_total，但它恒为 0——本包的 RecordRequest 没有
+	// 任何生产调用点，数据面走的是 dataplane/metrics 的同名计数器。同一个语义
+	// 由两条路径各持一份计数，只会制造第二份真相：/metrics 上同时出现
+	// `openwaf_requests_total 0` 与真值 openwaf_dataplane_requests_total，
+	// 而外部仪表盘多半会照名字抓走前者。该指标已连同 RecordRequest 与
+	// RequestsTotal 字段一并移除，请求总量请读 openwaf_dataplane_requests_total。
+	body := fmt.Sprintf(`# HELP openwaf_uptime_seconds Seconds since process start
 # TYPE openwaf_uptime_seconds gauge
 openwaf_uptime_seconds %.2f
 
@@ -239,7 +291,6 @@ openwaf_memory_sys_bytes %d
 # TYPE openwaf_gc_pause_total_ns counter
 openwaf_gc_pause_total_ns %d
 `,
-		m.RequestsTotal.Load(),
 		uptimeSec,
 		runtime.NumGoroutine(),
 		memStats.Alloc,
@@ -267,6 +318,11 @@ openwaf_gc_pause_total_ns %d
 			body += prometheusUpstreamMetrics(provider())
 		}
 	}
+	if v := m.upstreamGuardStatsProvider.Load(); v != nil {
+		if provider, ok := v.(UpstreamRequestGuardStatsProvider); ok {
+			body += prometheusUpstreamRequestGuardStats(provider())
+		}
+	}
 	if v := m.cacheStatsProvider.Load(); v != nil {
 		if provider, ok := v.(CacheStatsSnapshotProvider); ok {
 			body += prometheusCacheStats(provider())
@@ -282,8 +338,65 @@ openwaf_gc_pause_total_ns %d
 			body += prometheusHTTPTraceStats(provider.Stats())
 		}
 	}
+	if v := m.imageTransformStatsProvider.Load(); v != nil {
+		if provider, ok := v.(ImageTransformStatsProvider); ok {
+			body += prometheusImageTransformStats(provider())
+		}
+	}
 
 	return body
+}
+
+// prometheusImageTransformStats 渲染图像转换子系统的指标。
+//
+// 布尔量渲染成 0/1 的 gauge 而不是省略，理由见 ImageTransformStatsSnapshot
+// 对 WebPDynamicAvailable 的说明：它存在的意义就是让「静默回退」有一个能被
+// 抓到的 0，省略等于把报警器拆掉。
+//
+// @param snapshot 指标快照。
+// @return Prometheus 文本片段。
+func prometheusImageTransformStats(snapshot ImageTransformStatsSnapshot) string {
+	available := 0
+	if snapshot.WebPDynamicAvailable {
+		available = 1
+	}
+	return fmt.Sprintf(`
+# HELP openwaf_imagery_webp_dynamic_available Whether the system libwebp shared library was loaded (1) or the pure-Go wasm fallback is in use (0)
+# TYPE openwaf_imagery_webp_dynamic_available gauge
+openwaf_imagery_webp_dynamic_available %d
+
+# HELP openwaf_imagery_applied_total Image transforms that produced new bytes
+# TYPE openwaf_imagery_applied_total counter
+openwaf_imagery_applied_total %d
+
+# HELP openwaf_imagery_skipped_total Image transforms passed through unchanged (decode/encode/params/gate)
+# TYPE openwaf_imagery_skipped_total counter
+openwaf_imagery_skipped_total %d
+
+# HELP openwaf_imagery_timed_out_total Image transforms abandoned because the wall-clock budget ran out
+# TYPE openwaf_imagery_timed_out_total counter
+openwaf_imagery_timed_out_total %d
+
+# HELP openwaf_imagery_gate_limit Concurrency slots available for image transforms
+# TYPE openwaf_imagery_gate_limit gauge
+openwaf_imagery_gate_limit %d
+
+# HELP openwaf_imagery_gate_in_use Concurrency slots currently held
+# TYPE openwaf_imagery_gate_in_use gauge
+openwaf_imagery_gate_in_use %d
+
+# HELP openwaf_imagery_gate_skipped_total Image transforms passed through because the concurrency gate was full
+# TYPE openwaf_imagery_gate_skipped_total counter
+openwaf_imagery_gate_skipped_total %d
+`,
+		available,
+		snapshot.Applied,
+		snapshot.Skipped,
+		snapshot.TimedOut,
+		snapshot.GateLimit,
+		snapshot.GateInUse,
+		snapshot.GateSkipped,
+	)
 }
 
 func prometheusDataPlaneMetrics(snapshot DataPlaneMetricsSnapshot) string {
@@ -376,6 +489,41 @@ openwaf_upstream_latency_samples_total %d
 		snapshot.AverageLatencyMs,
 		snapshot.MaxLastLatencyMs,
 		snapshot.LatencySamples,
+	)
+}
+
+/**
+ * prometheusUpstreamRequestGuardStats 渲染出站请求净化器的计数。
+ *
+ * 这三个计数器都是「本可成为 5xx 的请求被救回来」的次数：没有它们时，
+ * 被丢掉的畸形头与被转义的裸 '%' 路径在 /metrics 上完全不可见，一次针对
+ * 出站校验的探测看上去与正常流量没有区别。
+ *
+ * @param snapshot 计数快照。
+ * @return Prometheus 文本片段。
+ */
+func prometheusUpstreamRequestGuardStats(snapshot UpstreamRequestGuardStatsSnapshot) string {
+	return fmt.Sprintf(`
+# HELP openwaf_upstream_request_header_names_dropped_total Request header fields dropped before dispatch because the field name is not a valid HTTP token
+# TYPE openwaf_upstream_request_header_names_dropped_total counter
+openwaf_upstream_request_header_names_dropped_total %d
+
+# HELP openwaf_upstream_request_header_values_dropped_total Request header values dropped before dispatch because the value contains illegal control bytes
+# TYPE openwaf_upstream_request_header_values_dropped_total counter
+openwaf_upstream_request_header_values_dropped_total %d
+
+# HELP openwaf_upstream_request_paths_sanitized_total Request paths whose bare percent signs were escaped as %%25 before URL parsing
+# TYPE openwaf_upstream_request_paths_sanitized_total counter
+openwaf_upstream_request_paths_sanitized_total %d
+
+# HELP openwaf_upstream_request_security_headers_dropped_total Security-relevant request headers (Authorization, Cookie, X-Forwarded-*) dropped entirely before dispatch; a non-zero rate means upstream sees a different identity or client source than the client sent
+# TYPE openwaf_upstream_request_security_headers_dropped_total counter
+openwaf_upstream_request_security_headers_dropped_total %d
+`,
+		snapshot.DroppedHeaderNames,
+		snapshot.DroppedHeaderValues,
+		snapshot.SanitizedPaths,
+		snapshot.DroppedSecurityHeaderNames,
 	)
 }
 

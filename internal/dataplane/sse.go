@@ -12,13 +12,14 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"My-OpenWaf/internal/proxy"
+	proxytransport "My-OpenWaf/internal/proxy/transport"
 	"My-OpenWaf/internal/security"
 	"My-OpenWaf/internal/snapshot"
 )
 
 // ForwardSSE 把上游的 text/event-stream 响应流式转发给客户端。
 func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRuntime, base string, clientIP net.IP, origHost string) error {
-	transport, normalizedBase := proxy.UpstreamRoundTripperForBase(rt, base)
+	transport, normalizedBase := proxytransport.UpstreamRoundTripperForBase(rt, base)
 	rawPath := string(c.Request.URI().RequestURI())
 	full := strings.TrimRight(normalizedBase, "/") + rawPath
 
@@ -48,13 +49,13 @@ func ForwardSSE(ctx context.Context, c *app.RequestContext, rt snapshot.SiteRunt
 	})
 	security.ApplyOutboundForwarding(req, clientIP, origHost, rt.PreserveOriginalHost, rt.Site.UpstreamHost, inboundProto(c, rt.Site.TLSEnabled))
 
-	hc := proxy.SharedNoTimeoutClientForRoundTripper(transport)
+	hc := proxytransport.SharedNoTimeoutClientForRoundTripper(transport)
 	resp, err := hc.Do(req)
 	if err != nil {
 		cancelUpstream()
 		return err
 	}
-	proxy.SetUpstreamHTTPProtocol(c, resp.Proto)
+	proxytransport.SetUpstreamHTTPProtocol(c, resp.Proto)
 
 	connTokens := parseConnectionTokens(resp.Header.Get("Connection"))
 	for k, vv := range resp.Header {

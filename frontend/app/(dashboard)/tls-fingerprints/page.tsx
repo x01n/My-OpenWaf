@@ -17,6 +17,7 @@ import {
 import { IconEye, IconFingerprint } from "@tabler/icons-react"
 import { useFingerprints } from "@/hooks/use-api"
 import { formatDate } from "@/lib/utils"
+import { isClientSentNoSNI } from "@/lib/tls-sni-presence"
 import type { TLSFingerprintSummary } from "@/lib/types"
 
 const PAGE_SIZE = 20
@@ -34,7 +35,7 @@ function DetailRow({ label, value }: { label: string; value?: string }) {
   return (
     <div className="grid grid-cols-[110px_1fr] gap-2 text-sm">
       <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 break-all font-mono text-xs leading-5">
+      <dd className="min-w-0 font-mono text-xs leading-5 break-all">
         {value || "-"}
       </dd>
     </div>
@@ -51,10 +52,7 @@ export default function TLSFingerprintsPage() {
   const [page, setPage] = useState(1)
   const [detailRow, setDetailRow] = useState<FingerprintItem | null>(null)
 
-  const params = useMemo(
-    () => ({ page, page_size: PAGE_SIZE }),
-    [page]
-  )
+  const params = useMemo(() => ({ page, page_size: PAGE_SIZE }), [page])
   const { data, isLoading, error } = useFingerprints(params)
   const items = data?.items || []
   const total = data?.total || 0
@@ -201,7 +199,10 @@ export default function TLSFingerprintsPage() {
         onPageChange={setPage}
       />
 
-      <Dialog open={detailRow !== null} onOpenChange={(open) => !open && setDetailRow(null)}>
+      <Dialog
+        open={detailRow !== null}
+        onOpenChange={(open) => !open && setDetailRow(null)}
+      >
         <DialogContent className="max-w-xl">
           <DialogHeader>
             <DialogTitle>{t("tlsFingerprints.detailTitle")}</DialogTitle>
@@ -214,7 +215,14 @@ export default function TLSFingerprintsPage() {
               />
               <DetailRow
                 label={t("tlsFingerprints.detail.sni")}
-                value={detailRow.tls_sni}
+                value={
+                  isClientSentNoSNI(
+                    detailRow.tls_sni,
+                    detailRow.tls_sni_presence
+                  )
+                    ? t("securityEventDetail.sniAbsent")
+                    : detailRow.tls_sni
+                }
               />
               <DetailRow
                 label={t("tlsFingerprints.detail.ja3Hash")}

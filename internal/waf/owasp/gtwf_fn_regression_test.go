@@ -15,33 +15,33 @@ import (
 // TestGTWFNXSS 系列：xss 族三处修复。
 func TestGTWFNXSS(t *testing.T) {
 	// xss:001 <script;alert 分号变体（原 \s> 收不下 ;）
-	if _, ok := checkXSS("<script;alert(document.domain)</script>", 4); !ok {
+	if _, ok := checkXSS("<script;alert(document.domain)</script>", 4, nil); !ok {
 		t.Fatal("xss:001 未检出 <script; 分号变体")
 	}
 	// xss:067 直接形态 (alert)(1)（no-dot，)'(' 直连）
-	if _, ok := checkXSS("(alert)(1)", 4); !ok {
+	if _, ok := checkXSS("(alert)(1)", 4, nil); !ok {
 		t.Fatal("xss:067 未检出 (alert)(1)")
 	}
 	// xss:067 confirm.call 家族（原正则本已覆盖，锚定回归）
-	if _, ok := checkXSS("confirm.call(null,1)", 4); !ok {
+	if _, ok := checkXSS("confirm.call(null,1)", 4, nil); !ok {
 		t.Fatal("xss:067 未检出 confirm.call")
 	}
 	// xss:002 onauxclick 事件名
-	if _, ok := checkXSS(`"onauxclick=alert`+"`xss`"+`+a`, 4); !ok {
+	if _, ok := checkXSS(`"onauxclick=alert`+"`xss`"+`+a`, 4, nil); !ok {
 		t.Fatal("xss:002 未检出 onauxclick")
 	}
 	// 原文 OnCliCk="(prompt`1`)：管线 normalize 先 lower（toLowerASCII）再进
 	// battery；混合大小写的原文直喂 checkXSS 不命中属预期（门字面为精确
 	// 小写）。此处按管线语义照抄：lower 后 onclick= 事件绑定命中 xss:002。
-	if _, ok := checkXSS(strings.ToLower(`"OnCliCk="(prompt`+"`1`)"), 4); !ok {
+	if _, ok := checkXSS(strings.ToLower(`"OnCliCk="(prompt`+"`1`)"), 4, nil); !ok {
 		t.Fatal("xss 未检出 OnCliCk=(prompt`1`) 原文")
 	}
 	// 裸 (prompt`1`) 反引号模板实参形态（xss:069 新规则）。
-	if _, ok := checkXSS("(prompt`1`)", 4); !ok {
+	if _, ok := checkXSS("(prompt`1`)", 4, nil); !ok {
 		t.Fatal("xss:069 未检出 (prompt`1`)")
 	}
 	// 反例：反引号双括号间的普通标识符（非弹窗函数）不命中。
-	if _, ok := checkXSS("foo`bar`", 4); ok {
+	if _, ok := checkXSS("foo`bar`", 4, nil); ok {
 		t.Fatal("良性反引号串被 xss:069 假阳")
 	}
 	// 反向：onauxclick 单词/词典词、alert) 无调用、>= 正常语境均不得命中
@@ -55,7 +55,7 @@ func TestGTWFNXSS(t *testing.T) {
 		"constructor x",
 		"a(b) c(d)",
 	} {
-		if _, ok := nextXSSHit(s, 4); ok {
+		if _, ok := nextXSSHit(s, 4, nil); ok {
 			t.Fatalf("良性输入 %q 被 XSS 假阳", s)
 		}
 	}
@@ -72,11 +72,11 @@ func TestGTWFNXSSConfirmLiteral(t *testing.T) {
 // TestGTWFNShell 覆盖 shell 族三条载荷。
 func TestGTWFNShell(t *testing.T) {
 	// getent 载荷（|getent hosts somehost.burpcollaborator.net.&）
-	if _, ok := checkCmdInjection("|getent hosts somehost.burpcollaborator.net.&", 4); !ok {
+	if _, ok := checkCmdInjection("|getent hosts somehost.burpcollaborator.net.&", 4, nil); !ok {
 		t.Fatal("shell 未检出 |getent")
 	}
 	// set /a 载荷（| set /a 3482*7301）
-	if _, ok := checkCmdInjection("| set /a 3482*7301", 4); !ok {
+	if _, ok := checkCmdInjection("| set /a 3482*7301", 4, nil); !ok {
 		t.Fatal("shell 未检出 | set /a")
 	}
 	// 反向：set 单独、set /x、Let's set it、Set-Cookie 等良性语境
@@ -87,7 +87,7 @@ func TestGTWFNShell(t *testing.T) {
 		"set-cookie: a=1",
 		"x=reset okay",
 	} {
-		if _, ok := checkCmdInjection(s, 4); ok {
+		if _, ok := checkCmdInjection(s, 4, nil); ok {
 			t.Fatalf("良性输入 %q 被 shell 假阳", s)
 		}
 	}
@@ -96,11 +96,11 @@ func TestGTWFNShell(t *testing.T) {
 // TestGTWFNSSTI 覆盖 ssti 两条载荷与反向例。
 func TestGTWFNSSTI(t *testing.T) {
 	// #{16*8787} 算术（经 '%2b 拼接路径）
-	if _, ok := checkTemplateInjection("#{16*8787}", 4); !ok {
+	if _, ok := checkTemplateInjection("#{16*8787}", 4, nil); !ok {
 		t.Fatal("ssti 未检出 #{16*8787}")
 	}
 	// FreeMarker 载荷 ${ex("id")}
-	if _, ok := checkTemplateInjection(`<#assign ex = "freemarker.template.utility.Execute"?new()>${ ex("id")}`, 4); !ok {
+	if _, ok := checkTemplateInjection(`<#assign ex = "freemarker.template.utility.Execute"?new()>${ ex("id")}`, 4, nil); !ok {
 		t.Fatal("ssti 未检出 FreeMarker 载荷")
 	}
 	// 反向：${x} 纯标识模板、CSS 花括号、#{ 无算术
@@ -111,7 +111,7 @@ func TestGTWFNSSTI(t *testing.T) {
 		"#{color}",
 		"#include <stdio.h>",
 	} {
-		if _, ok := checkTemplateInjection(s, 4); ok {
+		if _, ok := checkTemplateInjection(s, 4, nil); ok {
 			t.Fatalf("良性输入 %q 被 SSTI 假阳", s)
 		}
 	}
@@ -119,7 +119,7 @@ func TestGTWFNSSTI(t *testing.T) {
 
 // TestGTWFNLDAPAttrOID 覆盖 ldap_attr 载荷（userPassword:2.5.13.18:=123）。
 func TestGTWFNLDAPAttrOID(t *testing.T) {
-	if _, ok := checkLDAPInjection("userPassword:2.5.13.18:=123", 4); !ok {
+	if _, ok := checkLDAPInjection("userPassword:2.5.13.18:=123", 4, nil); !ok {
 		t.Fatal("ldap 未检出 2.5.13.18 OID")
 	}
 	// 反向：普通版本号 2.5.13.1、UUID、ip 形态
@@ -130,7 +130,7 @@ func TestGTWFNLDAPAttrOID(t *testing.T) {
 		"192.168.1.1",
 		"::",
 	} {
-		if _, ok := checkLDAPInjection(s, 4); ok {
+		if _, ok := checkLDAPInjection(s, 4, nil); ok {
 			t.Fatalf("良性输入 %q 被 LDAP 假阳", s)
 		}
 	}
@@ -139,7 +139,7 @@ func TestGTWFNLDAPAttrOID(t *testing.T) {
 // TestGTWFNRCEMarker 覆盖 rce-urlparam 的 !!python 标签载荷。
 func TestGTWFNRCEMarker(t *testing.T) {
 	// !!python 标签 → ES/EL 族 RegExp 命中（类别取 CatExprLang）
-	_, ok := checkExprLang("!!python/object/new:exec [import socket; socket.gethostbyname('somehost.burpcollaborator.net')]", 4)
+	_, ok := checkExprLang("!!python/object/new:exec [import socket; socket.gethostbyname('somehost.burpcollaborator.net')]", 4, nil)
 	if !ok {
 		t.Fatal("rce 未检出 !!python 标签载荷")
 	}
@@ -150,7 +150,7 @@ func TestGTWFNRCEMarker(t *testing.T) {
 		"fn",
 		"a && b",
 	} {
-		if _, ok := checkExprLang(s, 4); ok {
+		if _, ok := checkExprLang(s, 4, nil); ok {
 			t.Fatalf("良性输入 %q 被 EL 假阳", s)
 		}
 	}
@@ -189,7 +189,7 @@ func TestGTWFNCRLF(t *testing.T) {
 			s = d
 		}
 		s = strings.ToLower(s)
-		if _, ok := checkCRLF(s, 4); !ok {
+		if _, ok := checkCRLF(s, 4, nil); !ok {
 			t.Fatalf("crlf 未检出 %q", c.s)
 		}
 	}
@@ -199,7 +199,7 @@ func TestGTWFNCRLF(t *testing.T) {
 		"plain text",
 		"x=to:someone@example.com",
 	} {
-		if _, ok := checkCRLF(s, 4); ok {
+		if _, ok := checkCRLF(s, 4, nil); ok {
 			t.Fatalf("良性输入 %q 被 CRLF 假阳", s)
 		}
 	}
@@ -226,7 +226,7 @@ func TestGTWFNPathUNC(t *testing.T) {
 // TestGTWFNXXEXSInclude 覆盖 xs:include / xs:import / xs:schemaLocation。
 func TestGTWFNXXEXSInclude(t *testing.T) {
 	s := `<?xml version="1.0" encoding="utf-8" standalone="no" ?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:include namespace="http://xxe-xsinclude-namespace.yourdomain[.]com/"/></xs:schema>`
-	if _, ok := checkXXE(s, 4); !ok {
+	if _, ok := checkXXE(s, 4, nil); !ok {
 		t.Fatal("xxe 未检出 xs:include 载荷")
 	}
 	// AC 门是字节级精确字面，只认小写三条（XSD 中这些指令必须小写，
@@ -273,7 +273,7 @@ func TestGTWFNIndicatorNoRegressions(t *testing.T) {
 		s  string
 		fn func(string) bool
 	}{
-		{"confirm.call(null,1)", hasXSSIndicator},
+		{"confirm.call(null,1)", func(s string) bool { return hasXSSIndicator(s) }},
 		{`\\::1\c$`, func(s string) bool { return hasACIndicator(famPathTrav, s) }},
 		{"!!python", func(s string) bool { return hasACIndicator(famEL, s) }},
 		{"#{16}", func(s string) bool { return hasACIndicator(famTemplate, s) }},

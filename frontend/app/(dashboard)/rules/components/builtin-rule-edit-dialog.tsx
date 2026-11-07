@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import type { CaptchaType } from "@/lib/types"
+import type { CaptchaType, CiscoASAMode } from "@/lib/types"
 
 const ACTIONS = [
   "intercept",
@@ -40,6 +40,12 @@ const ACTIONS = [
 ]
 const SENSITIVITIES = ["low", "medium", "high", "very_high", "strict", "off"]
 const CAPTCHA_TYPES: CaptchaType[] = ["math", "click", "slide", "rotate"]
+const CISCO_ASA_MODES: CiscoASAMode[] = ["legacy", "strict", "scoped"]
+/**
+ * 只有该规则消费 cisco_asa_mode：internal/core/rules/phases.go 的 owaspPhase
+ * 从 owasp:path:006 的规则覆盖里读取档位，其余规则的该字段没有消费点。
+ */
+const CISCO_ASA_RULE_ID = "owasp:path:006"
 
 export interface BuiltinRuleEditInitialValue {
   enabled: boolean
@@ -48,6 +54,7 @@ export interface BuiltinRuleEditInitialValue {
   statusCode?: number
   redirectTo?: string
   captchaType?: CaptchaType | ""
+  ciscoASAMode?: CiscoASAMode | ""
   whitelist?: string[]
   note?: string
 }
@@ -59,6 +66,7 @@ export interface BuiltinRuleEditPatch {
   status_code: number
   redirect_to: string
   captcha_type: CaptchaType | ""
+  cisco_asa_mode?: CiscoASAMode
   whitelist?: string[]
   note?: string
 }
@@ -103,6 +111,10 @@ export function BuiltinRuleEditDialog({
   const [captchaType, setCaptchaType] = useState<CaptchaType | "">(
     initial.captchaType || ""
   )
+  // 未覆盖时显示 scoped：数据面未配置时按 scoped 运行，显式 legacy 仍可恢复历史行为。
+  const [ciscoASAMode, setCiscoASAMode] = useState<CiscoASAMode>(
+    initial.ciscoASAMode || "scoped"
+  )
   const [whitelist, setWhitelist] = useState(
     (initial.whitelist || []).join("\n")
   )
@@ -145,6 +157,7 @@ export function BuiltinRuleEditDialog({
         status_code: parsedStatus,
         redirect_to: redirectTo.trim(),
         captcha_type: action === "captcha_challenge" ? captchaType : "",
+        ...(ruleID === CISCO_ASA_RULE_ID ? { cisco_asa_mode: ciscoASAMode } : {}),
         ...(allowWhitelist ? { whitelist: Array.from(new Set(paths)) } : {}),
         ...(allowNote ? { note: note.trim() } : {}),
       })
@@ -277,6 +290,40 @@ export function BuiltinRuleEditDialog({
               </div>
             )}
           </div>
+
+          {ruleID === CISCO_ASA_RULE_ID && (
+            <div className="space-y-2">
+              <Label>{t("rules.ciscoASAModeLabel")}</Label>
+              <Select
+                value={ciscoASAMode}
+                onValueChange={(value) =>
+                  setCiscoASAMode(value as CiscoASAMode)
+                }
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="max-w-[28rem]">
+                  {CISCO_ASA_MODES.map((mode) => (
+                    <SelectItem key={mode} value={mode}>
+                      <span className="flex flex-col items-start gap-0.5 text-left whitespace-normal">
+                        <span>{t(`rules.ciscoASAMode.${mode}.label`)}</span>
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {t(`rules.ciscoASAMode.${mode}.hint`)}
+                        </span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {t(`rules.ciscoASAMode.${ciscoASAMode}.hint`)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {t("rules.ciscoASAModeScopeHint")}
+              </p>
+            </div>
+          )}
 
           {action === "redirect" && (
             <div className="space-y-2">

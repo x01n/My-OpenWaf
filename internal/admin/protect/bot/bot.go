@@ -32,6 +32,7 @@ type BotSettingsUpdate struct {
 	BrowserSignEnabled       *bool    `json:"browser_sign_enabled"`
 	BrowserSignTTL           *int     `json:"browser_sign_ttl"`
 	BrowserSignAction        *string  `json:"browser_sign_action"`
+	HTMLToMarkdownEnabled    *bool    `json:"html_to_markdown_enabled"`
 	JSObfuscationPaths       []string `json:"js_obfuscation_paths,omitempty"`
 	JSProtectionMode         *string  `json:"js_protection_mode,omitempty"`
 	DecryptCacheTTLSeconds   *int     `json:"decrypt_cache_ttl_seconds,omitempty"`
@@ -194,6 +195,9 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 		if req.BrowserSignAction != nil && *req.BrowserSignAction != "" {
 			current.BrowserSignAction = *req.BrowserSignAction
 		}
+		if req.HTMLToMarkdownEnabled != nil {
+			current.HTMLToMarkdownEnabled = *req.HTMLToMarkdownEnabled
+		}
 		if req.JSObfuscationPaths != nil {
 			current.JSObfuscationPaths = req.JSObfuscationPaths
 		}
@@ -251,7 +255,7 @@ func UpdateBotSettings(settingsRepo *repository.SystemSettingsRepo, reload func(
 				}
 			}
 			if req.ScoreThreshold != nil {
-				if err := shared.SyncBotThresholdToDropPolicy(txRepo, current.ScoreThreshold); err != nil {
+				if err := shared.SyncBotThresholdToDropPolicyRuntime(txRepo, current.ScoreThreshold); err != nil {
 					return err
 				}
 			}

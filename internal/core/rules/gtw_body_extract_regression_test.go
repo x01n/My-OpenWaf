@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -139,6 +140,39 @@ func TestGTWBodyMultipartRawDispositionName(t *testing.T) {
 	}
 	if rawCount != 1 {
 		t.Fatalf("普通路径 form name 入库次数 = %d，期望 1（抽取结果 %q）", rawCount, plainTargets)
+	}
+}
+
+// TestGTWBodyEncodedEntityFormPreserved 覆盖 URL 编码器把实体分号转成 %3B 后，
+// 表单抽取仍须把整段 HTML 实体当作一个值，而不是按 & 切开。
+func TestGTWBodyEncodedEntityFormPreserved(t *testing.T) {
+	const payload = "&gt;+src+onerror=confirm&amp;lpar;1&amp;rpar;&lt;"
+	body := "field=" + url.PathEscape(payload)
+	targets := extractBodyTargets([]byte(body), "application/x-www-form-urlencoded")
+	want := "&gt; src onerror=confirm&amp;lpar;1&amp;rpar;&lt;"
+	if !targetsContain(targets, func(s string) bool { return s == want }) {
+		t.Fatalf("PathEscape 后的 HTML 实体表单值未完整抽取，抽取结果 = %q", targets)
+	}
+}
+
+// TestGTWBodyEntityFormPreserved 覆盖 HTML 实体中的 & 不能被误当作表单分隔符。
+func TestGTWBodyEntityFormPreserved(t *testing.T) {
+	body := "field=&gt;+src+onerror=confirm&amp;lpar;1&amp;rpar;&lt;"
+	targets := extractBodyTargets([]byte(body), "application/x-www-form-urlencoded")
+	if !targetsContain(targets, func(s string) bool {
+		return strings.Contains(s, "onerror=confirm") && strings.Contains(s, "&amp;lpar;")
+	}) {
+		t.Fatalf("HTML 实体表单值被错误拆分，抽取结果 = %q", targets)
+	}
+}
+
+// TestGTWBodyNestedOverlongJSONPreserved 覆盖 JSON 值内双重 URL 编码载荷的完整抽取。
+func TestGTWBodyNestedOverlongJSONPreserved(t *testing.T) {
+	const payload = "%25C0%25AE%25C0%25AE%25C0%25AF%25C0%25AE%25C0%25AE%25C0%25AFetc%25C0%25AFpasswd"
+	body := `{"value":"` + payload + `"}`
+	targets := extractBodyTargets([]byte(body), "application/json")
+	if !targetsContain(targets, func(s string) bool { return s == payload }) {
+		t.Fatalf("JSON 双重 URL 编码载荷未完整抽取，抽取结果 = %q", targets)
 	}
 }
 

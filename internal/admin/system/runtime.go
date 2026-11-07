@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"My-OpenWaf/internal/core"
-	"My-OpenWaf/internal/proxy"
+	proxytransport "My-OpenWaf/internal/proxy/transport"
 	"My-OpenWaf/internal/snapshot"
 	"My-OpenWaf/internal/store/repository"
 	"My-OpenWaf/internal/tlsmeta"
@@ -153,7 +154,7 @@ func GetRuntimeConfig(load RuntimeStateProvider, holder *snapshot.Holder, settin
 		tlsCapabilities := buildTLSCapabilityStatuses(networkDefaults, tlsDefaults, caaStatus, ocspStaplingStatus, hstsEnabled, xssProtectionEnabled, expectCTEnabled, hpkpEnabled, hpkpReportOnlyEnabled, responseCompressionEnabled, responseCompressionGzipEnabled, responseCompressionDeflateEnabled, responseCompressionZstdEnabled, brotliEnabled)
 		tlsCapabilities = enrichTLSCapabilitiesWithHTTP2Config(tlsCapabilities, http2Config)
 		tlsCapabilities = enrichTLSCapabilitiesWithHTTP3RouteConflicts(tlsCapabilities, runtimeSnapshot)
-		upstreamTransportPools := runtimeTransportPools(proxy.UpstreamTransportPoolStatsSnapshot())
+		upstreamTransportPools := runtimeTransportPools(proxytransport.UpstreamTransportPoolStatsSnapshot())
 		c.JSON(200, RuntimeConfigResponse{
 			Revision:                          revision,
 			ConfigDiagnostics:                 configDiagnostics,
@@ -194,7 +195,7 @@ func GetRuntimeConfig(load RuntimeStateProvider, holder *snapshot.Holder, settin
 	}
 }
 
-func runtimeTransportPools(stats proxy.UpstreamTransportPoolStats) RuntimeTransportPools {
+func runtimeTransportPools(stats proxytransport.UpstreamTransportPoolStats) RuntimeTransportPools {
 	return RuntimeTransportPools{
 		HTTPTransports:           stats.HTTPTransports,
 		HTTP2CleartextTransports: stats.HTTP2CleartextTransports,
@@ -224,6 +225,7 @@ func buildTLSCapabilityStatuses(networkDefaults snapshot.NetworkDefaults, tlsDef
 		{Key: "alpn", Label: "ALPN", Status: "supported", Detail: "当前快照继承站点默认 ALPN 为 " + runtimeALPNDetail(networkDefaults, tlsDefaults) + "；站点级 ALPN 可继续覆盖。"},
 		{Key: "npn", Label: "NPN", Status: "not_supported", Detail: "当前运行态没有 NPN 配置路径；ALPN 不能等同为 NPN。", Missing: true},
 		{Key: "session_ticket", Label: "Session Ticket", Status: boolStatus(tlsDefaults.SessionTicketsEnabled), Detail: boolDetail(tlsDefaults.SessionTicketsEnabled, "当前快照启用 TLS Session Ticket；session_tickets_enabled 已映射到 tls.Config.SessionTicketsDisabled。", "当前快照关闭 TLS Session Ticket；session_tickets_enabled 已映射到 tls.Config.SessionTicketsDisabled。")},
+		runtimeAllow0RTTCapability(tlsDefaults),
 		{Key: "session_id_caching", Label: "SessionID caching", Status: "not_supported", Detail: "当前没有服务端 SessionID cache 配置或状态输出。", Missing: true},
 		{Key: "starttls", Label: "STARTTLS", Status: "not_supported", Detail: "当前数据面只提供 HTTP/HTTPS/HTTP2/HTTP3 监听，没有 STARTTLS 升级链路。", Missing: true},
 		ocspStaplingStatus,
@@ -347,7 +349,7 @@ func runtimeHTTP3RouteConflicts(sn *snapshot.Snapshot) []runtimeHTTP3RouteConfli
 			continue
 		}
 		udpBind := runtimeHTTP3BindForSite(rt)
-		if udpBind == "" {
+		if udpBind == "" && !rt.NetworkDefaults.HTTP3PerPortEnabled {
 			udpBind = strings.TrimSpace(rt.Bind)
 		}
 		if udpBind == "" {
@@ -420,7 +422,24 @@ func runtimeEffectiveHTTP3Enabled(siteRT snapshot.SiteRuntime) bool {
 	return alpnDetailIncludes(effectiveALPN, "h3")
 }
 
+/**
+ * runtimeHTTP3BindForSite 返回站点在 h3 监听计划中使用的 UDP 监听地址。
+ *
+ * 开启 http3_per_port_enabled 时，站点不再共享全局 http3_bind，
+ * 而是让自己所在 TCP 监听地址的端口承担 UDP 监听；TCP bind 无法解析出
+ * 合法端口时返回空串，由调用方跳过该站点。两种模式都必须与
+ * internal/app 的 http3BindForSite 保持一致，否则自检详情会与实际监听不符。
+ *
+ * @param rt 站点运行时。
+ * @return UDP 监听地址；不可解析时为空串。
+ */
 func runtimeHTTP3BindForSite(rt snapshot.SiteRuntime) string {
+	if rt.NetworkDefaults.HTTP3PerPortEnabled {
+		if bind, ok := snapshot.HTTP3BindFromTCPBind(rt.Bind); ok {
+			return bind
+		}
+		return ""
+	}
 	if bind := strings.TrimSpace(rt.NetworkDefaults.HTTP3Bind); bind != "" {
 		return bind
 	}
@@ -579,12 +598,57 @@ func runtimeHTTP3Detail(networkDefaults snapshot.NetworkDefaults, tlsDefaults sn
 	if !networkDefaults.HTTP3Enabled {
 		return "当前快照关闭 HTTP/3；继承站点默认 ALPN 为 " + effectiveALPN + "，不会启动 HTTP/3 UDP/QUIC 监听。"
 	}
+	quicDetail := "HTTP/3 UDP/QUIC 监听固定使用 TLS1.3 与 h3 ALPN，不随继承 TLS 版本范围降级。" + runtimeHTTP30RTTDetail(tlsDefaults)
+	if networkDefaults.HTTP3PerPortEnabled {
+		perPortDetail := "已开启每 TLS 端口独立 HTTP/3 监听：每个启用了 TLS 且 ALPN 含 h3 的监听地址各自使用与自身 TCP 端口相同的 UDP 端口，http3_bind 在此模式下不参与监听地址计算。"
+		if alpnDetailIncludes(effectiveALPN, "h3") {
+			return "当前快照允许 HTTP/3，且继承站点默认 ALPN 包含 h3；" + perPortDetail + quicDetail
+		}
+		return "当前快照允许 HTTP/3，但继承站点默认 ALPN 为 " + effectiveALPN + "，未包含 h3；仅显式站点 ALPN 包含 h3 的 TLS 站点会进入 HTTP/3 UDP/QUIC 监听计划；" + perPortDetail + quicDetail
+	}
 	bind := runtimeHTTP3BindDetail(networkDefaults.HTTP3Bind)
-	quicDetail := "HTTP/3 UDP/QUIC 监听固定使用 TLS1.3 与 h3 ALPN，不随继承 TLS 版本范围降级。"
 	if alpnDetailIncludes(effectiveALPN, "h3") {
 		return "当前快照允许 HTTP/3，且继承站点默认 ALPN 包含 h3；默认 UDP/QUIC 监听为 " + bind + "；" + quicDetail
 	}
 	return "当前快照允许 HTTP/3，但继承站点默认 ALPN 为 " + effectiveALPN + "，未包含 h3；仅显式站点 ALPN 包含 h3 的 TLS 站点会进入 HTTP/3 UDP/QUIC 监听计划，默认监听为 " + bind + "；" + quicDetail
+}
+
+/**
+ * runtimeAllow0RTTCapability 构造 HTTP/3 0-RTT 的运行态自检条目。
+ *
+ * 判定与数据面同源（`snapshot.H3Allow0RTT`，含 `MY_OPENWAF_H3_ALLOW_0RTT` 覆盖），
+ * Detail 同时说明 allow_0rtt 是否显式配置，便于运维判断当前值来自配置还是继承。
+ *
+ * @param tlsDefaults 当前快照的 TLS 全局默认配置。
+ * @return 0-RTT 能力条目。
+ */
+func runtimeAllow0RTTCapability(tlsDefaults snapshot.TLSDefaults) TLSCapabilityStatus {
+	enabled := snapshot.H3Allow0RTT(os.Getenv(snapshot.H3Allow0RTTEnvKey), tlsDefaults)
+	source := "allow_0rtt 未显式配置，当前继承 session_tickets_enabled"
+	if tlsDefaults.HasExplicitAllow0RTT {
+		source = "allow_0rtt 已显式配置"
+	}
+	detail := boolDetail(enabled,
+		"当前快照接受 HTTP/3 0-RTT 早期数据；"+source+"。0-RTT 数据存在重放风险，仅在明确需要时开启。",
+		"当前快照不接受 HTTP/3 0-RTT 早期数据；"+source+"。会话票据仍可用于 1-RTT 会话恢复。",
+	)
+	if envValue := os.Getenv(snapshot.H3Allow0RTTEnvKey); envValue != "" {
+		detail = joinRuntimeDetail(detail, snapshot.H3Allow0RTTEnvKey+"="+envValue+" 覆盖当前判定。")
+	}
+	return TLSCapabilityStatus{Key: "0rtt", Label: "0-RTT", Status: boolStatus(enabled), Detail: detail}
+}
+
+/**
+ * runtimeHTTP30RTTDetail 生成 HTTP/3 能力条目里的 0-RTT 说明片段。
+ *
+ * @param tlsDefaults 当前快照的 TLS 全局默认配置。
+ * @return 以空格开头的说明片段。
+ */
+func runtimeHTTP30RTTDetail(tlsDefaults snapshot.TLSDefaults) string {
+	if snapshot.H3Allow0RTT(os.Getenv(snapshot.H3Allow0RTTEnvKey), tlsDefaults) {
+		return " 当前接受 0-RTT 早期数据（allow_0rtt 未显式配置时继承 session_tickets_enabled）。"
+	}
+	return " 当前不接受 0-RTT 早期数据；如需开启请配置 allow_0rtt。"
 }
 
 func alpnDetailIncludes(raw string, proto string) bool {

@@ -542,3 +542,34 @@ func TestSyncProtectionBotToSettings(t *testing.T) {
 		t.Fatalf("SyncProtectionBotToSettings same value: %v", err)
 	}
 }
+
+func TestSyncBotSettingsFieldsPreservesUnknownAndOmittedFields(t *testing.T) {
+	repo := newSystemSettingsRepoForTest(t)
+	initial := `{"enabled":true,"custom_future_field":{"mode":"keep"},"high_risk_countries":["CN"]}`
+	if err := repo.Set("bot_settings", initial); err != nil {
+		t.Fatalf("seed bot settings: %v", err)
+	}
+
+	if err := syncBotSettingsFields(repo, map[string]any{"captcha_enabled": true}); err != nil {
+		t.Fatalf("sync bot settings field: %v", err)
+	}
+	value, err := repo.Get("bot_settings")
+	if err != nil {
+		t.Fatalf("get bot settings: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(value), &got); err != nil {
+		t.Fatalf("decode bot settings: %v", err)
+	}
+	if string(got["enabled"]) != "true" || string(got["captcha_enabled"]) != "true" || string(got["high_risk_countries"]) != `["CN"]` {
+		t.Fatalf("sync changed existing or requested fields unexpectedly: %s", value)
+	}
+	if string(got["custom_future_field"]) != `{"mode":"keep"}` {
+		t.Fatalf("sync dropped unknown field: %s", value)
+	}
+	for _, key := range []string{"score_threshold", "anti_replay_enabled", "browser_sign_enabled"} {
+		if _, exists := got[key]; exists {
+			t.Errorf("sync materialized omitted field %q: %s", key, value)
+		}
+	}
+}

@@ -55,10 +55,11 @@ type HTTP3Server struct {
 }
 
 type http3LoopbackRequestState struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	body   *cancelableBody
-	stream any
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	body     *cancelableBody
+	stream   any
+	quicConn *quic.Conn
 }
 
 type h3StreamResetter interface {
@@ -84,13 +85,35 @@ func (s *http3LoopbackRequestState) SetStream(stream any) {
 }
 
 /**
+ * SetQUICConn 记录承载该请求的 QUIC 连接，作为流级取消不可用时的兜底。
+ *
+ * 流对象可能因为 quic-go 内部 writer 形状变化而解析失败；此时关闭整条
+ * QUIC 连接仍然满足「协议级终止」语义，客户端会收到 CONNECTION_CLOSE，
+ * 而不是一个可读的 403/502 响应。
+ *
+ * @param conn 该请求所属的 QUIC 连接，可为 nil。
+ */
+func (s *http3LoopbackRequestState) SetQUICConn(conn *quic.Conn) {
+	if s == nil || conn == nil {
+		return
+	}
+	s.mu.Lock()
+	s.quicConn = conn
+	s.mu.Unlock()
+}
+
+/**
  * ResetFn 构造注册为 loopback 复位信号的闭包。
  *
  * 该闭包刻意不走 state 自身的 cancel 链：cancel() 会拆掉 loopback 请求上下文，
  * 而那是代理的另一侧；闭包只对配额所拥有的那条流执行
  * CancelWrite(H3 REQUEST_CANCELED)。
  *
- * @return 复位闭包；不可用时返回 nil。
+ * 流对象不可用时退回连接级 CONNECTION_CLOSE：数据面 drop 必须始终有
+ * 协议级终止通道，绝不能因为解析不到 quic-go 的私有字段就降级成
+ * HTTP 拦截页。
+ *
+ * @return 复位闭包；stream 与 quicConn 都不可用时返回 nil。
  */
 func (s *http3LoopbackRequestState) ResetFn() func() {
 	if s == nil {
@@ -98,14 +121,22 @@ func (s *http3LoopbackRequestState) ResetFn() func() {
 	}
 	s.mu.Lock()
 	stream := s.stream
+	quicConn := s.quicConn
 	s.mu.Unlock()
-	resetter, ok := stream.(h3StreamResetter)
-	if !ok || resetter == nil {
-		return nil
+	if resetter, ok := stream.(h3StreamResetter); ok && resetter != nil {
+		return func() {
+			resetter.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+		}
 	}
-	return func() {
-		resetter.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+	if quicConn != nil {
+		return func() {
+			_ = quicConn.CloseWithError(
+				quic.ApplicationErrorCode(http3.ErrCodeRequestCanceled),
+				"openwaf drop",
+			)
+		}
 	}
+	return nil
 }
 
 func (s *http3LoopbackRequestState) SetBody(body *cancelableBody) {
@@ -222,6 +253,48 @@ type http3LoopbackRequestStateContextKey struct{}
 
 type http3OriginalRequestContextKey struct{}
 
+// http3QUICConnContextKey 承载该连接对应的 *quic.Conn。
+//
+// 0-RTT（early data）状态只能从连接级读取：`Conn.ConnectionState().Used0RTT`
+// 在 handler 执行时已确定，而 HTTP 请求本身不携带该信息。把连接存入 context
+// 后，handler 与 Rewrite 都能按请求判定是否来自 early data。
+type http3QUICConnContextKey struct{}
+
+// http3QUICConnFromContext 取出连接级 *quic.Conn；不存在时返回 nil。
+func http3QUICConnFromContext(ctx context.Context) *quic.Conn {
+	if ctx == nil {
+		return nil
+	}
+	conn, _ := ctx.Value(http3QUICConnContextKey{}).(*quic.Conn)
+	return conn
+}
+
+// http3RequestUsedZeroRTT 报告该请求是否来自 0-RTT（early data）。
+func http3RequestUsedZeroRTT(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	conn := http3QUICConnFromContext(r.Context())
+	if conn == nil {
+		return false
+	}
+	return conn.ConnectionState().Used0RTT
+}
+
+// http3ZeroRTTMethodAllowed 决定 0-RTT 请求是否允许直接处理。
+//
+// RFC 9114 8.1 要求服务端对可能不安全的 0-RTT 请求执行重放防护。WAF 无法在
+// 应用层证明任意方法的幂等性，因此只放行 RFC 9110 定义的安全方法；其余方法
+// 一律回 425 Too Early，由客户端在握手完成后重发，天然消除重放窗口。
+func http3ZeroRTTMethodAllowed(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
 type http3LoopbackTransportSelector struct {
 	h2     http.RoundTripper
 	http11 http.RoundTripper
@@ -264,6 +337,7 @@ const (
 	http3LoopbackTLSHandshakeTimeout   = 10 * time.Second
 	http3LoopbackIdleConnTimeout       = 90 * time.Second
 	http3LoopbackExpectContinueTimeout = time.Second
+	http3LoopbackMaxConnsPerHost       = 100
 )
 
 type http3RouteTable struct {
@@ -680,6 +754,37 @@ type HTTP3ServerConfig struct {
 	TLSConfig  *tls.Config
 	Log        *slog.Logger
 	Allow0RTT  bool
+	// MaxHeaderBytes 与 h1/h2 的 HTTP2Config.MaxHeaderBytes 对齐，
+	// 避免 h3 沿用 http.DefaultMaxHeaderBytes 造成同一站点不同协议的
+	// 头部上限不一致（h3 更宽松时也无法被 WAF 规则前的解析层挡住）。
+	MaxHeaderBytes int
+	// IdleTimeout 是 HTTP/3 应用层空闲超时，与 h1/h2 的
+	// HTTP2Config.IdleTimeoutSeconds 对齐。零值表示不超时。
+	IdleTimeout time.Duration
+}
+
+/**
+ * newHTTP3ServerFromPlan 按快照构建一个 HTTP/3 监听。
+ *
+ * h3 的头部上限与空闲超时必须与 h1/h2 采用同一份 HTTP2Config：同一站点在
+ * 不同协议下若上限不同，攻击者可以择宽松协议绕过 WAF 规则之前的解析层限制。
+ *
+ * @param plan 监听计划（bind、路由表、TLS 配置）。
+ * @param sn   当前快照；nil 时使用默认 HTTP2 配置。
+ * @param log  该监听的日志器。
+ * @return 已注册监听计划的 HTTP/3 服务实例。
+ */
+func newHTTP3ServerFromPlan(plan http3ServerPlan, sn *snapshotpkg.Snapshot, log *slog.Logger) *HTTP3Server {
+	http2cfg := effectiveHTTP2Config(sn)
+	return NewHTTP3Server(HTTP3ServerConfig{
+		Bind:           plan.Bind,
+		RouteTable:     plan.RouteTable,
+		TLSConfig:      plan.TLSConfig,
+		Log:            log,
+		Allow0RTT:      h3Allow0RTT(sn),
+		MaxHeaderBytes: http2cfg.MaxHeaderBytes,
+		IdleTimeout:    time.Duration(http2cfg.IdleTimeoutSeconds) * time.Second,
+	})
 }
 
 func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
@@ -726,6 +831,7 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       http3LoopbackMaxConnsPerHost,
 		IdleConnTimeout:       http3LoopbackIdleConnTimeout,
 		TLSHandshakeTimeout:   http3LoopbackTLSHandshakeTimeout,
 		ExpectContinueTimeout: http3LoopbackExpectContinueTimeout,
@@ -743,6 +849,7 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       http3LoopbackMaxConnsPerHost,
 		IdleConnTimeout:       http3LoopbackIdleConnTimeout,
 		TLSHandshakeTimeout:   http3LoopbackTLSHandshakeTimeout,
 		ExpectContinueTimeout: http3LoopbackExpectContinueTimeout,
@@ -753,6 +860,15 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		}).DialContext,
 	}
 	proxy.Transport = &http3LoopbackTransportSelector{h2: proxyTransport, http11: proxyHTTP11Transport}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// 上游真实故障（上下文未取消）保持 502 语义；drop 链路会先取消
+		// QUIC 流并连带取消请求上下文，此时绝不能再写拦截/网关响应，
+		// 否则等于把 drop 降级成客户端可读的 403/502。
+		if r != nil && r.Context().Err() != nil {
+			return
+		}
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	}
 	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
 		if pr == nil || pr.Out == nil {
 			return
@@ -831,9 +947,30 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 			}
 		}
 		applyHTTP3ProxyTLSHeaders(pr.Out)
+		// 0-RTT 标记只能由真实连接状态写入。客户端伪造的同名头已在
+		// clearInternalHTTP3TLSHeaders 中删除，这里再按连接状态设置。
+		if http3RequestUsedZeroRTT(pr.In) {
+			pr.Out.Header.Set(dataplane.InternalHTTP3ZeroRTTHeader, "1")
+		}
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// RFC 9114 §8.1：0-RTT 数据可被重放，服务端必须自行防护。
+		// 只放行 RFC 9110 定义的安全方法；其余方法在握手完成（1-RTT）前不处理，
+		// 回 425 Too Early 让客户端重发，从根上消除重放窗口。
+		if http3RequestUsedZeroRTT(r) && !http3ZeroRTTMethodAllowed(r.Method) {
+			// 用 Debug 级别：攻击者可以用 0-RTT POST 刷这条日志，Warn 会变成
+			// 日志放大面。真正需要统计时读访问日志的 425 + zero_rtt 维度。
+			if cfg.Log != nil {
+				cfg.Log.Debug("http3 0-RTT request rejected",
+					slog.String("method", r.Method),
+					slog.String("host", r.Host),
+					slog.String("path", r.URL.Path))
+			}
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "0-RTT request requires handshake completion", http.StatusTooEarly)
+			return
+		}
 		targetBind, ok := resolveHTTP3TCPBind(cfg.RouteTable, r)
 		if !ok {
 			http.Error(w, "no HTTP/3 route target", http.StatusBadGateway)
@@ -852,10 +989,16 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		cancelAware.startFlushWatch(ctx)
 		defer cancelAware.Close()
 		state.SetStream(http3ResponseStream(cancelAware))
+		state.SetQUICConn(http3QUICConnFromContext(r.Context()))
 		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%s"; ma=%d`, extractPort(cfg.Bind), snapshotpkg.OneDaySeconds))
 		request := r.WithContext(ctx)
 		if isHTTP3WebSocketConnect(request) {
 			if err := serveHTTP3WebSocketBridge(cancelAware, request, targetBind, h3ServerState, state); err != nil {
+				// drop 链路会取消 QUIC 流并连带取消请求上下文；此时写 502
+				// 等于把 drop 降级成网关错误响应，必须直接返回。
+				if request.Context().Err() != nil {
+					return
+				}
 				http.Error(w, "HTTP/3 WebSocket bridge failed", http.StatusBadGateway)
 			}
 			return
@@ -877,17 +1020,29 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 		Addr:      cfg.Bind,
 		Handler:   handler,
 		TLSConfig: tlsCfg,
+		// EnableDatagrams 与 QUICConfig.EnableDatagrams 同时开启，
+		// 让 h3 传输能力符合 RFC 9297（HTTP Datagrams / WebTransport 基础）。
+		EnableDatagrams: true,
+		MaxHeaderBytes:  cfg.MaxHeaderBytes,
+		IdleTimeout:     cfg.IdleTimeout,
 		QUICConfig: &quic.Config{
 			// Allow0RTT 沿用站点会话票据开关，不强制开启：0-RTT 数据存在重放风险，
-			// 是否接受由上层配置决定，此处仅透传。
+			// 是否接受由上层配置决定，此处仅透传。应用层还会对非安全方法回 425。
 			Allow0RTT: cfg.Allow0RTT,
+			// EnableDatagrams 开启 QUIC DATAGRAM 帧支持（RFC 9221）。
+			EnableDatagrams: true,
 			// 显式设为 30s（与 quic-go 默认一致），无活动连接超时回收，避免空闲 QUIC 连接长期占用。
 			MaxIdleTimeout: 30 * time.Second,
 			// 周期性保活包（取 MaxIdleTimeout 一半），维持长连接不被 NAT/对端超时断开，
 			// 从而复用已建立的 QUIC 连接、减少重复握手。
 			KeepAlivePeriod: 15 * time.Second,
-			// 单连接并发双向流上限，默认 100，反代高并发下适度上调到 256 以提升多路复用能力。
+			// 单连接并发双向流上限。默认 100 对反代偏低；显式设为 256 提升多路
+			// 复用并发。刻意不设为 -1（无上限）：那会让单个对端无限开流，
+			// 内存仅受连接接收窗口约束，构成 DoS 面。
 			MaxIncomingStreams: 256,
+			// 单向流只用于 H3 控制流等极少数场景，保持 quic-go 默认 100 已充足；
+			// 显式写出以固定行为，避免依赖库默认值变化。
+			MaxIncomingUniStreams: 100,
 			// 流接收窗口：初始 2MB，最大 6MB（quic-go 默认 512KB/6MB），
 			// 反代场景大响应体受益于更大初始窗口避免流控暂停。
 			InitialStreamReceiveWindow:     2 << 20,
@@ -899,6 +1054,8 @@ func NewHTTP3Server(cfg HTTP3ServerConfig) *HTTP3Server {
 			if conn == nil {
 				return ctx
 			}
+			// 连接级状态（0-RTT）只能从 *quic.Conn 读取，必须在此保留引用。
+			ctx = context.WithValue(ctx, http3QUICConnContextKey{}, conn)
 			if fp, ok := handshakeFingerprints.Take(conn.LocalAddr(), conn.RemoteAddr()); ok {
 				ctx = contextWithHTTP3TLSFingerprint(ctx, fp)
 			}
@@ -1034,9 +1191,21 @@ func serveHTTP3WebSocketBridge(w *http3CancelAwareResponseWriter, r *http.Reques
 		out.Header.Set(dataplane.InternalHTTP3CancelTokenHeader, token)
 		defer unregister()
 	}
+	if state != nil {
+		if resetFn := state.ResetFn(); resetFn != nil {
+			if token := dataplane.RegisterInternalHTTP3ResetToken(resetFn); token != "" {
+				out.Header.Set(dataplane.InternalHTTP3ResetTokenHeader, token)
+				defer dataplane.UnregisterInternalHTTP3ResetToken(token)
+			}
+		}
+	}
 
 	resp, err := server.proxyHTTP11Transport.RoundTrip(out)
 	if err != nil {
+		// drop 或客户端断开已经取消 bridgeCtx：流已终止，不能再写 502。
+		if bridgeCtx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("round trip HTTP/1.1 WebSocket loopback request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -1056,7 +1225,10 @@ func serveHTTP3WebSocketBridge(w *http3CancelAwareResponseWriter, r *http.Reques
 	}
 	copyHTTP3WebSocketResponseHeaders(w.Header(), resp.Header, true)
 	w.WriteHeader(http.StatusOK)
-	h3Stream := streamer.HTTPStream()
+	h3Stream, err := streamer.HTTPStream()
+	if err != nil {
+		return fmt.Errorf("HTTP/3 response stream is unavailable: %w", err)
+	}
 	if h3Stream == nil {
 		return errors.New("HTTP/3 response stream is unavailable")
 	}
@@ -1326,6 +1498,7 @@ func clearInternalHTTP3TLSHeaders(headers http.Header) {
 	headers.Del(dataplane.InternalHTTP3TLSExtensionsHeader)
 	headers.Del(dataplane.InternalHTTP3TLSCurvesHeader)
 	headers.Del(dataplane.InternalHTTP3TLSPointFormatsHeader)
+	headers.Del(dataplane.InternalHTTP3ZeroRTTHeader)
 }
 
 func applyHTTP3ProxyTLSHeaders(r *http.Request) {
@@ -1562,6 +1735,16 @@ func buildHTTP3ServerPlans(sn *snapshotpkg.Snapshot) map[string]http3ServerPlan 
 		}
 		udpBind := http3BindForSite(rt)
 		if strings.TrimSpace(udpBind) == "" {
+			// 每端口模式下地址只能来自 TCP bind，推导不出合法端口说明该站点的
+			// bind 本身不可用，此时不能退回 rt.Bind——那会得到无端口的监听地址，
+			// 让整个 UDP 监听绑定失败。
+			if rt.NetworkDefaults.HTTP3PerPortEnabled {
+				slog.Warn("skipping HTTP/3 per-port listener for site without usable TCP bind",
+					slog.Uint64("site_id", uint64(rt.Site.ID)),
+					slog.String("bind", rt.Bind),
+				)
+				continue
+			}
 			udpBind = rt.Bind
 		}
 		grouped[udpBind] = append(grouped[udpBind], rt)
@@ -1606,8 +1789,14 @@ func buildHTTP3AltSvcAdvertisementWithPlans(siteRT snapshotpkg.SiteRuntime, sn *
 		return http3AltSvcAdvertisement{}, false
 	}
 	udpBind := http3BindForSite(siteRT)
-	if strings.TrimSpace(udpBind) == "" {
+	if strings.TrimSpace(udpBind) == "" && !siteRT.NetworkDefaults.HTTP3PerPortEnabled {
 		udpBind = siteRT.Bind
+	}
+	// 每端口模式下推导不出 UDP 地址时不能退回 siteRT.Bind：既有的
+	// TestHTTP3AltSvcAdvertisementRequiresTLSHTTP3Plan 就依赖这一条——明文站点的
+	// bind 恰好等于某个计划的键，退回会把本不该通告的站点接上那个计划。
+	if strings.TrimSpace(udpBind) == "" {
+		return http3AltSvcAdvertisement{}, false
 	}
 	if plans == nil {
 		plans = buildHTTP3ServerPlans(sn)
@@ -1781,7 +1970,7 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 		curves = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}
 	}
 
-	return &tls.Config{
+	cfg := &tls.Config{
 		MinVersion:               tls.VersionTLS13,
 		MaxVersion:               tls.VersionTLS13,
 		NextProtos:               []string{"h3"},
@@ -1823,6 +2012,10 @@ func buildHTTP3ServerTLSConfigWithRouteTable(udpBind string, runtimes []snapshot
 			return selfSignedForBind(udpBind), nil
 		},
 	}
+	// 与 h1/h2 共用同一进程级 ticket key：客户端从 TCP 升级到 h3（或反向
+	// 回退）时已有 ticket 仍然有效，0-RTT 与会话恢复都能直接复用。
+	applySharedSessionTicketKey(cfg)
+	return cfg
 }
 
 func http3SNICertForRoute(sniCertMap map[string]http3SNICertificate, sni string, routeBind string) (*tls.Certificate, bool) {
@@ -1877,7 +2070,19 @@ func splitHTTP3Hosts(raw string) []string {
 	return out
 }
 
+/**
+ * http3BindForSite 返回站点在 h3 监听计划中使用的 UDP 监听地址。
+ *
+ * @param rt 站点运行时。
+ * @return UDP 监听地址；不可推导时为空串。
+ */
 func http3BindForSite(rt snapshotpkg.SiteRuntime) string {
+	if rt.NetworkDefaults.HTTP3PerPortEnabled {
+		if bind, ok := snapshotpkg.HTTP3BindFromTCPBind(rt.Bind); ok {
+			return bind
+		}
+		return ""
+	}
 	if bind := strings.TrimSpace(rt.NetworkDefaults.HTTP3Bind); bind != "" {
 		return bind
 	}
@@ -1924,13 +2129,15 @@ func http3ListenerFingerprint(udpBind string, runtimes []snapshotpkg.SiteRuntime
 			effectiveMaxTLS,
 			effectiveALPN,
 		)
-		fmt.Fprintf(h, " http3_enabled=%v http3_bind=%s ciphers=%s curves=%s prefer_server_cipher_suites=%v session_tickets_enabled=%v self_signed_on_ip=%v",
+		fmt.Fprintf(h, " http3_enabled=%v http3_bind=%s http3_per_port=%v ciphers=%s curves=%s prefer_server_cipher_suites=%v session_tickets_enabled=%v allow_0rtt=%v self_signed_on_ip=%v",
 			rt.NetworkDefaults.HTTP3Enabled,
 			strings.TrimSpace(rt.NetworkDefaults.HTTP3Bind),
+			rt.NetworkDefaults.HTTP3PerPortEnabled,
 			effectiveCiphers,
 			strings.TrimSpace(rt.TLSDefaults.CurvePreferences),
 			rt.TLSDefaults.PreferServerCipherSuites,
 			rt.TLSDefaults.SessionTicketsEnabled,
+			rt.TLSDefaults.EffectiveAllow0RTT(),
 			rt.TLSDefaults.SelfSignedOnIP,
 		)
 		if rt.Certificate != nil {

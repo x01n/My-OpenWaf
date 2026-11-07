@@ -18,6 +18,7 @@ type WriteQueueBackend interface {
 type HotCacheBackend interface {
 	Get(key string, dest any) bool
 	Set(key string, value any, ttl time.Duration)
+	SetIfAbsent(key string, value any, ttl time.Duration) bool
 	Invalidate(key string)
 	InvalidatePattern(pattern string)
 	Available() bool

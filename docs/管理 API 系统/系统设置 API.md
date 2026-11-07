@@ -3,19 +3,36 @@
 > [返回 管理 API 系统](管理 API 系统.md)
 
 <cite>
-**本文引用的文件**
-- [系统设置 API.md](file://docs/管理 API 系统/系统设置 API.md)
-- [settings.go](file://internal/admin/system/settings.go)
-- [apikey.go](file://internal/admin/system/apikey.go)
+**本文档引用的文件**
 - [router.go](file://internal/admin/router.go)
-- [system_settings.go](file://internal/store/repository/system_settings.go)
+- [settings.go](file://internal/admin/system/settings.go)
+- [network.go](file://internal/admin/system/network.go)
+- [imagery.go](file://internal/admin/system/imagery.go)
+- [runtime.go](file://internal/admin/system/runtime.go)
+- [runtime_overrides.go](file://internal/admin/system/runtime_overrides.go)
+- [backup.go](file://internal/admin/system/backup.go)
+- [apikey.go](file://internal/admin/system/apikey/apikey.go)
+- [admin_users.go](file://internal/admin/admin_users.go)
+- [auth.go](file://internal/admin/auth.go)
+- [auth_session.go](file://internal/admin/auth_session.go)
+- [middleware.go](file://internal/admin/middleware.go)
+- [protection.go](file://internal/admin/protect/protection.go)
+- [bot.go](file://internal/admin/protect/bot/bot.go)
+- [drop.go](file://internal/admin/protect/drop/drop.go)
 - [system.go](file://internal/store/system.go)
 - [migrate.go](file://internal/store/migrate.go)
-- [config_validate.go](file://internal/core/config_validate.go)
-- [page.tsx](file://frontend/app/(dashboard)/settings/page.tsx)
+- [runtime.go](file://internal/core/runtime.go)
+- [pubsub.go](file://internal/core/redis/pubsub.go)
+- [snapshot.go](file://internal/snapshot/snapshot.go)
+- [http2.go](file://internal/snapshot/http2.go)
+- [system_settings.go](file://internal/store/repository/setting/system_settings.go)
+- [admin_account.go](file://internal/store/repository/authn/admin_account.go)
+- [auth_revocation.go](file://internal/admin/auth_revocation.go)
+- [settings page.tsx](file://frontend/app/(dashboard)/settings/page.tsx)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
@@ -23,375 +40,658 @@
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
 7. [性能考虑](#性能考虑)
-8. [故障排除指南](#故障排除指南)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
 ## 简介
-本文件系统性梳理 My-OpenWaf 的系统设置 API，覆盖全局设置、功能开关与性能参数的管理。重点说明设置项分类（安全设置、监控设置、日志设置、网络配置）、设置值验证机制、设置生效机制（热更新/重启要求/回滚策略）、配置示例与推荐设置、备份与恢复能力、配置变更影响分析与最佳实践。
+
+系统设置 API 是控制面的配置入口，覆盖四件事：键值型系统设置的读写、结构化配置（网络/TLS/HTTP2/Redis/日志/图像转换/运行时覆盖）的专用端点、管理面自身的账号与令牌治理、以及配置快照的手动重载与整体备份恢复。共 38 个端点。
+
+一条贯穿性规则：**受专用端点管辖的键不能通过通用 `/settings` 写入**。`system/settings.go` 维护 `protectedSettingKeys` 与 `internalSettingKeys` 两张表，命中即返回 400 并把应走的端点回显给调用方，避免同一份配置出现第二真源。
+
+**章节来源**
+- [settings.go:13-58](file://internal/admin/system/settings.go#L13-L58)
+- [router.go:149-150](file://internal/admin/router.go#L149-L150)
 
 ## 项目结构
-系统设置 API 由后端路由层、处理器层、存储仓库层与前端界面共同组成，配合运行时快照与热重载机制实现配置的持久化与动态生效。
+
+处理器分布在 `internal/admin/system/` 根包与其 `apikey/`、`dashboard/` 等子包，管理面账号与会话端点在 `internal/admin` 根包（`admin_users.go`、`auth.go`、`auth_session.go`）。早期扁平 handler 文件布局已废弃，旧文档中按单文件命名的处理器路径已全部作废。
 
 ```mermaid
-graph TB
-FE["前端设置页<br/>frontend/app/(dashboard)/settings/page.tsx"] --> API["管理 API 路由<br/>internal/admin/router.go"]
-API --> HSys["系统设置处理器<br/>internal/admin/system/settings.go"]
-API --> HProt["防护设置处理器<br/>internal/admin/handler_protection.go"]
-API --> HBot["Bot 设置处理器<br/>internal/admin/handler_bot.go"]
-API --> HDrop["丢弃策略处理器<br/>internal/admin/handler_drop.go"]
-HSys --> Repo["系统设置仓库<br/>internal/store/repository/system_settings.go"]
-HProt --> Repo
-HBot --> Repo
-HDrop --> Repo
-Repo --> DB["数据库模型<br/>internal/store/system.go"]
-Repo --> Snap["快照构建<br/>internal/snapshot/build.go"]
-Snap --> Runtime["运行时重载<br/>internal/core/runtime.go"]
-Runtime --> Server["数据面监听器协调<br/>internal/app/server.go"]
-Runtime --> PubSub["Redis 配置同步<br/>internal/core/redis/pubsub.go"]
+flowchart TB
+subgraph "前端"
+FEP["设置页<br/>settings/page.tsx<br/>useNetworkConfig 等 SWR 钩子"]
+end
+subgraph "管理面路由"
+RT["RegisterRoutes<br/>internal/admin/router.go"]
+MW["AuthMiddleware + RequireRole<br/>internal/admin/middleware.go"]
+end
+subgraph "system 根包处理器"
+SET["settings.go<br/>键值与重载与健康"]
+NET["network.go<br/>网络/TLS/HTTP2/Redis/日志"]
+IMG["imagery.go<br/>图像转换"]
+RUN["runtime.go<br/>运行态配置"]
+OV["runtime_overrides.go<br/>环境变量覆盖"]
+BK["backup.go<br/>备份与恢复"]
+end
+subgraph "admin 根包处理器"
+AU["admin_users.go<br/>管理员账号"]
+AUTH["auth.go / auth_session.go<br/>登录与会话"]
+end
+subgraph "protect 子包"
+PROT["protect/protection.go<br/>ProtectionConfig"]
+BOT["protect/bot/bot.go<br/>Bot 设置"]
+DROP["protect/drop/drop.go<br/>丢弃策略"]
+end
+subgraph "存储与运行时"
+REPO["repository/setting/system_settings.go"]
+MODEL["store/system.go"]
+CORE["core/runtime.go<br/>修订号与快照重载"]
+PUB["core/redis/pubsub.go<br/>跨节点广播"]
+SNAP["snapshot/snapshot.go"]
+end
+FEP --> RT --> MW
+RT --> SET
+RT --> NET
+RT --> IMG
+RT --> RUN
+RT --> OV
+RT --> BK
+RT --> AU
+RT --> AUTH
+RT --> PROT
+RT --> BOT
+RT --> DROP
+SET --> REPO
+NET --> REPO
+OV --> REPO
+PROT --> REPO
+BOT --> REPO
+DROP --> REPO
+REPO --> MODEL
+SET --> CORE
+CORE --> SNAP
+CORE --> PUB
 ```
 
 **图表来源**
-- [router.go:48-270](file://internal/admin/router.go#L48-L270)
-- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
-- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
-- [system.go:3-14](file://internal/store/system.go#L3-L14)
+- [router.go:89-126](file://internal/admin/router.go#L89-L126)
+- [router.go:149-214](file://internal/admin/router.go#L149-L214)
+- [router.go:375-406](file://internal/admin/router.go#L375-L406)
+- [settings.go:1-216](file://internal/admin/system/settings.go#L1-L216)
+
+| 模块 | 路径 | 行数 | 职责 |
+|------|------|-----:|------|
+| 键值设置与重载 | `internal/admin/system/settings.go` | 216 | 设置 CRUD、受保护键拦截、reload、健康检查 |
+| 网络与 TLS 配置 | `internal/admin/system/network.go` | 818 | 网络/HTTP2/日志/TLS 默认/Redis 配置读写与校验 |
+| 图像转换 | `internal/admin/system/imagery.go` | 127 | ACME 之外的图像处理开关 |
+| 运行态配置 | `internal/admin/system/runtime.go` | 972 | 只读运行态快照与 TLS 能力矩阵 |
+| 环境变量覆盖 | `internal/admin/system/runtime_overrides.go` | 334 | 覆盖表三态读写与诊断 |
+| 备份恢复 | `internal/admin/system/backup.go` | 166 | 配置导出/导入与凭据掩码 |
+| 管理令牌 | `internal/admin/system/apikey/apikey.go` | 150 | API 密钥列表/创建/删除 |
+| 管理员账号 | `internal/admin/admin_users.go` | 246 | 账号 CRUD 与凭据撤销 |
+| 认证与会话 | `internal/admin/auth.go`、`auth_session.go` | 352、89 | 登录、改密、会话列表、强制登出 |
+| 中间件 | `internal/admin/middleware.go` | 334 | 认证、角色、访问日志、安全响应头 |
+| 账号仓库 | `internal/store/repository/authn/admin_account.go` | 85 | 账号创建、角色统计、口令哈希排除 |
+| 设置页 | `frontend/app/(dashboard)/settings/page.tsx` | 918 | 以 SWR 钩子读写网络/TLS/Redis/日志/运行态配置 |
 
 **章节来源**
-- [router.go:48-270](file://internal/admin/router.go#L48-L270)
-- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
-- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
-- [system.go:3-14](file://internal/store/system.go#L3-L14)
+- [settings.go:1-216](file://internal/admin/system/settings.go#L1-L216)
+- [network.go:1-818](file://internal/admin/system/network.go#L1-L818)
+- [runtime.go:1-972](file://internal/admin/system/runtime.go#L1-L972)
+- [runtime_overrides.go:1-334](file://internal/admin/system/runtime_overrides.go#L1-L334)
+- [backup.go:1-166](file://internal/admin/system/backup.go#L1-L166)
+- [apikey.go:1-150](file://internal/admin/system/apikey/apikey.go#L1-L150)
+- [admin_users.go:1-246](file://internal/admin/admin_users.go#L1-L246)
+- [middleware.go:1-334](file://internal/admin/middleware.go#L1-L334)
+- [admin_account.go:1-85](file://internal/store/repository/authn/admin_account.go#L1-L85)
+- [page.tsx:1-40](file://frontend/app/(dashboard)/settings/page.tsx#L1-L40)
 
 ## 核心组件
-- 系统设置 API：提供设置项的增删改查与批量读取，支持热重载触发。
-- 防护设置 API：集中管理请求/错误限流、OWASP 敏感度、维护模式、Bot/CVE/CC 等保护策略。
-- Bot 设置 API：管理 Bot 检测开关、阈值、高风险国家、数据中心/VPN ASN 白名单等。
-- 丢弃策略 API：控制 TCP 连接丢弃策略（基于 Bot/CVE 触发）。
-- 存储与模型：SystemSettings 表用于键值型配置；ProtectionConfig/BotProtectionConfig 等结构体用于复杂配置序列化存储。
-- 快照与热重载：通过快照构建与运行时重载，实现配置变更的原子切换与跨节点同步。
+
+```mermaid
+classDiagram
+class SystemSettings {
++uint id
++string key «唯一索引»
++string value «text»
+}
+class ConfigRevision {
++uint id
++uint64 revision
+}
+class NetworkConfig {
++bool ipv6_enabled
++bool http2_enabled
++bool http3_enabled
++string http3_bind
++bool http3_per_port_enabled
++string default_alpn
++string default_network
+}
+class TLSDefaultConfig {
++string min_version
++string max_version
++string cipher_suites
++string default_alpn
++string curve_preferences
++bool prefer_server_cipher_suites
++bool session_tickets_enabled
++bool allow_0rtt
++bool self_signed_on_ip
+}
+class RedisConfig {
++bool enabled
++string addr
++string password «响应不回显»
++int db
+}
+class LogConfig {
++string level
++string file_path
++bool also_stdout
+}
+SystemSettings --> NetworkConfig : "键 network_config"
+SystemSettings --> TLSDefaultConfig : "键 tls_default_config"
+SystemSettings --> RedisConfig : "键 redis_config"
+SystemSettings --> LogConfig : "键 log_config"
+ConfigRevision --> SystemSettings : "变更后递增修订号"
+```
+
+**图表来源**
+- [system.go:4-34](file://internal/store/system.go#L4-L34)
+- [network.go:26-77](file://internal/admin/system/network.go#L26-L77)
+
+| 配置族 | 存储键 | 读取端点 | 写入端点 | 是否触发 reload |
+|--------|--------|----------|----------|:---------------:|
+| 通用键值 | 任意（非保留键） | `GET /settings` | `POST /settings`、`POST /settings/:key[/update]` | 是 |
+| 网络协议 | `network_config` | `GET /network-config` | `POST /network-config` | 是 |
+| TLS 默认 | `tls_default_config` | `GET /tls-config` | `POST /tls-config` | 是 |
+| HTTP/2 | `http2_config` | `GET /http2-config` | `POST /http2-config` | 是 |
+| 日志 | `log_config` | `GET /log-config` | `POST /log-config` | 否 |
+| Redis | `redis_config` | `GET /redis-config` | `POST /redis-config` | 走 `ReloadRedis` |
+| 图像转换 | `image_transform` | `GET /image-transform` | `POST /image-transform` | 是 |
+| 运行态覆盖 | `runtime_config_overrides` | `GET /runtime-config/env-overrides` | `POST /runtime-config/env-overrides` | 是 |
+| 保护配置 | `protection` | `GET /protection-settings` | `POST /protection-settings` | 是 |
+| Bot 设置 | `bot_settings` | `GET /bot-settings` | `POST /bot-settings/update` | 是 |
+| 丢弃策略 | `drop_policy` | `GET /drop-policy` | `POST /drop-policy/update` | 是 |
+| ACME 配置 | `acme_config` | `GET /certificates/acme/config` | `POST /certificates/acme/config` | 否 |
+
+日志与 ACME 配置两个写入端点的签名不含 `reload`：`UpdateLogConfig(repo)` 只落库（`network.go:266`），`UpdateACMEConfig(repo)` 由 `ACMEManagerStore` 在下次 `Manager()` 读取时按配置缓存键自动重建（`acme.go:182-190`）。
 
 **章节来源**
-- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
-- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
-- [system.go:3-14](file://internal/store/system.go#L3-L14)
+- [system.go:4-34](file://internal/store/system.go#L4-L34)
+- [network.go:26-84](file://internal/admin/system/network.go#L26-L84)
+- [network.go:266](file://internal/admin/system/network.go#L266)
+- [settings.go:18-34](file://internal/admin/system/settings.go#L18-L34)
 
 ## 架构总览
-系统设置 API 的调用链路如下：
 
 ```mermaid
 sequenceDiagram
 participant FE as "前端设置页"
-participant API as "管理 API 路由"
-participant H as "设置处理器"
-participant R as "系统设置仓库"
+participant R as "路由 + 中间件"
+participant H as "system.SetSetting"
+participant G as "受保护键守卫"
+participant P as "SystemSettingsRepo"
 participant DB as "数据库"
-participant RT as "运行时"
-participant SNAP as "快照构建"
+participant CR as "core.ReloadSnapshotWithPrePublish"
+participant SH as "snapshot.Holder"
 participant DP as "数据面监听器"
-FE->>API : 发起设置更新请求
-API->>H : 分派到对应处理器
-H->>R : 写入或更新 SystemSettings
-R->>DB : 持久化键值配置
-H->>RT : 触发 reload()
-RT->>DB : 增加配置修订号
-RT->>SNAP : 构建新快照
-SNAP-->>RT : 返回快照对象
-RT->>DP : 协调监听器热更新
-RT->>RT : 通知其他节点 Redis 配置同步
-H-->>FE : 返回成功响应
+participant PS as "redis.Publish"
+FE->>R : "POST /api/v1/settings/{key}"
+R->>H : "仅 admin 角色"
+H->>G : "rejectProtectedSettingWrite(key)"
+alt 命中保留键
+G-->>FE : "400 + 应走的专用端点"
+else 允许写入
+H->>P : "Set(key,value)"
+P->>DB : "UPSERT system_settings"
+H->>CR : "reload()"
+CR->>DB : "BumpRevision 递增修订号"
+CR->>SH : "构建新快照并 StoreIfNewer"
+SH->>DP : "applySnapshotReload / reconcileListeners"
+CR->>PS : "发布 reload 事件（sourceID 抑制回环）"
+H-->>FE : "200 {key,value}"
+end
 ```
 
 **图表来源**
-- [router.go:180-270](file://internal/admin/router.go#L180-L270)
-- [settings.go:27-99](file://internal/admin/system/settings.go#L27-L99)
-- [system_settings.go:23-34](file://internal/store/repository/system_settings.go#L23-L34)
+- [settings.go:161-182](file://internal/admin/system/settings.go#L161-L182)
+- [migrate.go:141-150](file://internal/store/migrate.go#L141-L150)
+- [runtime.go:211-274](file://internal/core/runtime.go#L211-L274)
+- [snapshot.go:474-487](file://internal/snapshot/snapshot.go#L474-L487)
+
+| 权限组 | 端点数 | 中间件 | 覆盖能力 |
+|--------|-------:|--------|----------|
+| 公开 | 1 | `SecurityHeaders` + `AccessLog` | `GET /api/v1/health` |
+| `api`（仅认证） | 4 | 追加 `AuthMiddleware` | `auth/me`、改本人口令、会话列表 |
+| readonly+ | 13 | 追加 `RequireRole(admin, operator, readonly)` | 全部设置读取、API 密钥列表、账号列表 |
+| admin/operator | 1 | 追加 `RequireRole(admin, operator)` | `POST /reload` |
+| 仅 admin | 19 | 追加 `RequireRole(admin)` | 设置写入、备份恢复、结构化配置写入、账号与令牌治理 |
+| **合计** | **38** | — | — |
+
+`POST /api/v1/auth/sessions/force-logout` 在 `api` 组内额外挂了 `RequireRole(auth.RoleAdmin)`，因此逻辑上属「仅 admin」，统计中计入 admin 组。
+
+**章节来源**
+- [router.go:94-116](file://internal/admin/router.go#L94-L116)
+- [router.go:149-214](file://internal/admin/router.go#L149-L214)
+- [router.go:313](file://internal/admin/router.go#L313)
+- [router.go:375-406](file://internal/admin/router.go#L375-L406)
+- [middleware.go:42-147](file://internal/admin/middleware.go#L42-L147)
 
 ## 详细组件分析
 
-### 系统设置 API（键值型）
-- 接口能力
-  - 列出所有设置项
-  - 获取单个设置项
-  - 新增/更新设置项
-  - 删除设置项
-- 请求与响应
-  - 列表：GET /api/v1/settings
-  - 获取：GET /api/v1/settings/:key
-  - 新增/更新：POST /api/v1/settings 或 /api/v1/settings/:key
-  - 删除：POST /api/v1/settings/:key/delete
-- 错误处理
-  - 参数校验失败返回 400
-  - 未找到返回 404
-  - 其他错误返回 500
-- 生效机制
-  - 写入后调用 reload()，触发快照重建与热重载
+### 端点总表
+
+| 方法 | 路径 | 权限 | 处理器 | 注册行 |
+|------|------|------|--------|-------:|
+| GET | `/api/v1/health` | 公开 | `system.HealthCheck` | 94 |
+| GET | `/api/v1/auth/me` | 已认证 | `MeHandler` | 112 |
+| POST | `/api/v1/auth/change-password` | 已认证 | `ChangeOwnPasswordHandler` | 113 |
+| GET | `/api/v1/auth/sessions` | 已认证 | `ListSessionsHandler` | 115 |
+| POST | `/api/v1/auth/sessions/force-logout` | 仅 admin | `ForceLogoutSessionHandler` | 116 |
+| GET | `/api/v1/settings` | readonly+ | `system.ListSettings` | 149 |
+| GET | `/api/v1/settings/:key` | readonly+ | `system.GetSetting` | 150 |
+| GET | `/api/v1/api-keys` | readonly+ | `adminapikey.ListAPIKeys` | 205 |
+| GET | `/api/v1/admin-users` | readonly+ | `ListAdminUsers` | 207 |
+| GET | `/api/v1/network-config` | readonly+ | `system.GetNetworkConfig` | 208 |
+| GET | `/api/v1/tls-config` | readonly+ | `system.GetTLSDefaultConfig` | 209 |
+| GET | `/api/v1/tls-cipher-suites` | readonly+ | `system.ListCipherSuites` | 210 |
+| GET | `/api/v1/http2-config` | readonly+ | `system.GetHTTP2Config` | 211 |
+| GET | `/api/v1/image-transform` | readonly+ | `system.GetImageTransformConfig` | 212 |
+| GET | `/api/v1/redis-config` | readonly+ | `system.GetRedisConfig` | 213 |
+| GET | `/api/v1/log-config` | readonly+ | `system.GetLogConfig` | 214 |
+| GET | `/api/v1/runtime-config` | readonly+ | `system.GetRuntimeConfig` | 246 |
+| GET | `/api/v1/runtime-config/env-overrides` | readonly+ | `system.ListRuntimeConfigOverrides` | 247 |
+| POST | `/api/v1/reload` | admin/operator | `system.ReloadSnapshot` | 313 |
+| POST | `/api/v1/settings` | 仅 admin | `system.CreateSetting` | 375 |
+| POST | `/api/v1/settings/:key` | 仅 admin | `system.SetSetting` | 376 |
+| POST | `/api/v1/settings/:key/update` | 仅 admin | `system.SetSetting` | 377 |
+| POST | `/api/v1/settings/:key/delete` | 仅 admin | `system.DeleteSetting` | 378 |
+| GET | `/api/v1/backup/export` | 仅 admin | `system.ExportBackup` | 381 |
+| POST | `/api/v1/backup/import` | 仅 admin | `system.ImportBackup` | 382 |
+| POST | `/api/v1/network-config` | 仅 admin | `system.UpdateNetworkConfig` | 390 |
+| POST | `/api/v1/runtime-config/env-overrides` | 仅 admin | `system.UpdateRuntimeConfigOverrides` | 391 |
+| POST | `/api/v1/http2-config` | 仅 admin | `system.UpdateHTTP2Config` | 392 |
+| POST | `/api/v1/image-transform` | 仅 admin | `system.UpdateImageTransformConfig` | 393 |
+| POST | `/api/v1/redis-config` | 仅 admin | `system.UpdateRedisConfig` | 394 |
+| POST | `/api/v1/log-config` | 仅 admin | `system.UpdateLogConfig` | 395 |
+| POST | `/api/v1/tls-config` | 仅 admin | `system.UpdateTLSDefaultConfig` | 396 |
+| POST | `/api/v1/api-keys` | 仅 admin | `adminapikey.CreateAPIKey` | 400 |
+| POST | `/api/v1/api-keys/:id/delete` | 仅 admin | `adminapikey.DeleteAPIKey` | 401 |
+| POST | `/api/v1/admin-users` | 仅 admin | `CreateAdminUser` | 403 |
+| POST | `/api/v1/admin-users/:id/update-password` | 仅 admin | `UpdateAdminPassword` | 404 |
+| POST | `/api/v1/admin-users/:id/update-role` | 仅 admin | `UpdateAdminRole` | 405 |
+| POST | `/api/v1/admin-users/:id/delete` | 仅 admin | `DeleteAdminUser` | 406 |
+
+全部写端点为 POST，PUT 与 DELETE 方法在管理面注册为零，因此上表方法列没有第三种取值。
+
+**章节来源**
+- [router.go:94-116](file://internal/admin/router.go#L94-L116)
+- [router.go:149-214](file://internal/admin/router.go#L149-L214)
+- [router.go:246-247](file://internal/admin/router.go#L246-L247)
+- [router.go:313](file://internal/admin/router.go#L313)
+- [router.go:375-406](file://internal/admin/router.go#L375-L406)
+
+### 受保护键与专用端点
+
+通用 `/settings` 写入前的守卫由两张表决定（`settings.go:13-34`）：
+
+| 键 | 类别 | 应走端点 |
+|----|------|----------|
+| `jwt_secret` | 内部键（不可读写） | — |
+| `seed.api_key_initialized` | 内部键 | — |
+| `protection` | 受保护 | `/api/v1/protection-settings` |
+| `bot_settings` | 受保护 | `/api/v1/bot-settings/update` |
+| `drop_policy` | 受保护 | `/api/v1/drop-policy/update` |
+| `redis_config` | 受保护 | `/api/v1/redis-config` |
+| `runtime_config_overrides` | 受保护 | `/api/v1/runtime-config/env-overrides` |
+| `hpkp_enabled` / `hpkp_value` | 受保护 | `/api/v1/protection-settings` |
+| `hpkp_report_only_enabled` / `hpkp_report_only_value` | 受保护 | `/api/v1/protection-settings` |
+| `network_config` | 受保护 | `/api/v1/network-config` |
+| `http2_config` | 受保护 | `/api/v1/http2-config` |
+| `log_config` | 受保护 | `/api/v1/log-config` |
+| `tls_default_config` | 受保护 | `/api/v1/tls-config` |
+| `acme_config` | 受保护 | `/api/v1/certificates/acme/config` |
+
+内部键在读取侧也被抹掉：`ListSettings` 过滤后才返回，`GetSetting` 对内部键直接返回 404（`settings.go:143-146`），因此 `jwt_secret` 的值不可能从设置接口取得。
+
+**章节来源**
+- [settings.go:13-58](file://internal/admin/system/settings.go#L13-L58)
+- [settings.go:83-107](file://internal/admin/system/settings.go#L83-L107)
+- [settings.go:140-155](file://internal/admin/system/settings.go#L140-L155)
+- [system.go:11-27](file://internal/store/system.go#L11-L27)
+
+### 请求参数表
+
+| 端点 | 参数 | 位置 | 类型 | 必填 | 约束与默认 |
+|------|------|------|------|:----:|------------|
+| `GET /settings` | — | — | — | — | 无分页，返回全部非内部键 |
+| `POST /settings` | `key` | body | string | 是 | 空值 400 `key is required` |
+| `POST /settings` | `value` | body | string | 否 | 原样落库，可为空串 |
+| `POST /settings/:key/update` | `value` | body | string | 是 | 缺 `value` 键按空串处理 |
+| `POST /reload` | — | — | — | — | 无请求体 |
+| `POST /network-config` | 7 字段 | body | 混合 | 否 | `default_alpn` 未显式给出时按 HTTP/2、HTTP/3 开关派生 |
+| `POST /tls-config` | 9 字段 | body | 混合 | 否 | `allow_0rtt` 为指针，未提供即不落值 |
+| `POST /http2-config` | 12 字段 | body | int/bool | 是 | 逐项区间校验，越界 400 |
+| `POST /redis-config` | `enabled`/`addr`/`password`/`db` | body | 混合 | 否 | `password` 缺省表示不改写；会先连通性探测 |
+| `POST /log-config` | `level`/`file_path`/`also_stdout` | body | 混合 | 否 | 不触发 reload |
+| `POST /runtime-config/env-overrides` | 覆盖表 | body | map | 是 | 按注册表的类型与区间校验 |
+| `POST /backup/import` | `replace_mode` | body | bool | 否 | 真则先清空配置表再导入 |
+| `POST /api-keys` | `name` | body | string | 否 | 空则 `unnamed`；上限 128 字节 |
+| `POST /admin-users` | `username`/`password`/`role` | body | string | 是/是/否 | 用户名 ≤64；口令 ≥8；角色缺省 `readonly` |
+| `POST /admin-users/:id/update-role` | `role` | body | string | 是 | 降级最后一个 admin 会被拒绝 |
+
+**章节来源**
+- [settings.go:109-137](file://internal/admin/system/settings.go#L109-L137)
+- [network.go:95-170](file://internal/admin/system/network.go#L95-L170)
+- [network.go:312-412](file://internal/admin/system/network.go#L312-L412)
+- [network.go:586-618](file://internal/admin/system/network.go#L586-L618)
+- [runtime_overrides.go:255-334](file://internal/admin/system/runtime_overrides.go#L255-L334)
+- [backup.go:117-140](file://internal/admin/system/backup.go#L117-L140)
+- [apikey.go:46-80](file://internal/admin/system/apikey/apikey.go#L46-L80)
+- [admin_users.go:40-88](file://internal/admin/admin_users.go#L40-L88)
+
+### 响应字段表
+
+`GET /api/v1/runtime-config` 是唯一把「运行态真相」整体摊开的端点：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `revision` | uint64 | 当前生效快照的修订号 |
+| `config_diagnostics` | array | 快照构建期诊断条目 |
+| `db_driver` | string | 数据库驱动 |
+| `db_dsn` / `log_db_dsn` | string | 经 `maskDSN` 掩码后的连接串 |
+| `redis_enabled` / `redis_addr` / `redis_db` | 混合 | 来自运行时状态与覆盖链 |
+| `admin_bind` / `admin_static_dir` / `data_dir` | string | 管理面绑定与静态目录 |
+| `cve_enabled` / `cve_feed_enabled` / `cve_feed_interval` | 混合 | CVE 子系统运行态 |
+| `drop_enabled` | bool | 由设置行与运行时状态合并派生 |
+| `hsts_enabled` / `xss_protection_enabled` / `expect_ct_*` / `hpkp_*` | 混合 | 安全响应头运行态 |
+| `response_compression_*` / `brotli_enabled` | 混合 | 压缩协商运行态 |
+| `upstream_transport_pools` | object | HTTP/h2c/HTTP3 传输与客户端池计数 |
+| `tls_capabilities` | array | 每项含 `key`、`label`、`status`、`detail`、`missing` |
+| `source` / `editable` / `restart_required` | 固定值 | 分别为 `runtime`、`false`、`false` |
+
+`GET /api/v1/redis-config` 返回 `RedisConfigResponse`：不含 `password` 真值，只给 `password_set`、`redis_password_set` 布尔标记，并附 `source` 与 `restart_required`。
+`GET /api/v1/runtime-config/env-overrides` 返回 `groups`、`items`、`warnings`、`stored` 四段；`items[]` 中 `sensitive` 为真的键其 `env_value`、`value`、`effective_value` 均不回显真值，改由 `secret_set` 表示是否已配置。
+
+**章节来源**
+- [runtime.go:85-200](file://internal/admin/system/runtime.go#L85-L200)
+- [network.go:59-77](file://internal/admin/system/network.go#L59-L77)
+- [network.go:524-537](file://internal/admin/system/network.go#L524-L537)
+- [runtime_overrides.go:30-110](file://internal/admin/system/runtime_overrides.go#L30-L110)
+
+### 错误码表
+
+| 状态码 | 触发条件 | 响应体关键字 | 依据 |
+|-------:|----------|--------------|------|
+| 400 | 请求体 JSON 非法 | `{"error":"<绑定错误>"}` | `settings.go:116-119` |
+| 400 | `key` 为空 | `key is required` | `settings.go:121-123` |
+| 400 | 写内部键 | `internal setting cannot be managed via this endpoint` | `settings.go:42-48` |
+| 400 | 写受保护键 | `setting is managed by a dedicated endpoint` + `endpoint` | `settings.go:49-56` |
+| 400 | HTTP/2 参数越界 | `http2 … must be between …` | `network.go:586-618` |
+| 400 | Redis 地址非法或探测失败 | `validateRedisConfig`/`probeRedisConfig` 文本 | `network.go:538-576` |
+| 400 | 备份版本缺失或过高 | `missing or invalid backup version`、`unsupported backup version` | `backup.go:122-130` |
+| 400 | 用户名/口令/角色不合规 | `password must be at least 8 characters` 等 | `admin_users.go:48-70` |
+| 401 | 令牌无效或 API 密钥归属账号已删 | `invalid or expired token`、`api key owner account no longer exists` | `middleware.go:99`、`middleware.go:112` |
+| 403 | 角色不足 | `access denied: insufficient permissions` | `middleware.go:141` |
+| 404 | 设置键不存在或为内部键 | `setting not found` | `settings.go:144-150` |
+| 409 | 用户名重复 | `username already exists` | `admin_users.go:73` |
+| 500 | 落库或 reload 失败 | `config applied but reload failed: …` | `settings.go:133`、`settings.go:177` |
+| 503 | JWT 黑名单不可用 | `authentication service unavailable` | `middleware.go:86` |
+
+**章节来源**
+- [settings.go:42-180](file://internal/admin/system/settings.go#L42-L180)
+- [network.go:538-618](file://internal/admin/system/network.go#L538-L618)
+- [backup.go:122-145](file://internal/admin/system/backup.go#L122-L145)
+- [admin_users.go:48-115](file://internal/admin/admin_users.go#L48-L115)
+- [middleware.go:79-147](file://internal/admin/middleware.go#L79-L147)
+
+### 配置项与默认值
+
+`load*Config` 系列在键缺失或 JSON 解析失败时回落内置默认值，因此 GET 永远返回完整结构：
+
+| 配置项 | 默认值 | 派生规则 |
+|--------|--------|----------|
+| `ipv6_enabled` | `false` | — |
+| `http2_enabled` | `true` | 参与 ALPN 派生 |
+| `http3_enabled` | `true` | 参与 ALPN 派生；关闭时 `http3_bind` 不生效 |
+| `http3_bind` | `:443` | 为空或非法时回落 `:443` |
+| `http3_per_port_enabled` | `false` | — |
+| `default_alpn` | 由开关派生 | 未显式提供时 `DefaultALPNForProtocolSwitches(http2, http3)` |
+| `default_network` | `tcp` | 非法值归一化失败回落 `tcp` |
+| `min_version` / `max_version` | `TLS10` / `TLS13` | 空串回落同名默认 |
+| `curve_preferences` | `X25519,CurveP256,CurveP384` | 空串回落 |
+| `prefer_server_cipher_suites` | `true` | — |
+| `session_tickets_enabled` | `true` | 指针缺省即 true，显式 `false` 才关闭 |
+| `allow_0rtt` | 不落值 | 指针缺省不写入 |
+| `self_signed_on_ip` | `true` | IP 直访时按需生成自签证书 |
+| `read_timeout_seconds` | 60 | HTTP/2 族 |
+| `max_concurrent_streams` | 100 | 区间上限见 `MaxHTTP2ConcurrentStreams` |
+| `max_read_frame_size` | 65536 | `64 << 10` |
+| `idle_timeout_seconds` | 180 | — |
+| `max_upload_buffer_per_connection` | 524288 | `512 << 10` |
+| `max_upload_buffer_per_stream` | 262144 | `256 << 10` |
+| `max_header_bytes` | 1048576 | `1 << 20` |
+| `max_header_fields` | 100 | — |
+| `max_handlers` | 0 | 0 表示不限制 |
+| `max_queued_control_frames` | 10000 | — |
+| `level`（日志） | 取进程当前级别 | 空串回落 `logger.GetLevel()` |
+
+**章节来源**
+- [network.go:620-702](file://internal/admin/system/network.go#L620-L702)
+- [network.go:757-768](file://internal/admin/system/network.go#L757-L768)
+- [http2.go:18-48](file://internal/snapshot/http2.go#L18-L48)
+- [network.go:26-56](file://internal/admin/system/network.go#L26-L56)
+
+### 热重载与跨节点同步
 
 ```mermaid
-sequenceDiagram
-participant FE as "前端"
-participant API as "路由"
-participant H as "Create/Set/Delete"
-participant R as "SystemSettingsRepo"
-participant DB as "数据库"
-participant RT as "运行时"
-FE->>API : POST /api/v1/settings
-API->>H : CreateSetting
-H->>R : Set(key,value)
-R->>DB : INSERT/UPDATE
-H->>RT : reload()
-H-->>FE : 201/200/204
+stateDiagram-v2
+[*] --> 稳定
+稳定 --> 已落库 : "写端点提交成功"
+已落库 --> 修订递增 : "BumpRevision"
+修订递增 --> 快照构建
+快照构建 --> 冲突丢弃 : "StoreIfNewer 判定代次过旧"
+冲突丢弃 --> 稳定 : "旧快照继续服务"
+快照构建 --> 已发布 : "CAS 二次核对通过"
+已发布 --> 监听器协调 : "applySnapshotReload / reconcileListeners"
+监听器协调 --> 广播 : "Redis 发布 reload（2 秒超时）"
+广播 --> 稳定 : "其他节点按 sourceID 抑制回环后重载"
+已落库 --> 报错回显 : "reload 失败"
+报错回显 --> 稳定 : "500 且响应回显 item"
 ```
 
 **图表来源**
-- [router.go:218-234](file://internal/admin/router.go#L218-L234)
-- [settings.go:27-99](file://internal/admin/system/settings.go#L27-L99)
-- [system_settings.go:23-34](file://internal/store/repository/system_settings.go#L23-L34)
+- [migrate.go:141-150](file://internal/store/migrate.go#L141-L150)
+- [runtime.go:211-274](file://internal/core/runtime.go#L211-L274)
+- [snapshot.go:474-487](file://internal/snapshot/snapshot.go#L474-L487)
+- [pubsub.go:16-116](file://internal/core/redis/pubsub.go#L16-L116)
+
+Redis 频道为 `openwaf:config:reload`，发布带 2 秒超时，消息内含来源节点 ID 用于抑制回环；未配置 Redis 时该步骤整体跳过，不影响本机生效。
 
 **章节来源**
-- [settings.go:11-99](file://internal/admin/system/settings.go#L11-L99)
-- [router.go:218-234](file://internal/admin/router.go#L218-L234)
-- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
+- [pubsub.go:16](file://internal/core/redis/pubsub.go#L16)
+- [pubsub.go:77](file://internal/core/redis/pubsub.go#L77)
+- [pubsub.go:114-116](file://internal/core/redis/pubsub.go#L114-L116)
+- [runtime.go:211-274](file://internal/core/runtime.go#L211-L274)
 
-### 防护设置 API（复杂结构）
-- 设置项分类
-  - 请求/错误限流：窗口、阈值、动作
-  - OWASP：内置规则集开关与敏感度、命中动作
-  - 维护模式：全局状态码与 HTML
-  - Bot 检测：开关
-  - IP 自动封禁：阈值、窗口、时长
-  - CC 保护：等待室、自定义规则
-  - 模块级 OWASP 敏感度：按模块键映射
-  - CVE 检测：开关与动作
-  - 登录安全策略：密码最小长度、最大尝试次数、锁定时长
-- 接口
-  - 获取：GET /api/v1/protection-settings
-  - 更新：POST /api/v1/protection-settings
-- 特殊处理
-  - 前端可能以对象/数组形式传入，后端会转换为字符串字段再入库
-  - 响应时将字符串字段反序列化为对象/数组返回给前端
+### 备份与恢复
 
-```mermaid
-flowchart TD
-Start(["接收 POST /api/v1/protection-settings"]) --> Bind["绑定请求体为通用映射"]
-Bind --> MarshalPlain["序列化为标准结构体"]
-MarshalPlain --> CheckModules{"owasp_modules 是否为对象?"}
-CheckModules --> |是| SetModules["写入字符串字段"]
-CheckModules --> |否| Next1["跳过"]
-Next1 --> CheckCC{"cc_rules 是否为数组?"}
-CheckCC --> |是| SetCC["写入字符串字段"]
-CheckCC --> |否| Next2["跳过"]
-SetModules --> Next2
-SetCC --> Next2
-Next2 --> Store["写入 'protection' 键"]
-Store --> Reload["触发 reload()"]
-Reload --> Done(["返回响应"])
-```
+导出走 `store.ExportBackup`，返回 `Content-Disposition: attachment` 的 JSON；导入在事务中执行，失败整体回滚，成功后按顺序执行失效回调再 `reload()`。router.go 的接线在失效回调里同时做三件事：CVE 规范快照失效、OWASP 读快照失效、`dataplane.RevokeAllAccessSessions()` 撤销数据面访问会话——库里删掉用户不会让旧令牌失效，因此导入必须当作一次权限重置。
 
-**图表来源**
-- [handler_protection.go:60-106](file://internal/admin/handler_protection.go#L60-L106)
-- [models.go:245-318](file://internal/store/models.go#L245-L318)
+导入成功返回 `status`、`replace_mode`、`sites`、`certificates`、`rules`、`ip_entries` 六字段，仅统计条数，不回填内容。
 
 **章节来源**
-- [handler_protection.go:21-106](file://internal/admin/handler_protection.go#L21-L106)
+- [backup.go:30-48](file://internal/admin/system/backup.go#L30-L48)
+- [backup.go:117-166](file://internal/admin/system/backup.go#L117-L166)
+- [router.go:382-388](file://internal/admin/router.go#L382-L388)
 
-### Bot 设置 API
-- 设置项
-  - 开关、评分阈值、高风险国家列表、数据中心/VPN ASN 列表、GeoIP 库路径
-- 接口
-  - 获取：GET /api/v1/bot-settings
-  - 更新：POST /api/v1/bot-settings/update
-- 生效机制
-  - 更新后写入 bot_settings 键并触发 reload()
+### 管理令牌与账号
 
-**章节来源**
-- [handler_bot.go:35-102](file://internal/admin/handler_bot.go#L35-L102)
-- [router.go:177-178](file://internal/admin/router.go#L177-L178)
+API 密钥必须挂在某个账号下：`CreateAPIKey` 从中间件写入的 `auth_username` 反查账号 ID，取不到账号即 401/403，系统不存在无主令牌；明文 token 只在创建的本次响应中出现一次，此后列表接口只回显元数据。
 
-### 丢弃策略 API
-- 设置项
-  - 开关、Bot 评分阈值、CVE 自动丢弃（严重/高）
-- 接口
-  - 获取：GET /api/v1/drop-policy
-  - 更新：POST /api/v1/drop-policy/update
-- 生效机制
-  - 更新后写入 drop_policy 键并触发 reload()
+账号治理的三条撤销动作（改密、改角色、删除）都会调用 `revokeUserCredentials`，把该用户的访问令牌与刷新链一并作废；角色降级还会先统计 admin 人数，避免把最后一个管理员降级导致无人可管理。
 
 **章节来源**
-- [handler_drop.go:41-98](file://internal/admin/handler_drop.go#L41-L98)
-- [router.go:199-200](file://internal/admin/router.go#L199-L200)
+- [apikey.go:26-80](file://internal/admin/system/apikey/apikey.go#L26-L80)
+- [admin_users.go:95-201](file://internal/admin/admin_users.go#L95-L201)
+- [auth_revocation.go:1-28](file://internal/admin/auth_revocation.go#L1-L28)
+- [admin_account.go:14-81](file://internal/store/repository/authn/admin_account.go#L14-L81)
+- [middleware.go:103-121](file://internal/admin/middleware.go#L103-L121)
 
-### 设置值验证机制
-- 后端启动时的环境变量配置验证
-  - 数据库驱动必须为 sqlite/mysql/postgres
-  - DSN 不可为空
-  - 管理端绑定地址需为有效的 host:port
-  - Redis 地址若提供则需为有效的 host:port
-  - 提供常见误配警告（如 sqlite 驱动却使用 MySQL/PG DSN）
-- 设置项写入层面
-  - 系统设置键值 API 对 key 的存在性进行基础校验
-  - 复杂结构（如防护设置）在入库前进行 JSON 格式校验与字段转换
+### 脱敏矩阵
 
-**章节来源**
-- [config_validate.go:11-47](file://internal/core/config_validate.go#L11-L47)
-- [config.go:113-182](file://internal/core/config.go#L113-L182)
-- [settings.go:35-42](file://internal/admin/system/settings.go#L35-L42)
-- [handler_protection.go:64-75](file://internal/admin/handler_protection.go#L64-L75)
-
-### 设置生效机制
-- 热更新
-  - 所有写入操作完成后调用 reload()，增加配置修订号并重建快照
-  - 将新快照原子替换旧快照，并根据新配置重新配置限流、IP 黑名单与数据面监听器
-  - 通过 Redis 配置同步通道向其他节点广播"重载"事件，确保多节点一致
-- 重启要求
-  - 当前实现主要通过热重载完成，无需进程重启
-- 回滚策略
-  - 代码未实现自动回滚；可通过恢复历史快照或回退到上一个有效配置键值实现手动回滚
-
-```mermaid
-sequenceDiagram
-participant RT as "运行时"
-participant DB as "数据库"
-participant SNAP as "快照"
-participant DP as "数据面"
-participant PUB as "Redis"
-RT->>DB : 增加配置修订号
-RT->>SNAP : Build(snapshot)
-SNAP-->>RT : 返回新快照
-RT->>RT : 替换原子指针
-RT->>DP : 重新配置监听器/限流/IP 黑名单
-RT->>PUB : Publish reload
-PUB-->>RT : 订阅节点收到 reload 并重载
-```
-
-**图表来源**
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
+| 对象 | 出现位置 | 处理方式 |
+|------|----------|----------|
+| `redis_config` 的 `password` | `GET /settings`、`GET /settings/:key`、备份导出 | JSON 内该键替换为 `[redacted]` |
+| `jwt_secret`、`seed.api_key_initialized` | 全部读取路径 | 整行过滤 / 404 |
+| DSN | `GET /runtime-config` | `maskDSN` 掩码后输出 |
+| 敏感环境变量键 | `GET /runtime-config/env-overrides` | `sensitive=true` 时不回显真值，仅 `secret_set` |
+| API 密钥明文 | 仅创建响应一次 | 列表与后续读取不含明文 |
+| 管理员口令哈希 | `GET /admin-users` | 模型 `json:"-"` 排除 |
+| 威胁情报认证头 | 列表（非 admin 角色） | 保留前 4 位加 `***` |
+| OAuth `client_secret` | 备份导出 | 掩码后写入备份，换机导入需重新录入 |
+| 示例值 | 本文所有围栏与表格 | 一律写作 `{占位}` |
 
 **章节来源**
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
-
-### 配置示例与推荐设置
-- 环境变量（启动时）
-  - MY_OPENWAF_DB_DRIVER：数据库驱动（sqlite/mysql/postgres）
-  - MY_OPENWAF_DSN/MY_OPENWAF_DB：数据库连接串
-  - MY_OPENWAF_DATA：数据目录（sqlite 默认使用）
-  - MY_OPENWAF_ADMIN_BIND：管理端绑定地址（默认 :9443）
-  - MY_OPENWAF_REDIS_ADDR/PASSWORD/DB：Redis 连接信息
-  - MY_OPENWAF_GEOIP_DB：GeoIP 库路径
-  - MY_OPENWAF_BOT_THRESHOLD：Bot 评分阈值
-  - MY_OPENWAF_CVE_ENABLED/FEED_ENABLED/FEED_INTERVAL/NVD_API_KEY/AUTO_APPROVE：CVE 功能开关与同步间隔、密钥、自动审批
-  - MY_OPENWAF_DROP_ENABLED/DROP_BOT_THRESHOLD：丢弃策略开关与阈值
-- 前端设置页
-  - 通用设置页包含"防护配置"、"控制台管理"、"系统日志"三大标签页
-  - "防护配置"支持证书管理、拦截页面与日志清理策略
-  - "控制台管理"支持 API 密钥与登录安全策略（密码长度、最大尝试次数、锁定时长）
-
-**章节来源**
-- [config.go:113-182](file://internal/core/config.go#L113-L182)
-- [page.tsx:650-696](file://frontend/app/(dashboard)/settings/page.tsx#L650-L696)
-
-### 配置备份与恢复
-- 备份
-  - SystemSettings 表记录了所有键值型配置，可直接导出该表作为配置备份
-  - 防护设置等复杂结构以 JSON 字符串形式存储于 protection/bot_settings/drop_policy 等键下
-- 恢复
-  - 通过导入相同键值即可恢复配置
-  - 若需要回滚，可先写入历史版本的键值，然后触发 reload() 生效
-
-**章节来源**
-- [system.go:3-14](file://internal/store/system.go#L3-L14)
-- [system_settings.go:15-43](file://internal/store/repository/system_settings.go#L15-L43)
-
-### 配置变更的影响分析与最佳实践
-- 影响分析
-  - 防护设置：直接影响限流、OWASP、Bot/CVE/CC 等策略，变更后需关注 QPS、误判率与合规性
-  - Bot 设置：调整阈值与 ASN 列表会影响 Bot 识别准确率与误伤
-  - 丢弃策略：影响异常流量处置策略，需结合业务容忍度评估
-  - 热更新：变更即刻生效，建议在低峰期执行并观察指标
-- 最佳实践
-  - 变更前先在测试环境验证
-  - 使用"保存但不立即上线"的流程，逐步放量
-  - 结合日志与告警监控变更后的效果
-  - 对关键参数（如 Bot 阈值、限流窗口/阈值）建立基线与回退预案
+- [settings.go:60-92](file://internal/admin/system/settings.go#L60-L92)
+- [runtime.go:160-170](file://internal/admin/system/runtime.go#L160-L170)
+- [runtime_overrides.go:30-80](file://internal/admin/system/runtime_overrides.go#L30-L80)
+- [backup.go:38-88](file://internal/admin/system/backup.go#L38-L88)
+- [apikey.go:76-80](file://internal/admin/system/apikey/apikey.go#L76-L80)
+- [admin_users.go:21-31](file://internal/admin/admin_users.go#L21-L31)
 
 ## 依赖关系分析
 
 ```mermaid
 graph LR
-A["路由注册<br/>router.go"] --> B["系统设置处理器<br/>settings.go"]
-A --> C["防护设置处理器<br/>handler_protection.go"]
-A --> D["Bot 设置处理器<br/>handler_bot.go"]
-A --> E["丢弃策略处理器<br/>handler_drop.go"]
-B --> F["系统设置仓库<br/>system_settings.go"]
-C --> F
-D --> F
-E --> F
-F --> G["模型定义<br/>system.go"]
-F --> H["快照构建<br/>build.go"]
-H --> I["运行时重载<br/>runtime.go"]
-I --> J["数据面协调<br/>server.go"]
-I --> K["Redis 配置同步<br/>pubsub.go"]
+RT["router.go"] --> SET["system/settings.go"]
+RT --> NET["system/network.go"]
+RT --> OV["system/runtime_overrides.go"]
+RT --> BK["system/backup.go"]
+RT --> AU["admin_users.go"]
+RT --> AUTH["auth.go / auth_session.go"]
+RT --> PROT["protect/protection.go"]
+SET --> SREPO["repository/setting/system_settings.go"]
+NET --> SREPO
+OV --> SREPO
+PROT --> SREPO
+SREPO --> MODEL["store/system.go"]
+SET --> CORE["core/runtime.go"]
+BK --> CORE
+PROT --> CORE
+CORE --> SNAP["snapshot/snapshot.go"]
+CORE --> PUB["core/redis/pubsub.go"]
+AU --> ACCT["repository/authn/admin_account.go"]
 ```
 
 **图表来源**
-- [router.go:48-270](file://internal/admin/router.go#L48-L270)
-- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
-- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
-- [system.go:3-14](file://internal/store/system.go#L3-L14)
+- [router.go:89-126](file://internal/admin/router.go#L89-L126)
+- [settings.go:1-216](file://internal/admin/system/settings.go#L1-L216)
+- [network.go:1-120](file://internal/admin/system/network.go#L1-L120)
+
+| 上游 | 下游 | 依赖形式 | 缺失后果 |
+|------|------|----------|----------|
+| `system/settings.go` | `SystemSettingsRepo` | 键值读写 | 500 |
+| `system/settings.go` | `reload` 回调 | 注入闭包 | 已落库不生效 |
+| `system/network.go` | `snapshot` 归一化函数 | ALPN/网络/HTTP2 规范化 | 回落默认值 |
+| `system/backup.go` | `store.ExportBackup`/`ImportBackup` | 事务导入 | 400/500 |
+| `system/backup.go` | `threatintel.MaskAuthHeaderValue` | 凭据掩码 | 备份泄露面扩大 |
+| `admin_users.go` | `revokeUserCredentials` | 凭据撤销 | 旧令牌继续可用 |
+| `middleware.go` | `auth.TokenManager` | JWT 校验 | 黑名单不可用时 503 |
 
 **章节来源**
-- [router.go:48-270](file://internal/admin/router.go#L48-L270)
-- [settings.go:11-117](file://internal/admin/system/settings.go#L11-L117)
-- [system_settings.go:9-44](file://internal/store/repository/system_settings.go#L9-L44)
-- [system.go:3-14](file://internal/store/system.go#L3-L14)
+- [backup.go:56-88](file://internal/admin/system/backup.go#L56-L88)
+- [network.go:620-660](file://internal/admin/system/network.go#L620-L660)
+- [middleware.go:42-147](file://internal/admin/middleware.go#L42-L147)
 
 ## 性能考虑
-- 快照缓存：本地进程内缓存提升快照访问性能，避免重复构建
-- 热重载成本：快照构建与监听器重建有一定 CPU/内存开销，建议在低峰期执行
-- Redis 同步：跨节点同步通过发布订阅实现，注意网络抖动对同步延迟的影响
-- 查询优化：系统设置查询按 key 精确匹配，复杂结构解析仅在写入/读取时发生
+
+- 每次写操作都会 bump 修订号并重建快照，批量调整应在一次请求内提交完整结构，而不是逐键写入。
+- `GET /settings` 无分页，返回全部非内部键；键数量可控，但前端不应把它当轮询接口。
+- `runtime-config` 会读取传输池统计与 TLS 能力矩阵，属较重的只读端点，适合排障时按需调用。
+- Redis 配置写入包含一次同步连通性探测，失败即拒绝写入，避免把不可达地址落库后反复重载。
+- 备份导入在单事务中完成，配置表规模越大事务持锁越久，建议在低峰执行。
 
 **章节来源**
-- [runtime.go:82-111](file://internal/core/runtime.go#L82-L111)
-- [server.go:220-260](file://internal/app/server.go#L220-L260)
-- [pubsub.go:52-76](file://internal/core/redis/pubsub.go#L52-L76)
+- [network.go:554-576](file://internal/admin/system/network.go#L554-L576)
+- [backup.go:117-166](file://internal/admin/system/backup.go#L117-L166)
+- [runtime.go:155-200](file://internal/admin/system/runtime.go#L155-L200)
 
-## 故障排除指南
-- 常见错误
-  - 400：请求体格式错误或必填字段缺失
-  - 404：设置项不存在
-  - 500：数据库写入失败或 reload 失败
-- 排查步骤
-  - 检查请求体是否符合 JSON 格式
-  - 确认 key 是否正确
-  - 查看后端日志中的 reload 失败原因
-  - 如涉及 Redis 同步，检查 Redis 连接与频道订阅状态
-- 回滚方法
-  - 通过恢复历史键值或回退到上一版本配置
+## 故障排查指南
+
+| 症状 | 成因 | 处置 |
+|------|------|------|
+| 写 `/settings` 返回 400 且带 `endpoint` | 该键由专用端点管辖 | 按响应提示改用专用端点 |
+| 改 `jwt_secret` 返回 404 | 内部键读取也被屏蔽 | 该键不经 API 管理，属启动期解析 |
+| 设置保存成功但行为没变 | reload 失败 | 看响应是否 `config applied but reload failed`，再 `POST /reload` 复现 |
+| 多节点只有一台生效 | Redis 未配置或广播超时 | 检查 `redis-config` 的 `enabled` 与 `password_set` |
+| `tls-config` 保存报 400 | HTTP/2 或版本参数越界 | 按 `must be between` 文本调整区间 |
+| 日志级别改了不生效 | `log-config` 不触发 reload | 该端点只落库，级别由进程读取 |
+| 导入备份后旧登录仍有效？ | 会话在数据面内存/Redis | 导入已内置撤销全部访问会话，若异常请核对日志 |
+| 最后一个 admin 无法降级 | 保护逻辑 | 先新建 admin 账号再降级 |
+| 备份里没有订阅令牌 | 导出即掩码 | 目标环境重新录入凭据，属预期行为 |
 
 **章节来源**
-- [settings.go:35-42](file://internal/admin/system/settings.go#L35-L42)
-- [handler_protection.go:72-75](file://internal/admin/handler_protection.go#L72-L75)
-- [handler_bot.go:60-63](file://internal/admin/handler_bot.go#L60-L63)
-- [handler_drop.go:59-63](file://internal/admin/handler_drop.go#L59-L63)
+- [settings.go:41-58](file://internal/admin/system/settings.go#L41-L58)
+- [network.go:266-300](file://internal/admin/system/network.go#L266-L300)
+- [backup.go:117-166](file://internal/admin/system/backup.go#L117-L166)
+- [admin_users.go:118-140](file://internal/admin/admin_users.go#L118-L140)
 
 ## 结论
-系统设置 API 提供了从键值型到复杂结构化的统一配置管理能力，结合热重载与跨节点同步，实现了配置的即时生效与一致性保障。建议在生产环境中遵循"小步快跑、可观测、可回滚"的原则，确保变更可控、可追踪。
 
-## 附录
-- 设置项分类速览
-  - 安全设置：Bot 设置、丢弃策略、登录安全策略
-  - 监控设置：防护设置（限流/OWASP/维护模式/CC/CVE）
-  - 日志设置：日志保留策略（通过前端设置页配置）
-  - 网络配置：管理端绑定地址、Redis 连接（环境变量）
-- 快照与配置结构
-  - 快照包含站点、TLS、防护配置等，防护配置来源于 SystemSettings 中的 protection 键
+系统设置 API 的核心价值在「单一真源」：通用键值端点主动放弃对结构化配置的写入权，把每类配置固定到一个专用端点；运行态另有只读的 `runtime-config` 与 `env-overrides` 用于核对真实生效值。写路径统一以 reload 收尾，失败时不回滚落库而是显式回显对象，让「已保存但未生效」成为可判定状态而非静默不一致。
 
 **章节来源**
-- [snapshot.go:52-64](file://internal/snapshot/snapshot.go#L52-L64)
-- [build.go:203-213](file://internal/snapshot/build.go#L203-L213)
-- [models.go:245-318](file://internal/store/models.go#L245-L318)
+- [本节为总结，无需特定文件来源]
+
+## 附录
+
+### 端点能力速查
+
+| 能力 | 端点 | 权限 |
+|------|------|------|
+| 键值读 | `GET /settings`、`GET /settings/:key` | readonly+ |
+| 键值写 | `POST /settings`、`POST /settings/:key`、`…/update`、`…/delete` | 仅 admin |
+| 结构化配置 | `network-config`、`tls-config`、`http2-config`、`log-config`、`redis-config`、`image-transform` | 读 readonly+ / 写仅 admin |
+| 运行态核对 | `runtime-config`、`runtime-config/env-overrides` | readonly+（写仅 admin） |
+| 手动重载 | `POST /reload` | admin/operator |
+| 备份恢复 | `backup/export`、`backup/import` | 仅 admin |
+| 令牌与账号 | `api-keys*`、`admin-users*` | 读 readonly+ / 写仅 admin |
+| 会话治理 | `auth/sessions`、`auth/sessions/force-logout` | 已认证 / 仅 admin |
+| 健康 | `GET /health` | 公开 |
+
+**章节来源**
+- [router.go:94-116](file://internal/admin/router.go#L94-L116)
+- [router.go:149-214](file://internal/admin/router.go#L149-L214)
+- [router.go:375-406](file://internal/admin/router.go#L375-L406)
+
+### 字段命名与序列化约定
+
+| 约定 | 口径 | 示例 |
+|------|------|------|
+| JSON 字段名 | `snake_case`（全库统一） | `http3_bind`、`renew_before_days` |
+| 布尔三态 | 配置体指针字段：缺键=不改、`true`=启用、`false`=关闭 | `allow_0rtt`、`session_tickets_enabled` |
+| 派生默认 | 缺键时由其他开关派生，不写死常量 | `default_alpn` 由 HTTP/2、HTTP/3 派生 |
+| 只读标记 | 响应固定字段表明不可编辑 | `editable=false`、`source="runtime"` |
+| 区间边界 | 显式 `null` 而非省略键，便于前端判定 | `min`、`max` |
+| 机密 | 真值零出现，示例用占位 | `{REDIS 口令}`、`{DSN}` |
+
+**章节来源**
+- [network.go:26-56](file://internal/admin/system/network.go#L26-L56)
+- [runtime_overrides.go:44-52](file://internal/admin/system/runtime_overrides.go#L44-L52)
+- [runtime.go:188-196](file://internal/admin/system/runtime.go#L188-L196)
+
+### 关联文档
+
+- [证书管理 API](证书管理 API.md)：`acme_config` 键的专用端点
+- [策略管理 API](策略管理 API.md)：`protection` 键的保护配置语义
+- [机器人保护 API](机器人保护 API.md)：`bot_settings` 键
+- [阻断策略 API](阻断策略 API.md)：`drop_policy` 键
+- [认证授权机制](REST API 设计规范/认证授权机制.md)：JWT 与 API 密钥校验细节
+
+**章节来源**
+- [本节为总结，无需特定文件来源]

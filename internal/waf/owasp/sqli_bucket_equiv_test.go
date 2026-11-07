@@ -149,7 +149,7 @@ func TestSQLiGateBucketEquivalence(t *testing.T) {
 		if !refShouldScanSQLiGate(fam.payload, p, ref) {
 			t.Fatalf("恶意样本 %q 未推进规则 %s 的参照位门", fam.payload, fam.ruleID)
 		}
-		if refShouldScanSQLiGate(fam.payload, p, ref) != shouldScanSQLiPatternWithSignals(fam.payload, p, cur) {
+		if refShouldScanSQLiGate(fam.payload, p, ref) != shouldScanSQLiPatternWithSignals(fam.payload, p, cur, nil) {
 			t.Fatalf("sqliGate 等价破坏（恶意）%s: %q", fam.ruleID, fam.payload)
 		}
 	}
@@ -159,7 +159,7 @@ func TestSQLiGateBucketEquivalence(t *testing.T) {
 		cur := collectSQLiPatternSignals(text)
 		for _, id := range sqliSignalsEquivIDs {
 			p := findSQLiPatternForTest(id)
-			if refShouldScanSQLiGate(text, p, ref) != shouldScanSQLiPatternWithSignals(text, p, cur) {
+			if refShouldScanSQLiGate(text, p, ref) != shouldScanSQLiPatternWithSignals(text, p, cur, nil) {
 				t.Fatalf("sqliGate 等价破坏（良性）%s: %q", id, text)
 			}
 		}
@@ -188,7 +188,7 @@ func TestSQLiGateBucketRandomEquivalence(t *testing.T) {
 		for _, id := range sqliSignalsEquivIDs {
 			p := findSQLiPatternForTest(id)
 			refGate := refShouldScanSQLiGate(in, p, ref)
-			curGate := shouldScanSQLiPatternWithSignals(in, p, cur)
+			curGate := shouldScanSQLiPatternWithSignals(in, p, cur, nil)
 			if refGate != curGate {
 				t.Fatalf("sqliGate 随机等价破坏 %s: %q (ref=%v cur=%v)", id, in, refGate, curGate)
 			}
@@ -220,7 +220,7 @@ func TestSQLiGateBucketNoScanIsNoMatch(t *testing.T) {
 		}
 		for _, id := range sqliSignalsEquivIDs {
 			p := findSQLiPatternForTest(id)
-			if shouldScanSQLiPatternWithSignals(in, p, cur) {
+			if shouldScanSQLiPatternWithSignals(in, p, cur, nil) {
 				continue
 			}
 			if p.re.MatchString(in) {

@@ -1,69 +1,238 @@
 # Lua 策略插件
 
-> [返回 扩展与插件系统](./扩展与插件系统.md)
+> [返回 扩展与插件系统](扩展与插件系统.md)
 
 <cite>
 **本文档引用的文件**
-- [runtime.go](file://internal/waf/luaplugin/runtime.go)
-- [sandbox.go](file://internal/waf/luaplugin/sandbox.go)
-- [exec.go](file://internal/waf/luaplugin/exec.go)
-- [api.go](file://internal/waf/luaplugin/api.go)
-- [engine.go](file://internal/waf/luaplugin/engine.go)
-- [dryrun.go](file://internal/waf/luaplugin/dryrun.go)
-- [lua_phase.go](file://internal/core/rules/lua_phase.go)
-- [engine.go](file://internal/core/engine/engine.go)
-- [pipeline.go](file://internal/core/pipeline/pipeline.go)
-- [action.go](file://internal/core/action/action.go)
-- [lua.go](file://internal/snapshot/lua.go)
-- [lua_plugin.go](file://internal/store/lua_plugin.go)
-- [lua_plugin.go](file://internal/admin/system/lua_plugin.go)
-- [lua_plugin.go](file://internal/store/repository/lua_plugin.go)
-- [router.go](file://internal/admin/router.go)
-- [redis_kv.go](file://internal/cache/redis_kv.go)
-- [handler.go](file://internal/dataplane/handler.go)
+- [internal/waf/luaplugin/runtime.go](file://internal/waf/luaplugin/runtime.go)
+- [internal/waf/luaplugin/sandbox.go](file://internal/waf/luaplugin/sandbox.go)
+- [internal/waf/luaplugin/exec.go](file://internal/waf/luaplugin/exec.go)
+- [internal/waf/luaplugin/api.go](file://internal/waf/luaplugin/api.go)
+- [internal/waf/luaplugin/engine.go](file://internal/waf/luaplugin/engine.go)
+- [internal/waf/luaplugin/mutation.go](file://internal/waf/luaplugin/mutation.go)
+- [internal/waf/luaplugin/dryrun.go](file://internal/waf/luaplugin/dryrun.go)
+- [internal/core/rules/lua_phase.go](file://internal/core/rules/lua_phase.go)
+- [internal/core/engine/engine.go](file://internal/core/engine/engine.go)
+- [internal/core/action/action.go](file://internal/core/action/action.go)
+- [internal/core/pipeline/pipeline.go](file://internal/core/pipeline/pipeline.go)
+- [internal/snapshot/lua.go](file://internal/snapshot/lua.go)
+- [internal/store/luaplugin/lua_plugin.go](file://internal/store/luaplugin/lua_plugin.go)
+- [internal/store/repository/plugin/lua_plugin.go](file://internal/store/repository/plugin/lua_plugin.go)
+- [internal/store/migrate.go](file://internal/store/migrate.go)
+- [internal/store/js_plugin.go](file://internal/store/js_plugin.go)
+- [internal/admin/system/luaplugin/lua_plugin.go](file://internal/admin/system/luaplugin/lua_plugin.go)
+- [internal/admin/system/sitescope/site_scope.go](file://internal/admin/system/sitescope/site_scope.go)
+- [internal/admin/router.go](file://internal/admin/router.go)
+- [internal/app/server.go](file://internal/app/server.go)
+- [internal/cache/redis_kv.go](file://internal/cache/redis_kv.go)
+- [internal/observability/metrics.go](file://internal/observability/metrics.go)
+- [internal/dataplane/handler.go](file://internal/dataplane/handler.go)
+- [internal/dataplane/handler_support.go](file://internal/dataplane/handler_support.go)
+- [internal/proxy/js_plugin_response.go](file://internal/proxy/js_plugin_response.go)
+- [internal/waf/jsplugin/types.go](file://internal/waf/jsplugin/types.go)
+- [docs/扩展与插件系统/lua-examples/01-ip-rate-limit.lua](file://docs/扩展与插件系统/lua-examples/01-ip-rate-limit.lua)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
-2. [快速开始](#快速开始)
-3. [执行时机：pre 与 post](#执行时机pre-与-post)
-4. [沙箱能力与限制](#沙箱能力与限制)
-5. [ctx 字段完整参考](#ctx-字段完整参考)
-6. [ctx.kv 跨请求存储](#ctxkv-跨请求存储)
-7. [返回值的三种形态](#返回值的三种形态)
-8. [请求与响应改写](#请求与响应改写)
-9. [可用动作与终止性](#可用动作与终止性)
-10. [超时与失败语义](#超时与失败语义)
-11. [管理 API 一览](#管理-api-一览)
-12. [排错指引](#排错指引)
-13. [示例脚本](#示例脚本)
-14. [常量速查表](#常量速查表)
+2. [项目结构](#项目结构)
+3. [核心组件](#核心组件)
+4. [架构总览](#架构总览)
+5. [详细组件分析](#详细组件分析)
+6. [依赖关系分析](#依赖关系分析)
+7. [性能考虑](#性能考虑)
+8. [故障排查指南](#故障排查指南)
+9. [结论](#结论)
+10. [附录](#附录)
 
 ## 简介
 
-Lua 策略插件让运维在不改动 Go 代码、不重新编译的前提下写自定义判定逻辑。脚本存在数据库表 `lua_plugins` 里，随配置重载编译并热替换，运行在受限沙箱中，每请求同步执行。
+Lua 策略插件让运维在不改 Go 代码、不重新编译的前提下写自定义判定：脚本存于 `lua_plugins` 表，
+随配置重载编译，运行在受限沙箱中，**每请求同步执行**。适用于内置规则 DSL 表达不了的组合条件
+（多字段联合判断、按 IP 计数、按站点分流、对已确认误报定点放行）；不适用于需要文件系统、
+网络出向、外部命令或重计算的逻辑——沙箱不提供这些能力，默认 50 ms 挂钟超时也不允许长耗时操作。
+底线是：**自定义策略出问题绝不能让站点不可用**——语法错误、运行时错误、panic、超时、
+KV 不可用，一律降级为「该脚本不判定」，其余脚本与内置检测照常生效。
 
-适用场景：内置规则 DSL 表达不了的组合条件（多字段联合判断、按 IP 计数、按站点分流、对已确认误报定点放行）。
+三处必须与旧版本文区分开。其一，状态机**不跨请求复用**：`vmPool.get()` 每次新建已沙箱化状态机、
+`put()` 立即 `Close`（`sandbox.go:66-93`），旧文档所称「`sync.Pool` 复用 + `resetGlobals` 清全局」
+描述的是已被替换的实现，`resetGlobals`/`scriptGlobalWhitelist` 在现库中已不存在。其二，快照构建期除
+编译外还做一次**隔离运行校验**，运行期报错的脚本同样进不了执行集合（`snapshot/lua.go:82-107`）。
+其三，`ctx.kv.incr` 是**固定窗口**而非旧文档所称的空闲过期窗口（证据见 KV 一节）。
 
-不适用场景：需要访问文件系统、发起网络请求、调用外部命令、或做重计算的逻辑。沙箱不提供这些能力，且 50 ms 的默认超时不允许长耗时操作。
+**章节来源**
+- [internal/waf/luaplugin/sandbox.go:66-124](file://internal/waf/luaplugin/sandbox.go#L66-L124)
+- [internal/snapshot/lua.go:82-172](file://internal/snapshot/lua.go#L82-L172)
+- [internal/waf/luaplugin/runtime.go:1-24](file://internal/waf/luaplugin/runtime.go#L1-L24)
 
-实现分布：
+## 项目结构
 
-| 文件 | 职责 |
-| --- | --- |
-| `internal/waf/luaplugin/runtime.go` | `Script`/`Decision`/`Stage` 定义、编译入口、统计 |
-| `internal/waf/luaplugin/sandbox.go` | 标准库白名单、危险函数摘除、状态机池、全局清理 |
-| `internal/waf/luaplugin/exec.go` | `RequestView` 定义、单次执行、返回值转换、panic 隔离 |
-| `internal/waf/luaplugin/api.go` | `ctx` 表构造、`ctx.kv` 方法表、键前缀与体积限制 |
-| `internal/waf/luaplugin/engine.go` | 脚本集合持有、按阶段分桶、热替换、逐个执行 |
-| `internal/waf/luaplugin/dryrun.go` | `Validate`（仅编译）与 `DryRun`（编译 + 试跑） |
-| `internal/core/rules/lua_phase.go` | `pre` 阶段的管道实现、`RequestView` 构造 |
-| `internal/core/engine/engine.go` | `post` 阶段执行与覆盖规则（`applyPostLuaDecision`） |
-| `internal/snapshot/lua.go` | 从数据库加载并编译，编译错误记入快照 |
+实现分四层：运行时与沙箱、管道接入、配置装载、持久化与管理面。
 
-## 快速开始
+| 文件 | 规模 | 职责 | 关键符号 |
+|------|:----:|------|----------|
+| `internal/waf/luaplugin/runtime.go` | 321 行 | `Stage`/`Decision`/`Script`/`KVBackend` 与全部常量 | `Compile`、`SetTimeout` |
+| `internal/waf/luaplugin/sandbox.go` | 124 行 | 标准库白名单、危险函数摘除、状态机池 | `allowedLibs`、`newSandboxedState` |
+| `internal/waf/luaplugin/exec.go` | 428 行 | 单次执行、返回值转换、panic 隔离、请求视图 | `RequestView`、`decisionFromTable` |
+| `internal/waf/luaplugin/api.go` | 389 行 | `ctx` 表与 `ctx.kv`、前缀与体积限制 | `buildContextTable`、`kvKeyPrefix` |
+| `internal/waf/luaplugin/engine.go` | 303 行 | 脚本集合、按阶段分桶、原子热替换 | `Reload`、`Evaluate`、`Revision` |
+| `internal/waf/luaplugin/dryrun.go` | 132 行 | `Validate` 与 `DryRun`/`DryRunN` | `DryRunBatchResult` |
+| `internal/core/rules/lua_phase.go` | 235 行 | `pre` 阶段管道实现 | `NewLuaPhase`、`BuildLuaRequestView` |
+| `internal/core/engine/engine.go` | 646 行 | 阶段链装配 + `post` 覆盖规则 | `getOrBuildPhases:441`、`applyPostLuaDecision:234` |
+| `internal/snapshot/lua.go` | 172 行 | 装载、编译、隔离校验 | `loadLuaPlugins` |
+| `internal/store/repository/plugin/lua_plugin.go` | 68 行 | CRUD 与稳定排序 | `ListEnabled`、`Toggle` |
+| `internal/admin/system/luaplugin/lua_plugin.go` | 595 行 | 9 个端点、双重校验、试运行 | `CreateLuaPlugin`、`DryRunLuaPlugin` |
+| `internal/app/server.go` | — | 引擎装配与热替换挂载 | `:400-401`、`:886` |
 
-脚本必须定义一个**全局**函数 `handle(ctx)`：
+```mermaid
+graph TB
+  T1[("lua_plugins 表")] --> T2["LuaPluginRepo"]
+  T2 --> A1["admin 9 个端点<br/>+ validateEnabledLuaPlugin"]
+  A1 -->|reload| S1["snapshot.loadLuaPlugins"]
+  S1 --> S2["隔离运行校验<br/>DryRunNContext"]
+  S1 --> S3["Snapshot.LuaPlugins<br/>+ LuaPluginErrors"]
+  S3 --> E1["luaplugin.Engine<br/>atomic scriptSet"]
+  E1 --> E2["Script + 共享 proto"]
+  E2 --> E3["newSandboxedState<br/>每次新建 / 用完 Close"]
+  E3 --> E4["ctx 表 + ctx.kv"]
+  KV["cache.RedisKV"] -->|KVBackend| E1
+  E1 --> W1["luaPhase(pre) 入管道"]
+  E1 --> W2["applyPostLuaDecision 出管道"]
+  W1 --> W3["dataplane 写回与渲染"]
+  W2 --> W3
+```
+
+**图表来源**
+- [internal/snapshot/lua.go:82-172](file://internal/snapshot/lua.go#L82-L172)
+- [internal/waf/luaplugin/engine.go:42-105](file://internal/waf/luaplugin/engine.go#L42-L105)
+- [internal/waf/luaplugin/sandbox.go:96-124](file://internal/waf/luaplugin/sandbox.go#L96-L124)
+
+与 QuickJS 侧（`internal/waf/jsplugin`，2191 行）是**并列而非依赖**：共享 `pipeline` 改写出口与
+`action` 词表，但后端、超时默认与失败语义不同（对照见附录）。`internal/waf/dynamic`（954 行）与插件
+注入无关，它是响应侧的 HTML/JS 混淆信封，不参与脚本装载。
+
+**章节来源**
+- [internal/waf/jsplugin/types.go:16-49](file://internal/waf/jsplugin/types.go#L16-L49)
+- [internal/store/js_plugin.go:11-18](file://internal/store/js_plugin.go#L11-L18)
+
+## 核心组件
+
+`Engine` 是唯一外部入口，`Script` 是不可变编译产物，`RequestView` 与 `Decision` 是沙箱进出的
+两份数据，KV 后端只接受可响应取消的实现。
+
+
+代码上下文表——扩展前先确认落点：
+
+| 符号与签名 | 定义:行 | 职责 |
+|------------|---------|------|
+| `func Compile(name string, stage Stage, source string) (*Script, error)` | `runtime.go:274` | 编译期拒绝超限与语法错误，唯一编译入口 |
+| `func (e *Engine) Reload(scripts []*Script)` | `engine.go:78` | 原子热替换 + 代际递增，由 `server.go:886` 调用 |
+| `func (e *Engine) Evaluate(ctx context.Context, stage Stage, req RequestView) Decision` | `engine.go:177` | 顺序执行、首个判定返回、改写累积，失败在此吞掉 |
+| `func (s *Script) Run(ctx context.Context, pool *vmPool, req RequestView, kv KVBackend) (Decision, error)` | `exec.go:190` | 借状态机执行一次并归类错误与超时 |
+| `func buildContextTable(L *lua.LState, runCtx context.Context, req RequestView, kv KVBackend, budget *apiBudget) *lua.LTable` | `api.go:45` | 沙箱可见的全部输入，新增 `ctx` 字段的唯一位置 |
+| `func decisionFromLua(v lua.LValue) (Decision, error)` | `exec.go:283` | 三形态返回值解析，新增返回形态的位置 |
+| `func (p *luaPhase) Execute(ctx *pipeline.RequestCtx) (action.Result, bool)` | `lua_phase.go:53` | 管道接入与动作归一化 |
+| `func applyPostLuaDecision(lp *luaplugin.Engine, reqCtx *pipeline.RequestCtx, builtin action.Result) action.Result` | `engine.go:234` | 唯一 post 入口与覆盖规则 |
+| `func loadLuaPlugins(db *gorm.DB) ([]*luaplugin.Script, map[string]string, error)` | `snapshot/lua.go:119` | 装载与校验，校验强度在此调 |
+
+`Engine` 读路径无锁：脚本集合与 KV 后端均由 `atomic.Pointer` 持有（`engine.go:43-44`），
+`Reload` 构造全新集合再原子换指针，在途调用继续持有旧集合跑完；`rules` 包只认
+`LuaPluginEvaluator` 的两个方法（`lua_phase.go:14-17`），不依赖具体引擎类型。
+
+**章节来源**
+- [internal/waf/luaplugin/engine.go:11-105](file://internal/waf/luaplugin/engine.go#L11-L105)
+- [internal/waf/luaplugin/runtime.go:26-37](file://internal/waf/luaplugin/runtime.go#L26-L37)
+- [internal/waf/luaplugin/runtime.go:274-293](file://internal/waf/luaplugin/runtime.go#L274-L293)
+- [internal/waf/luaplugin/exec.go:190-297](file://internal/waf/luaplugin/exec.go#L190-L297)
+
+## 架构总览
+
+`pre` 在管道内、`post` 在管道外，两者共用 `Engine.Evaluate`，但消费的返回值不同：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DP as "dataplane.Handler"
+    participant PH as "luaPhase(pre)"
+    participant EN as "Engine.Evaluate"
+    participant VM as "沙箱状态机"
+    participant KB as "ContextKVBackend"
+    participant PO as "applyPostLuaDecision"
+    DP->>PH: "Execute(*RequestCtx)"
+    PH->>EN: "Evaluate(StagePre, BuildLuaRequestView(ctx))"
+    EN->>KB: "AvailableContext(runCtx) 门禁"
+    KB-->>EN: "false ⇒ 整阶段不判定（强制 fail-open）"
+    EN->>VM: "pool.get() 新建已沙箱化状态机"
+    VM->>VM: "跑顶层 chunk → 取全局 handle"
+    VM->>KB: "ctx.kv.get/set/incr（计入 128 次 API 预算）"
+    VM-->>EN: "返回值 → decisionFromLua"
+    EN-->>PH: "首个有判定；只改写则累积后带出"
+    PH->>PH: "Normalize + IsValid，未知动作忽略"
+    PH-->>DP: "(action.Result, terminal)"
+    Note over PH,DP: pre 带 request 改写时就地生效，OWASP/CVE/Bot 看到改写后的请求
+    DP->>PO: "内置阶段跑完后调用（仅当 post 有脚本）"
+    PO->>EN: "Evaluate(StagePost, view + Verdict + Runtime)"
+    alt 返回 allow
+        PO-->>DP: "清空内置判定，走向上游"
+    else 其他动作且内置未终止
+        PO-->>DP: "采用脚本判定"
+    else 其他动作但内置已终止
+        PO-->>DP: "保留内置判定，脚本判定丢弃"
+    end
+```
+
+**图表来源**
+- [internal/core/rules/lua_phase.go:53-131](file://internal/core/rules/lua_phase.go#L53-L131)
+- [internal/waf/luaplugin/engine.go:177-263](file://internal/waf/luaplugin/engine.go#L177-L263)
+- [internal/waf/luaplugin/exec.go:190-297](file://internal/waf/luaplugin/exec.go#L190-L297)
+
+阶段链实测 11 阶段：`ip_reputation → anti_replay → acl → lua_pre → owasp_default → cve →
+bot_detection → browser_sign → rate_limit → signature → custom`（`engine.go:467-528`，
+容量预分配 11），`lua_pre` 仅在存在启用的 `pre` 脚本时入链（`engine.go:491-494`）。
+`lua_post` **不是**管道阶段：管道遇终止动作立即 return，链尾阶段永远读不到「已被拦截」的判定，
+实现不了「对误报放行」这一核心用例，故由 `processResolved` 在 `pipeline.Run` 之后调用
+（`engine.go:369-370`）。
+
+**章节来源**
+- [internal/core/engine/engine.go:369-370](file://internal/core/engine/engine.go#L369-L370)
+- [internal/core/engine/engine.go:467-528](file://internal/core/engine/engine.go#L467-L528)
+
+## 详细组件分析
+
+### 沙箱能力与限制
+
+只注册四个标准库（`sandbox.go:32-40`）：`base`（部分可用）、`table`、`string`、`math`。
+
+| 被禁对象 | 原因 | 证据 |
+|----------|------|------|
+| `io` / `os` | 文件系统、环境变量、子进程与时钟访问 | `sandbox.go:20-31` |
+| `debug` | 可改他人函数、读局部变量、取上值，绕过一切限制 | 同上 |
+| `package`（`require`/`loadlib`） | 可加载任意模块与 C 动态库 | 同上 |
+| `coroutine` | 协程内执行不受调用方 context 约束，与超时中断冲突 | 同上 |
+| `load`/`loadstring`/`loadfile`/`dofile`/`require` | 从字符串动态构造代码，静态审计与体积限制失效 | `bannedBaseFuncs:49-65` |
+| `collectgarbage` | 脚本可主动触发 STW GC，廉价拒绝服务 | 同上 |
+| `print` | 直写进程 stdout，绕过统一日志且可刷日志 | 同上 |
+| `getmetatable`/`setmetatable` | 实测穿透入口：`getmetatable("").__index.upper = ...` 可改写字符串方法 | 同上 + 元表逃逸测试 |
+| `rawset`/`rawget`/`rawequal`/`rawlen` | 绕过元方法直接操作表 | 同上 |
+| `newproxy` / `module` | 构造带元表的 userdata / 写全局命名空间 | 同上 |
+| `math.randomseed` | gopher-lua 用它动进程级 `math/rand` 状态，影响其他请求 | `sandbox.go:117-121` |
+
+仍可用的 base 函数：`assert`、`error`、`ipairs`、`next`、`pairs`、`pcall`、`xpcall`、`select`、
+`tonumber`、`tostring`、`type`、`unpack` 与 `_G`/`_VERSION`；`#`、`..`、`==` 等**运算符**不受影响。
+
+真实隔离形态：`newSandboxedState` 以 `SkipOpenLibs: true` 建状态机并逐个 `PCall` 注册白名单库，
+任一注册失败即 `Close` 返回 nil——**绝不交付半沙箱**（:96-112）；摘除方式是全局名直接置 `LNil`
+（:114-116）；`vmPool.get()` 每次新建、`put()` 先 `SetTop(0)` 再 `Close`（:74-93），
+因此全局名不会泄漏到下一次执行，共享的只有 `*lua.FunctionProto`。源码上限 256 KiB（`runtime.go:50`）。
+
+**章节来源**
+- [internal/waf/luaplugin/sandbox.go:20-124](file://internal/waf/luaplugin/sandbox.go#L20-L124)
+- [internal/waf/luaplugin/runtime.go:49-50](file://internal/waf/luaplugin/runtime.go#L49-L50)
+
+### 入口契约与热替换生命周期
+
+脚本必须定义**全局**函数 `handle(ctx)`，入口名来自 `exec.go:17` 的 `handlerName`：
 
 ```lua
 function handle(ctx)
@@ -74,611 +243,518 @@ function handle(ctx)
 end
 ```
 
-要点：
+`local function handle` 取不到全局，判为 `ErrNoHandler`；顶层代码**每次调用都重跑**
+（`callHandler` 先 `NewFunctionFromProto` + `PCall` 整个 chunk 再调 `handle`，`exec.go:252-270`），
+所以顶层 `local T = {...}` 每请求重建；返回 `nil` 表示不判定，这是绝大多数请求应有的分支。
 
-- 函数名固定为 `handle`，且必须是全局的（写 `local function handle` 会被判为「未定义入口」）。入口名来自 `exec.go` 的 `handlerName` 常量。
-- 顶层代码**每次调用都会重新跑一遍**（`exec.go` 每次都先 `PCall` 整个 chunk 再取 `handle`）。所以顶层的 `local T = {...}` 每个请求都会重建，且顶层的可变状态不会跨请求保留（非白名单全局在每次执行前被清空）。跨请求状态请用 `ctx.kv`；顶层大表的开销见[性能](#性能)。
-- 返回 `nil` 表示「不判定」，请求继续走后续流程。这应该是绝大多数请求走到的分支。
-
-## 执行时机：pre 与 post
-
-数据面的完整阶段顺序（`internal/core/engine/engine.go` 的 `getOrBuildPhases`）：
-
+```mermaid
+stateDiagram-v2
+    state "数据库行 enabled=true" as ROW
+    state "Compile 编译" as COMPILE
+    state "隔离运行校验" as VALIDATE
+    state "进入快照集合" as SNAP
+    state "Engine.Reload 分桶" as BUCKET
+    state "线上执行" as RUN
+    state "LuaPluginErrors 并跳过" as ERR
+    state "停用或软删除" as OFF
+    ROW --> COMPILE : "按 stage/priority/id 排序"
+    COMPILE --> ERR : "语法错误或超 256 KiB"
+    COMPILE --> VALIDATE : "SetID/SetSiteID/SetTimeout 后试跑"
+    VALIDATE --> ERR : "compile_error 或 runtime_error 非空"
+    VALIDATE --> SNAP : "通过"
+    SNAP --> BUCKET : "applySnapshotReload 尾部 Reload"
+    BUCKET --> RUN : "atomic 换集合 + Revision 递增"
+    RUN --> OFF : "toggle / delete"
+    OFF --> BUCKET : "下次 reload 不再分桶"
+    ERR --> BUCKET : "其余脚本照常生效"
 ```
-IPReputation → AntiReplay → ACL → LuaPre → OWASP → CVE → BotDetection
-             → BrowserSign → RequestRateLimit → Signature → Custom
-             ─────（管道结束）─────
-             → LuaPost
-```
 
-`LuaPre` 只在存在启用的 `pre` 脚本时才会被加入阶段链，不存在时零开销（`Engine.HasScripts`）。
+**图表来源**
+- [internal/snapshot/lua.go:119-172](file://internal/snapshot/lua.go#L119-L172)
+- [internal/waf/luaplugin/dryrun.go:56-113](file://internal/waf/luaplugin/dryrun.go#L56-L113)
+- [internal/app/server.go:882-887](file://internal/app/server.go#L882-L887)
 
-`LuaPost` **不是**管道阶段。它在 `pipeline.Run` 返回之后、由 `Engine.processResolved` 调用 `applyPostLuaDecision` 执行。原因是管道遇到终止动作就立即 return，挂在链尾的阶段永远读不到「已被拦截」的判定，也就没法实现「对误报放行」这个核心用例。
+`Revision()` 是热替换的可观测锚点：每次 `Reload` 都 `generation.Add(1)` 并把新代际与集合一起发布
+（`engine.go:101-123`）；阶段链缓存把它列为第四判据（`entry.luaRevision == luaRevision`，
+`engine.go:455-465`），所以脚本内容未变但重新装载一次也会重建对应站点的阶段链——刻意保守，非缺陷。
+驱动整条链的是 `store.BumpRevision`（`migrate.go:141-160`）：管理端写操作成功后 `reload()`，
+重载完成再经 Redis 频道广播（见[消息队列集成](第三方集成/消息队列集成.md)）。站点作用域由宿主强制：
+装载时 `Script.SetSiteID` 写入编译结果（`snapshot/lua.go:157`），执行前逐个比对 `req.SiteID`
+（`engine.go:223`），脚本改 `ctx.site_id` 无效。
 
-### 两个阶段的语义差异
+**章节来源**
+- [internal/waf/luaplugin/engine.go:101-123](file://internal/waf/luaplugin/engine.go#L101-L123)
+- [internal/waf/luaplugin/exec.go:17-20](file://internal/waf/luaplugin/exec.go#L17-L20)
+- [internal/waf/luaplugin/exec.go:252-270](file://internal/waf/luaplugin/exec.go#L252-L270)
+- [internal/core/engine/engine.go:455-465](file://internal/core/engine/engine.go#L455-L465)
+
+### 执行时机与同阶段顺序
 
 | 维度 | `pre` | `post` |
-| --- | --- | --- |
-| 位置 | ACL 之后、OWASP 之前 | 全部内置阶段之后 |
-| 能读到内置判定 | 否，`ctx.phase` / `ctx.action` 恒为空串 | 是 |
-| 能省掉昂贵检测 | 是，`allow` 会短路 OWASP/CVE/Bot 等后续阶段 | 否，检测已经跑完了 |
-| 能推翻内置拦截 | 不适用（内置阶段还没跑） | **只有 `allow` 能** |
-| 典型用途 | 自定义限速、扫描器拦截、指纹分流、观察打点 | 误报放行、基于内置判定的二次决策 |
+|------|-------|--------|
+| 位置 | ACL 之后、OWASP 之前（管道内） | 全部内置阶段之后（管道外） |
+| 能否读到内置判定 | 否，`ctx.phase`/`ctx.action` 恒空串 | 是，另有 `ctx.verdict` 子表 |
+| 能否省掉昂贵检测 | 是，`allow` 短路 OWASP/CVE/Bot | 否，检测已跑完 |
+| 能否推翻内置拦截 | 不适用 | **只有 `allow` 能** |
+| 请求改写 / 响应改写 | 请求生效；响应忽略 | 请求忽略；响应生效 |
+| 典型用途 | 自定义限速、扫描器拦截、指纹分流、观察打点 | 误报放行、内置判定的二次决策 |
 
-### post 阶段的覆盖规则
+同阶段按 `stage ASC, priority ASC, id ASC` 排序（`snapshot/lua.go:125-127`、
+`repository/plugin/lua_plugin.go:25-31`），数值小者先执行；`Evaluate` 返回**第一个给出判定**的脚本，
+之后不再执行；只改写不判定的脚本不结束阶段，改写被累积带出（`engine.go:212-262`）。
+`post` 覆盖规则刻意收紧（`engine.go:218-232` 注释、`:290-309` 实现）：`allow` 是唯一能清空内置判定的
+动作，其余仅在内置未终止时采纳，无法识别的动作忽略——脚本因此无法把 `drop` 降级成 `redirect`
+绕过内置优先级（`drop 90 > intercept 80 > rate 70 > 四类挑战 60 > redirect 50`，`action.go:88-118`）。
 
-`applyPostLuaDecision` 刻意收紧了覆盖能力：
+**章节来源**
+- [internal/snapshot/lua.go:125-127](file://internal/snapshot/lua.go#L125-L127)
+- [internal/store/repository/plugin/lua_plugin.go:25-31](file://internal/store/repository/plugin/lua_plugin.go#L25-L31)
+- [internal/waf/luaplugin/engine.go:212-262](file://internal/waf/luaplugin/engine.go#L212-L262)
+- [internal/core/engine/engine.go:218-309](file://internal/core/engine/engine.go#L218-L309)
 
-1. 脚本返回 `allow` → 清空内置判定，请求继续走向上游。**这是唯一能推翻内置拦截的动作。**
-2. 脚本返回其他有效动作，且内置判定**不是**终止动作 → 采用脚本的判定。
-3. 脚本返回其他有效动作，但内置判定**是**终止动作 → 保留内置判定，脚本判定被丢弃。
-4. 脚本返回无法识别的动作 → 忽略，保留内置判定。
+### ctx 字段与 KV 契约
 
-第 3 条是有意为之：否则脚本可以把 `drop` 降级成 `redirect`，绕过内置的终止优先级语义（`drop > intercept > rate_limit > challenge > redirect`）。
+`ctx` 由 `buildContextTable` 构造（`api.go:45-99`），是当次请求的**只读副本视图**：改它既不影响
+WAF 内部状态，也不影响转发给上游的请求。基础字段：`request_id`、`client_ip`、`method`、
+`path`（原始未解码）、`query`（原始未解码，不含 `?`）、`host`、`user_agent`、`site_id`（number）、
+`content_type`、`body`（最多 48 KiB，由 `handler.go:377` 的 `maxWAFBody` 截断）。
 
-所以：**想在 post 阶段拦截什么，只有在内置引擎放行了它的时候才生效。** 如果目标是「无论内置怎么判都要拦」，应该写 `pre` 阶段脚本。
+| 子表 / 字段 | 构造:行 | 说明 |
+|-------------|---------|------|
+| `ctx.headers` | `api.go:59` | 键一律小写；缺失返回 `nil`；上限 256 项、单值 16 KiB |
+| `ctx.query_params` / `ctx.query_values` | `api.go:60-61` | 前者重复键保留首个值，后者按请求顺序保留全部值 |
+| `ctx.tls` | `api.go:63-68` | `version`/`ja3`（哈希，非原串）/`ja4`/`sni` |
+| `ctx.phase`、`ctx.action` | `api.go:71-72` | 仅 post 有值 |
+| `ctx.verdict` | `api.go:73-83` | `matched`/`phase`/`action`/`category`/`rule_id`/`rule_id_str`/`status_code`/`redirect_to`/`tags` |
+| `ctx.response` | `api.go:85-90` | 上游响应快照，敏感头渲染为 `[redacted]`（:109-111、:192-199） |
+| `ctx.config` / `ctx.runtime` / `ctx.metrics` | `api.go:92-94` | `runtime` 由宿主写：`stage`/`phase`/`request_id`（`lua_phase.go:191-200`） |
+| `ctx.kv` / `ctx.log` / `ctx.debug` | `api.go:95-97` | 跨请求状态；日志回调未知 level 按 info 记录 |
 
-### 同阶段内的执行顺序
+`ctx.kv` 的五个成员是**普通函数不是方法，必须点号调用**；`ctx.kv:incr(...)` 会把表本身当第一参数
+传入，`CheckString(1)` 直接报错。
 
-同一阶段的多个脚本按 `priority ASC, id ASC` 排序（`internal/snapshot/lua.go` 与 `LuaPluginRepo.ListEnabled`），数值小的先执行。`Engine.Evaluate` 返回**第一个给出判定的脚本**的结果，之后的脚本不再执行。返回 `nil` 的脚本不算判定，链会继续往下走。
-
-### 站点范围的宿主隔离
-
-`lua_plugins.site_id` 决定脚本作用域：`null` 表示全站脚本，正整数表示只绑定该站点。快照加载时，`internal/snapshot/lua.go` 会调用 `Script.SetSiteID` 把作用域写入编译结果；线上执行时，`Engine.Evaluate` 会在调用 `handle(ctx)` 前比较请求的 `SiteID`，不匹配的脚本不会执行。
-
-因此站点隔离由宿主强制实施，脚本不能通过修改 `ctx.site_id` 扩大自身作用域。全站脚本仍可读取 `ctx.site_id`，在已获准执行的请求中做进一步的站点分支（见 `lua-examples/06-per-site-policy.lua`）。
-
-## 沙箱能力与限制
-
-### 可用的标准库
-
-只注册四个库（`sandbox.go` 的 `allowedLibs`）：
-
-| 库 | 说明 |
-| --- | --- |
-| `base` | 部分可用，见下方摘除清单 |
-| `table` | 完整可用 |
-| `string` | 完整可用（`find` / `match` / `gmatch` / `gsub` / `sub` / `lower` / `upper` / `format` / `rep` / `len` / `byte` / `char` / `reverse`） |
-| `math` | 完整可用 |
-
-### 被禁用的库与原因
-
-| 被禁 | 原因 |
-| --- | --- |
-| `io` / `os` | 文件系统、环境变量、子进程与时钟访问，策略脚本绝不应触达 |
-| `debug` | 能绕过一切沙箱限制：改别人的函数、读局部变量、拿到上值 |
-| `package`（`require` / `loadlib`） | 能加载任意 Lua 模块与 C 动态库 |
-| `coroutine` | 与超时中断机制冲突——协程内的执行不受调用方 context 约束 |
-
-### 从 base 库摘除的函数
-
-清单来自 `sandbox.go` 的 `bannedBaseFuncs`：
-
-| 被摘除 | 原因 |
-| --- | --- |
-| `load` / `loadstring` / `loadfile` / `dofile` / `require` | 能从字符串动态构造并执行代码，使静态审计与体积限制形同虚设 |
-| `collectgarbage` | 允许脚本主动触发 STW GC，是廉价的拒绝服务手段 |
-| `print` | 直接写进程 stdout，绕过统一日志且可被用于刷日志 |
-| `getmetatable` / `setmetatable` | 实测可用的沙箱穿透入口：`getmetatable("").__index.upper = ...` 能改写字符串方法，而字符串元表是状态机级共享对象，池化复用下会污染同一状态机上后续执行的所有脚本 |
-| `rawset` / `rawget` / `rawequal` / `rawlen` | 绕过元方法直接操作表，同样可用于篡改共享结构 |
-| `newproxy` | 能创建带元表的 userdata，是另一条构造共享可变状态的路径 |
-| `module` | 会写全局命名空间 |
-
-仍可用的 base 函数：`assert`、`error`、`ipairs`、`next`、`pairs`、`pcall`、`xpcall`、`select`、`tonumber`、`tostring`、`type`、`unpack`，以及 `_G` / `_VERSION`。
-
-> 注意：`#`（长度运算符）、`..`（连接）、`==` 等**运算符**不受影响，被禁的只是 `rawlen` 这类函数形式。
-
-### 跨请求与跨脚本隔离
-
-- Lua 状态机通过 `sync.Pool` 复用（创建一个状态机约几十微秒，每请求新建会直接压垮吞吐）。
-- 每次执行前调用 `resetGlobals`，清除所有不在 `scriptGlobalWhitelist` 里的全局名。所以**脚本无法借全局变量在请求之间传递状态**——需要跨请求状态就用 `ctx.kv`。
-- 白名单只含上面列出的安全名字。它刻意不包含任何被摘除的函数名，否则脚本重新定义一个同名全局就不会被清掉，等于把穿透入口还回去了。
-
-### 脚本体积
-
-单脚本源码上限 **256 KiB**（`runtime.go` 的 `maxScriptBytes`）。超限在编译期就被拒绝，保存时即报错。
-
-## ctx 字段完整参考
-
-`ctx` 由 `api.go` 的 `buildContextTable` 构造，是当次请求的**只读副本视图**——改 `ctx` 的字段不会影响 WAF 内部状态，也不会影响转发给上游的请求。
-
-### 请求基础字段
-
-| 字段 | Lua 类型 | 说明 |
-| --- | --- | --- |
-| `ctx.request_id` | string | 请求 ID，与访问日志/安全事件里的 `request_id` 一致；dry-run 时固定为 `"dry-run"` |
-| `ctx.client_ip` | string | 经转发头与可信 CIDR 解析后的客户端 IP；解析失败时为空串 |
-| `ctx.method` | string | HTTP 方法，大写（如 `"GET"`） |
-| `ctx.path` | string | **原始未解码**路径（`URI().PathOriginal()`），百分号编码保持原样 |
-| `ctx.query` | string | **原始未解码**查询串，不含 `?` |
-| `ctx.host` | string | 请求 Host 头 |
-| `ctx.user_agent` | string | User-Agent，原始大小写 |
-| `ctx.site_id` | number | 匹配到的站点 ID |
-| `ctx.content_type` | string | Content-Type 头原值 |
-| `ctx.body` | string | 请求体，**最多 48 KiB**（数据面检查窗口，超出部分截断）；无体时为空串 |
-
-### 表字段
-
-| 字段 | 说明 |
-| --- | --- |
-| `ctx.headers` | 请求头映射，**键一律小写**（数据面的 `populateRequestCtxHeaders` 保证）。用 `ctx.headers["user-agent"]`，不要用 `ctx.headers["User-Agent"]`。缺失的头返回 `nil` |
-| `ctx.query_params` | 查询参数映射；重复键保留首个值 |
-
-> `ctx.query_params` 由数据面从原始查询串填充；同名参数保留首个值。dry-run 与线上都使用该映射契约。
-
-### TLS 指纹字段
-
-`ctx.tls` 是一个子表。纯 HTTP 请求或指纹采集不可用时，各字段为空串。
-
-| 字段 | 说明 |
-| --- | --- |
-| `ctx.tls.version` | 取值为 `""` / `"SSL3"` / `"TLS10"` / `"TLS11"` / `"TLS12"` / `"TLS13"`（`tlsmeta.CanonicalVersionName`） |
-| `ctx.tls.ja3` | JA3 **哈希**（MD5 十六进制），不是原始 JA3 串——原始串未暴露给脚本 |
-| `ctx.tls.ja4` | JA4 指纹全串，格式见下 |
-| `ctx.tls.sni` | TLS SNI |
-
-JA4 格式为 `ja4_a` + `_` + `ja4_b` + `_` + `ja4_c`，其中 `ja4_a` 是 10 个字符（`github.com/wu238121-a11y/go-ja4`）：
-
-| 位置 | 含义 | 取值 |
-| --- | --- | --- |
-| 1 | 传输协议 | `t` = TCP/TLS 监听器；`q` = QUIC/HTTP3 监听器 |
-| 2-3 | TLS 版本 | `13` / `12` / `11` / `10` / `00`（未知） |
-| 4 | SNI | `d` = 带 SNI；`i` = 无 SNI（按 IP 访问） |
-| 5-6 | 密码套件数量 | 两位十进制，去 GREASE 后计数，上限 `99` |
-| 7-8 | 扩展数量 | 两位十进制，去 GREASE 后计数，上限 `99` |
-| 9-10 | 首个 ALPN | 取 ALPN 串的首字符 + 末字符（`h2` → `h2`，`http/1.1` → `h1`）；无 ALPN 时为 `00` |
-
-`ja4_b` 与 `ja4_c` 各为 12 个十六进制字符（截断的 SHA-256）。
-
-举例：`t13d1516h2_8daaf6152771_e5627efa2ab1` 表示 TCP + TLS 1.3 + 带 SNI + 15 个密码套件 + 16 个扩展 + ALPN 为 h2。
-
-### 内置判定字段（仅 post 阶段有值）
-
-| 字段 | 说明 |
-| --- | --- |
-| `ctx.phase` | 给出判定的内置阶段名 |
-| `ctx.action` | 内置判定的动作名；内置未命中任何规则时为空串 |
-
-`ctx.phase` 的可能取值，即当前实际接进阶段链的各阶段名（`Name()` 与 `Result.Phase`）：
-
-`ip_reputation`、`anti_replay`、`acl`、`lua_pre`、`owasp_default`、`cve_detection`、`bot_detection`、`browser_sign`、`rate_limit`、`signature`、`custom`。
-
-`lua_pre` 出现在这里是正常的：前置脚本给出的判定同样会被后置脚本看到。
-
-一个容易误以为会出现但实际不会的值：`maintenance`——维护模式在管道之前就直接 return 了，压根不会走到 post 阶段。
-
-（此前这里还列过 `acl_allow_precheck`。那个阶段类型已随冗余代码一并移除：ACL 主阶段本身就带 `allow` 短路，预检阶段从未被接入过阶段链。）
-
-`pre` 阶段这两个字段恒为空串——那时内置阶段还没跑。
-
-## ctx.kv 跨请求存储
-
-`ctx.kv` 是脚本唯一的跨请求状态通道，后端是共享的 `cache.RedisKV`（即 `MY_OPENWAF_REDIS_ADDR` 配置的那个 Redis）。
-
-### 方法
-
-**这些是普通函数，不是方法。必须用点号调用，不能用冒号。** 用 `ctx.kv:incr(...)` 会把表本身当成第一个参数传进去，导致 `CheckString(1)` 报错、脚本执行失败。
-
-| 调用 | 返回 | 说明 |
-| --- | --- | --- |
-| `ctx.kv.available()` | boolean | 后端是否可用。Redis 未配置时为 `false` |
-| `ctx.kv.get(key)` | string 或 `nil` | 读取；未命中、键非法、后端不可用时均为 `nil` |
-| `ctx.kv.set(key, value [, ttl])` | boolean | 写入是否成功；键非法、值超限、后端不可用时为 `false` |
-| `ctx.kv.delete(key)` | 无返回 | 删除 |
-| `ctx.kv.incr(key [, ttl])` | number 或 `nil` | 原子自增并返回新值；失败时为 `nil` |
-
-`ttl` 单位是**秒**，可省略。
-
-### 限制
-
-| 限制 | 值 | 来源 |
-| --- | --- | --- |
-| 键长上限 | 256 字节 | `kvMaxKeyLen` |
-| 值大小上限 | 64 KiB | `kvMaxValueLen` |
-| 默认 TTL | 5 分钟 | `kvDefaultTTL`，用于未传 `ttl` 或传了非正数/非数值 |
-| TTL 上限 | 24 小时 | `kvMaxTTL`，超出的值被钳制到 24 小时 |
-| 键前缀 | `owaf:lua:` | `kvKeyPrefix`，自动加上，脚本不用也不能绕过 |
-
-键前缀隔离是必需的：限速计数、挑战会话、防重放 nonce 都在同一个 Redis 实例里，没有前缀的话脚本能覆盖 WAF 自己的缓存键。空键和超长键会被拒绝（降级为 `nil` / `false`，不报错）。
-
-实际写入 Redis 的键名还会再套一层 `RedisKV` 自己的 `openwaf:` 前缀，即完整键形如 `openwaf:owaf:lua:<你的键>`。排查时按这个前缀查。
-
-### 降级而非报错
-
-后端不可用（Redis 未配置、客户端为 nil，或后端健康状态已变为不可用）时，所有 `kv.*` 调用仍返回 `nil` / `false`，不抛错。除此之外，线上宿主还有一层强制的可用性边界：`Engine.Evaluate` 只有在注入的 KV 后端可用时才会执行脚本；如果执行期间后端变为不可用，宿主会丢弃当前及后续脚本的判定。因此 KV 后端不可用时，**所有线上 Lua 脚本都强制 fail-open，不采纳任何 Lua 判定**，脚本不能通过直接返回终止动作绕过这一规则。
-
-`ctx.kv.available()` 仍可用于让源码显式表达依赖关系，也能避免在 dry-run 或直接调用 `Script.Run` 时把 `nil` / `false` 当成有效数据。但它不是线上 fail-open 的责任边界，线上是否采纳判定由宿主强制决定：
+| 调用 | 返回 | 失败形态 |
+|------|------|----------|
+| `ctx.kv.available()` | boolean | 后端非 context 型或未启用时 `false`（`api.go:232-237`） |
+| `ctx.kv.get(key)` | string / `nil` | 键非法、未命中、后端不可用均 `nil` |
+| `ctx.kv.set(key, value [, ttl])` | boolean | 键非法 / 值超 64 KiB / 后端不可用为 `false`；`ttl` 非正数钳到默认 |
+| `ctx.kv.delete(key)` | 无返回 | 静默 |
+| `ctx.kv.incr(key [, ttl])` | number / `nil` | 显式 `ttl` 必须是 1..86400 的**整数**，否则抛 Lua 错误使脚本失败（`api.go:375-389`） |
 
 ```lua
-if not ctx.kv.available() then
-  return nil   -- 防御性写法；线上宿主本身也会强制 fail-open
+-- 节选自 lua-examples/01-ip-rate-limit.lua：点号调用 + 降级为不判定
+local count = ctx.kv.incr("rl:api:" .. ctx.client_ip, WINDOW_SECONDS)
+if count == nil then
+  return nil
+end
+if count > MAX_REQUESTS then
+  return { action = "rate_limit", status_code = 429, message = "lua rate limit" }
 end
 ```
 
-### `incr` 的窗口语义（重要）
+键设计：脚本侧前缀 `owaf:lua:`（`api.go:18`），后端 `RedisKV` 再加 `openwaf:`（`redis_kv.go:16`），
+故真实键形如 **`openwaf:owaf:lua:<你的键>`**，双层前缀是「键找不到」的首要误判点。
 
-`cache.RedisKV.Incr` 用一个 pipeline 执行 `INCR` + `EXPIRE`，**每次调用都会重置过期时间**。所以它不是固定时间窗口，而是**空闲过期窗口**：只要该键持续被自增，计数就一直不清零；停止 `ttl` 秒无任何请求后计数才消失。
+`incr` 的窗口是**固定窗口**：`RedisKV.IncrContext` 执行一段脚本，只在自增结果为 1 时 `PEXPIRE`
+（`redis_kv.go:20-26`、`:188-204`），窗口从首次计数起算、期间不后移。旧文档「每次调用都重置过期时间、
+属空闲过期窗口」与该实现不符；`lua-examples/01-ip-rate-limit.lua` 的头注释同样沿用了这一错误说法，
+以代码为准。沙箱没有时钟（`os` 被禁），脚本无法自带时间桶，需要「每整点清零」请改用内置限速阶段。
 
-后果：
+降级优先于报错：后端不可用时所有 `kv.*` 返回 `nil`/`false`；宿主另有一道强制门禁——`Evaluate` 只在
+`ContextKVBackend.AvailableContext` 为真时执行脚本，执行期间转不可用则丢弃本次及后续判定
+（`engine.go:196-201`、`:235-237`）。所以**线上 KV 不可用时所有 Lua 脚本一律 fail-open**，
+脚本无法靠直接返回终止动作绕过。
 
-- 持续打请求的客户端，计数会一路累加上去，达到阈值后会一直被判中，直到它停手 `ttl` 秒。类似 fail2ban 的计数器，对压制持续扫描是合适的。
-- **做不到**「每分钟允许 100 次、整点清零」这种固定窗口。脚本里没有时钟（`os` 库被禁），无法在键里编时间桶。真需要固定窗口请用内置的请求速率限制阶段。
+**章节来源**
+- [internal/waf/luaplugin/api.go:15-99](file://internal/waf/luaplugin/api.go#L15-L99)
+- [internal/waf/luaplugin/api.go:101-199](file://internal/waf/luaplugin/api.go#L101-L199)
+- [internal/waf/luaplugin/api.go:229-389](file://internal/waf/luaplugin/api.go#L229-L389)
+- [internal/cache/redis_kv.go:14-30](file://internal/cache/redis_kv.go#L14-L30)
 
-## 返回值的三种形态
+### 返回值形态与动作
 
-`exec.go` 的 `decisionFromLua` 接受三种返回值：
+`decisionFromLua` 接受三种形态（`exec.go:283-297`）：`nil`/`false`/`true`/无返回值均为不判定
+（`true` 无明确语义，按不判定处理以免误拦）；字符串等价于只给 `action`；表可携带附加信息：
 
-### 1. 不判定
+| 字段 | 类型 | 上限 | 说明 |
+|------|------|:----:|------|
+| `action` | string | 64 B | 缺失或空串即不判定 |
+| `message` | string | 512 B | 进 `Result.MatchDesc`；含认证秘密词时整条丢弃 |
+| `redirect_to` | string | 2048 B | 仅 `redirect` 有意义，`safeRedirectTarget` 过滤外部地址与 CRLF |
+| `status_code` | number | 100..599 | 类型不符（如 `"302"`）静默忽略 |
+| `headers` | table | 32 项 / 名 256 B / 值 2048 B | 仅普通 Lua 终止拦截响应使用 |
+| `response_body` | string | 16 KiB | 非空时替换标准拦截页正文 |
+| `tags` | table | 32 项 / 128 B | 只进 `action.Result.Tags`，无独立日志字段 |
+| `request` / `response` | table | 见改写一节 | 分别仅 `pre` / `post` 消费 |
 
-```lua
-return nil        -- 或 return false，或干脆不写 return
-```
+出沙箱前统一净化：`containsSensitiveDecisionText` 命中 `authorization`/`cookie`/`set-cookie`/`bearer`
+即丢弃该字段（`exec.go:382-390`）；`allowedDecisionHeader` 拒绝认证与会话头、逐跳头、`Content-Length`、
+`Location`（:394-403）；`ctx.log`/`ctx.debug` 的消息截断到 2 KiB 并把 CR/LF 换成空格，
+防止一条脚本日志伪造多行（:132-176）。动作名经 `action.Normalize` 归一化
+（去空白、大写转小写、`block → intercept`、`log_only → observe`，`action.go:29-44`），
+仍不认识的动作按不判定处理（:73-86）——笔误不升级为误封。
 
-`nil`、`false`、无返回值都表示「不判定」，请求继续走后续阶段/脚本。返回 `true` 也被当作不判定（`true` 没有明确语义，按不判定处理以免误拦）。
+| 动作 | `pre` 行为 | `post` 行为 |
+|------|-----------|-------------|
+| `allow` | 短路后续阶段，直接走向上游 | **清空内置判定** |
+| `intercept`（`block`） | 终止，拦截页 403 | 仅内置未终止时生效 |
+| `drop` | 终止，断 TCP 不发响应 | 仅内置未终止时生效 |
+| `rate_limit` | 终止，429 | 仅内置未终止时生效 |
+| `redirect` | 终止，302 到 `redirect_to` | 仅内置未终止时生效 |
+| `challenge` / `captcha_challenge` / `shield_challenge` / `chain_challenge` | 终止，对应挑战形态 | 仅内置未终止时生效 |
+| `observe`（`log_only`） | 非终止，落一条安全事件 | 非终止，但不产生日志 |
+| `tag` | 非终止；当前无任何记录 | 非终止；无记录 |
 
-### 2. 只给动作（字符串）
+**观察打点只有一个有效组合：`pre` + `observe`。** `pipeline.Run` 把它收进 `ObserveHits`
+（`pipeline.go:523-528`），数据面为每条写 `action = "observe"`、`phase = "lua_pre"`、
+`category = "lua_plugin"` 的事件（`handler.go:591-624`）；`tag` 因 `ShouldLog()` 为假
+（`action.go:261-272`）既不进 `ObserveHits` 也不落库，`post` 的非终止判定同样无痕。
+挑战类另有细节：`pipeline.Run` 会**暂存**挑战继续跑后续阶段，若之后出现优先级更高的终止动作则覆盖
+（`pipeline.go:529-553`）。
 
-```lua
-return "intercept"
-```
+**章节来源**
+- [internal/waf/luaplugin/exec.go:132-176](file://internal/waf/luaplugin/exec.go#L132-L176)
+- [internal/waf/luaplugin/exec.go:283-403](file://internal/waf/luaplugin/exec.go#L283-L403)
+- [internal/core/action/action.go:29-118](file://internal/core/action/action.go#L29-L118)
+- [internal/core/action/action.go:261-308](file://internal/core/action/action.go#L261-L308)
 
-### 3. 表（可携带附加信息）
+### 请求与响应改写
 
-```lua
-return {
-  action = "intercept",
-  message = "unrecognized client fingerprint",
-  status_code = 403,
-  headers = { ["X-Lua-Policy"] = "fingerprint" },
-  response_body = "blocked by lua policy",
-  tags = { "fingerprint", "lua" },
-}
-```
-
-表的字段（`decisionFromTable`）：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `action` | string | 动作名。缺失或空串等于不判定 |
-| `message` | string | 写入 `Result.MatchDesc`，出现在安全事件的 `match_desc` 与拦截页调试信息里。不参与判定 |
-| `redirect_to` | string | 仅 `action = "redirect"` 时有意义 |
-| `status_code` | number | 覆盖响应码；0 或缺失时用动作的默认码（`intercept` → 403，`rate_limit` → 429，`redirect` → 302，各挑战 → 403） |
-| `headers` | table | 受控响应头，仅用于普通 Lua 终止拦截响应，过滤规则见下 |
-| `response_body` | string | 可选的受控响应体，最多 **16 KiB**，超出部分按 UTF-8 边界截断 |
-| `tags` | table | 标签会进入 `action.Result.Tags`；当前没有独立的日志持久化字段，见下 |
-
-`headers` 和 `response_body` 只在数据面处理普通 Lua 终止拦截响应时使用。它们不会修改转发给上游的请求，也不会用于 `allow`、`observe`、`tag`、`drop`、`redirect`、各种 challenge 或上游响应。只返回 `headers` 而不返回 `response_body` 时，响应头会附加到标准拦截页；返回非空 `response_body` 时，宿主用它替换标准拦截页正文。
-
-`headers` 在进入 `action.Result.SetHeaders` 前会过滤：
-
-- 敏感认证与会话头，如 `Authorization`、`Proxy-Authorization`、`Cookie`、`Set-Cookie`、`WWW-Authenticate`、`Proxy-Authenticate`；
-- 逐跳头，如 `Connection`、`Keep-Alive`、`Proxy-Connection`、`TE`、`Trailer`、`Transfer-Encoding`、`Upgrade`；
-- `Content-Length` 与 `Location`；
-- 非法字段名，以及值中含 CR/LF 的字段。
-
-单个响应头值最多 4 KiB，超出部分按 UTF-8 边界截断。`tags` 会由 `lua_phase.go` / `applyPostLuaDecision` 复制到 `action.Result.Tags`，但当前 `SecurityEvent` 与 `AccessLog` 都没有独立的 tags 持久化字段，不能把它们当成已写入安全事件或访问日志的标签。
-
-类型不匹配的字段会被静默忽略（例如 `status_code = "302"` 是字符串，不会被采纳）。返回上述三种之外的类型（如 number、function）会被当作执行错误。
-
-## 请求与响应改写
-
-除判定之外，返回表还可以携带两个可选子表，分别改写**发往上游的请求**和**回给客户端的响应**。两条通道与判定相互独立：只改写不判定是合法的，脚本会继续被后续脚本与内置阶段处理。
+返回表可携带 `request` 与 `response` 两个子表，分别改写**发往上游的请求**与**回给客户端的响应**。
+两条通道与判定相互独立：只改写不判定是合法形态，宿主会把改写带出沙箱。
 
 ```lua
 function handle(ctx)
   return {
-    -- 改写上游请求：仅 pre 阶段生效
-    request = {
-      method = "POST",                          -- HTTP token
-      path = "/internal/backend",               -- 单个 / 开头的站内路径
-      query = "debug=1",                        -- 也接受 raw_query
-      body = "rewritten body",                  -- 最多 16 KiB
-      headers = { ["X-Internal"] = "1" },       -- 也接受 set_headers
-      delete_headers = { "X-Remove" },          -- 数组或 { ["X-Remove"] = true }
+    request = {                     -- 仅 pre 生效
+      method = "POST", path = "/internal/backend", query = "debug=1",
+      body = "rewritten body", headers = { ["X-Internal"] = "1" },
+      delete_headers = { "X-Remove" },
     },
-    -- 改写上游响应：仅 post 阶段生效
-    response = {
-      status_code = 503,
-      body = "maintenance",
-      headers = { ["X-Served-By"] = "waf" },
-      delete_headers = { "X-Upstream-Debug" },
+    response = {                    -- 仅 post 生效
+      status_code = 503, body = "maintenance",
+      headers = { ["X-Served-By"] = "waf" }, delete_headers = { "X-Upstream-Debug" },
     },
   }
 end
 ```
 
-### 生效时机与作用域
+别名宽容但成对：`query` 是 `raw_query` 的别名，`set_headers` 与 `headers` 双向接受，
+`delete_headers` 支持数组 `{ "X-A" }` 与对象 `{ ["X-A"] = true }`（`mutation.go:55-91`、`:151-172`、
+`:216-266`）。资源上限与 JS 侧同组数值：体 16 KiB、单次 32 个头、头名 256 B、头值 2048 B
+（`mutation.go:22-33`）。保留头两侧各一张表：请求侧禁改 `host`、`content-length`、
+`transfer-encoding` 与逐跳头（`allowedRequestHeader`，:301-309）；响应侧另禁 `set-cookie`、`location`
+（`allowedDecisionHeader`，`exec.go:394-403`）。`path` 必须是单个 `/` 开头的站内相对路径，
+禁 `//` 前缀、`?#` 与控制字符（:317-331）；状态码越界不采纳。非法条目**逐项丢弃**、
+合法条目照常生效，整份改写不会让请求失败。
 
-| 子表 | 生效阶段 | 原因 |
-| --- | --- | --- |
-| `request` | 仅 `pre` | pre 在管道内、上游请求尚未发出，改写能写回 Hertz 请求并影响后续阶段；`post` 时响应已经回完，改写无处可去，宿主忽略它 |
-| `response` | 仅 `post` | 响应改写由代理的响应变换链消费，只有 post 在代理之前算出了这份意图；`pre` 时还没有响应，宿主忽略它 |
+生效链路三段：`pre` 在管道内经 `ApplyRequestMutation` 就地生效，使 OWASP/CVE/Bot 看到改写后的请求
+（`lua_phase.go:67-89` → `pipeline.go:319-388`）；随后数据面把同一份意图写回真实 Hertz 请求，
+与 JS 改写共用 `applyJSMutationPlan`（`handler.go:1056-1075`）；`post` 的响应改写经
+`AppendResponseMutation` 挂上下文（`engine.go:265-272`），由 proxy 的响应变换链在响应体到手后消费
+（见[中间件开发](中间件开发.md) 的响应侧变换链一节）。`headers`/`response_body` 只用于普通 Lua
+终止拦截响应（`handler_support.go:114-135` → `handler.go:1017`），`allow`、`observe`、`tag`、`drop`、
+`redirect`、各类挑战与上游响应都不消费它们。
 
-pre 的请求改写**就地生效**：`LuaPre` 之后的 OWASP、CVE、Bot 等阶段看到的是改写后的方法/路径/查询/请求体/请求头。数据面随后把同一份意图写回真实请求，代理与访问日志因此与检测阶段看到的一致。
+**章节来源**
+- [internal/waf/luaplugin/mutation.go:16-172](file://internal/waf/luaplugin/mutation.go#L16-L172)
+- [internal/waf/luaplugin/mutation.go:216-343](file://internal/waf/luaplugin/mutation.go#L216-L343)
+- [internal/core/rules/lua_phase.go:67-89](file://internal/core/rules/lua_phase.go#L67-L89)
+- [internal/core/pipeline/pipeline.go:300-410](file://internal/core/pipeline/pipeline.go#L300-L410)
 
-### 与判定的关系
+### 超时与失败语义
 
-- 只改写的返回值（没有 `action`）不会被当成「不判定」而丢弃：`Engine.Evaluate` 会把它带出沙箱交给宿主。
-- 同一次返回里既有 `action` 又有 `request`/`response` 时两者都生效（请求被改写后按动作处理）。
-- 同一阶段有多个脚本时，第一个给出 `action` 的脚本结束该阶段；只给改写的脚本不结束阶段，其改写会与后续脚本的改写合并。
+| 情况 | 结果 | 计数 | 证据 |
+|------|------|:----:|------|
+| 超过挂钟超时 | 中断，视为未判定，继续下一个脚本 | `timeouts` | `exec.go:214-237` |
+| `error()`、运行时报错、panic、返回类型不支持 | `recover` 转普通错误，不打崩数据面，视为未判定 | `failures` | `exec.go:236-296` |
+| 未定义全局 `handle` | `ErrNoHandler` | `failures` | `exec.go:260-263` |
+| KV 后端执行前不可用 | **不执行任何线上脚本** | — | `engine.go:196-201` |
+| KV 后端执行中转为不可用 | 丢弃本次及后续判定，强制 fail-open | — | `engine.go:235-237` |
+| 编译或装载期校验失败 | 跳过该脚本，其余照常生效 | 快照错误 | `snapshot/lua.go:148-167` |
+| 请求 context 取消 | 中断并返回空判定 | — | `engine.go:184-232` |
 
-### 安全边界
+默认超时 **50 ms**（`runtime.go:40-45`）；单脚本可用 `timeout_ms` 覆盖，管理端限制 0..1000
+（`admin/system/luaplugin/lua_plugin.go:43`），脚本侧再钳到 1..1000 ms（`runtime.go:308-321`）。
+双闸为挂钟超时**加** context 取消，`while true do end` 可被可靠中断。错误文案有五种形态：
+`exceeded 50ms: context deadline exceeded`、`handle() failed: ...`、`init failed: ...`、
+`panicked: ...`、`script must define a global function handle(ctx)`。
 
-改写不是无限制的：
+统计是**进程级计数器、重启归零**，三个入口同源（`Engine.Stats()`）：管理页统计区、
+`GET /api/v1/lua-plugins/stats`、`/metrics` 上的 `openwaf_lua_script_{runs,failures,timeouts}_total`
+与 `openwaf_lua_script_avg_duration_ms`（label `{script,stage}`，`metrics.go:611-633`）。
+`Failures` 与 `Timeouts` 互斥，成功次数是 `Runs - Failures - Timeouts`（`admin:206-212`）。
+看 `Timeouts` 只看占比：默认 50 ms 对微秒级脚本有三个数量级余量，偶发超时几乎都来自 GC 停顿或
+CPU 争抢。「不判定」不等于「放行」：脚本故障只是它不给判定，请求继续走剩下阶段。
 
-- 请求侧不能增删 `Host`、`Content-Length`、`Transfer-Encoding` 与逐跳头（`Connection`、`Keep-Alive`、`TE`、`Trailer`、`Upgrade`、代理认证头），因为它们决定路由与消息边界；
-- `path` 必须是单个 `/` 开头的站内路径，不能是绝对 URL 或 `//` 开头的协议相对地址；
-- `status_code` 超出 100–599 时不采纳；响应侧也不能写 `Set-Cookie`、`Location` 等保留头；
-- 请求体与响应体各最多 **16 KiB**，超出按 UTF-8 边界截断；单个头值最多 2048 字节，单次改写最多 32 个头。
+**章节来源**
+- [internal/waf/luaplugin/runtime.go:40-47](file://internal/waf/luaplugin/runtime.go#L40-L47)
+- [internal/waf/luaplugin/runtime.go:308-321](file://internal/waf/luaplugin/runtime.go#L308-L321)
+- [internal/waf/luaplugin/exec.go:212-296](file://internal/waf/luaplugin/exec.go#L212-L296)
+- [internal/admin/system/luaplugin/lua_plugin.go:202-243](file://internal/admin/system/luaplugin/lua_plugin.go#L202-L243)
 
-非法条目被**逐项丢弃**，合法条目照常生效；整份改写都不会让请求失败。若改写让宿主无法应用（例如路径校验不通过），数据面会记录一条警告日志并保持请求原样转发。
+### 管理面与校验链路
 
-## 可用动作与终止性
+读接口在 `readGroup`（admin/operator/readonly），写接口在 `opsGroup`（admin/operator）；
+**写操作只有 POST**，无 PUT/DELETE。
 
-动作名经 `action.Normalize` 归一化：前后空白被去掉、大写转小写，`block` 映射为 `intercept`，`log_only` 映射为 `observe`。归一化后仍不认识的动作会被**忽略**（按不判定处理），而不是拦截——自定义策略的笔误不应升级为对正常流量的误封。
+| 方法 | 路径 | 注册:行 | 处理:行 | reload |
+|------|------|---------|---------|:------:|
+| GET | `/lua-plugins` | `router.go:159` | `ListLuaPlugins` | 否 |
+| GET | `/lua-plugins/stats` | `router.go:162` | `GetLuaPluginStats` | 否 |
+| GET | `/lua-plugins/:id` | `router.go:163` | `GetLuaPlugin` | 否 |
+| POST | `/lua-plugins` | `router.go:300` | `CreateLuaPlugin` | 是 |
+| POST | `/lua-plugins/:id/update` | `router.go:301` | `UpdateLuaPlugin` | 是 |
+| POST | `/lua-plugins/:id/delete` | `router.go:302` | `DeleteLuaPlugin` | 是 |
+| POST | `/lua-plugins/:id/toggle` | `router.go:303` | `ToggleLuaPlugin` | 是 |
+| POST | `/lua-plugins/validate` | `router.go:304` | `ValidateLuaPlugin` | 否 |
+| POST | `/lua-plugins/dry-run` | `router.go:305` | `DryRunLuaPlugin` | 否 |
 
-| 动作 | `pre` 阶段行为 | `post` 阶段行为 |
-| --- | --- | --- |
-| `allow` | 短路后续阶段，请求直接走向上游 | **清空内置判定**，请求走向上游 |
-| `intercept`（或 `block`） | 终止，返回拦截页（默认 403） | 仅当内置未终止时生效 |
-| `drop` | 终止，直接断开 TCP，不发响应 | 仅当内置未终止时生效 |
-| `rate_limit` | 终止，返回限速响应（默认 429） | 仅当内置未终止时生效 |
-| `redirect` | 终止，302 跳转到 `redirect_to` | 仅当内置未终止时生效 |
-| `challenge` | 终止，JS 挑战 | 仅当内置未终止时生效 |
-| `captcha_challenge` | 终止，图形验证码 | 仅当内置未终止时生效 |
-| `shield_challenge` | 终止，5 秒盾 | 仅当内置未终止时生效 |
-| `chain_challenge` | 终止，多步链式验证 | 仅当内置未终止时生效 |
-| `observe`（或 `log_only`） | 非终止，**记一条安全事件**后继续 | 非终止，但不产生日志（见下） |
-| `tag` | 非终止，继续；**当前不产生任何记录** | 非终止；不产生任何记录 |
+校验分两道，都在写库前：`applyLuaPluginRequest` 先做 `Validate`（仅编译，`admin:561`），
+`validateEnabledLuaPlugin` 再用隔离 KV 后端试跑一次，编译或运行错误以 400 返回（:110-134、:261、
+:301、:372）。`validate` 端点失败仍返回 **200** + `{"valid": false, "error": ...}`（:407-411）。
+`site_id` 是三态：缺省保持原值、显式 `null` 改回全站、正整数绑定站点，`0` 与非数字报错——
+用 `json.RawMessage` 承载是因为 `encoding/json` 对 `null` 的语义是「不修改目标」，
+`*uint` 无法区分缺省与显式 `null`（`sitescope/site_scope.go:11-36`）。
 
-关于挑战动作在 `pre` 阶段的一个细节：`pipeline.Run` 会把挑战判定**暂存**而不是立即返回，继续跑后续阶段。如果后面出现优先级更高的终止动作（如 OWASP 判 `intercept`），它会覆盖脚本给的挑战；没有的话，链尾再把挑战返回。
-
-### 想做观察打点，用 `pre` + `observe`
-
-只有这一个组合会真正落库：
-
-- `pre` + `observe` → `pipeline.Run` 把它收进 `ObserveHits` → 数据面写一条 `action = "observe"` 的安全事件，`phase = "lua_pre"`、`category = "lua_plugin"`、`match_desc` 取你的 `message`。
-- `pre` + `tag` → `Result.ShouldLog()` 对 `tag` 返回 false，既不进 `ObserveHits` 也不进任何日志。**当前完全没有可观测效果。**
-- `post` + `observe` / `tag` → 成为最终的非终止判定，而数据面只对 `IsTerminal()` 为真的判定写安全事件，对 `ObserveHits` 之外的非终止结果不记录。**也没有可观测效果。**
-
-## 超时与失败语义
-
-核心原则：**自定义策略出问题绝不能让站点不可用。**
-
-| 情况 | 结果 |
-| --- | --- |
-| 脚本执行超过超时 | 被中断，记 `timeouts` 统计，写一条 warn 日志，该脚本视为未判定，继续下一个脚本 |
-| 脚本 `error()` 或运行时报错 | 记 `failures` 统计，写 warn 日志，视为未判定，继续下一个脚本 |
-| 脚本 panic（如栈溢出） | 被 `recover` 转为普通错误，同上处理，不会打崩数据面 |
-| 脚本未定义 `handle` | 视为失败（`ErrNoHandler`），记 `failures`，不判定 |
-| 脚本返回不支持的类型 | 视为失败，不判定 |
-| KV 后端在执行前不可用 | 宿主不执行任何线上 Lua 脚本，直接按无 Lua 判定继续后续流程 |
-| KV 后端在脚本执行期间变为不可用 | 丢弃本次及后续 Lua 判定，强制 fail-open |
-| 编译失败（语法错误/超限） | 该脚本被跳过，不进入运行集合，错误记入 `Snapshot.LuaPluginErrors` 并在 reload 时打 warn 日志。**其他脚本与整份配置照常生效** |
-
-超时相关的数值：
-
-- 默认超时 **50 ms**（`runtime.go` 的 `defaultTimeout`）。取这个值是因为脚本在数据面每请求同步执行，再长会显著拉高 P99；而正常脚本（读几个字段 + 少量字符串判断）耗时在微秒级，50 ms 足以覆盖含一次 KV 往返的场景。
-- 单脚本可用 `timeout_ms` 覆盖，管理 API 限制在 **0 ~ 1000 ms**（`luaMaxTimeoutMS`），`0` 表示用默认值。
-- 除了挂钟超时，调用方 context 取消（客户端断开）也会中断脚本执行。
-- `while true do end` 这类死循环会被可靠中断——这是沙箱最关键的一条保证，有专门的测试覆盖（`TestInfiniteLoopIsInterrupted`）。
-
-一个重要的细节：**「不判定」不等于「放行」**。脚本失败只是这个脚本没给判定，请求会继续走剩下的阶段，内置检测照常生效。
-
-## 管理 API 一览
-
-全部在 `/api/v1` 下，遵循项目「只用 GET 和 POST」的约定。读接口在 `readGroup` 下，`admin` / `operator` / `readonly` 三种角色都可访问；写接口（含 `validate` 与 `dry-run`）在 `opsGroup` 下，需要 `admin` 或 `operator`。
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/lua-plugins` | 列出全部脚本，返回 `{items, total}`，按 `stage, priority, id` 排序 |
-| GET | `/lua-plugins/:id` | 取单个脚本 |
-| POST | `/lua-plugins` | 新建。`name` / `stage` / `source` 必填，保存前会做编译校验 |
-| POST | `/lua-plugins/:id/update` | 更新，只覆盖请求里提供的字段 |
-| POST | `/lua-plugins/:id/delete` | 删除（软删除） |
-| POST | `/lua-plugins/:id/toggle` | 切换启用状态；不带 body 时取反，带 `{"enabled": bool}` 时按值设置 |
-| POST | `/lua-plugins/validate` | 只编译校验，不保存不执行。返回 `{"valid": bool}`，失败时带 `error` |
-| POST | `/lua-plugins/dry-run` | 用样例请求试跑，不影响线上配置 |
-
-所有写接口成功后都会触发配置 reload（重建快照、重新编译脚本、热替换脚本集合）。
-
-### 创建/更新的请求体
+dry-run 请求体支持 `iterations`（1..100，命中判定或错误即提前结束），响应是**批量形态**：
 
 ```json
 {
-  "name": "api-rate-limit",
-  "stage": "pre",
-  "source": "function handle(ctx) return nil end",
-  "enabled": true,
-  "priority": 100,
-  "timeout_ms": 0,
-  "description": "按 IP 限制 /api/ 请求频率",
-  "site_id": null
+  "compile_error": "", "runtime_error": "",
+  "decision": {"ScriptID": 3, "ScriptName": "api-rate-limit", "Action": "allow",
+               "Message": "known false positive", "StatusCode": 0, "SetHeaders": null,
+               "ResponseBody": "", "Tags": null, "RequestMutation": null, "ResponseMutation": null},
+  "elapsed_ms": 0.12, "iteration": 1, "iterations": 1, "kv_available": false, "runs": []
 }
 ```
 
-| 字段 | 说明 |
-| --- | --- |
-| `name` | 脚本名，用于日志与统计。新建必填 |
-| `stage` | `pre` 或 `post`。新建必填 |
-| `source` | Lua 源码。新建必填，上限 256 KiB |
-| `enabled` | 省略时新建默认 `true`、更新时保持原值 |
-| `priority` | 同阶段执行顺序，小者先执行。默认 `100` |
-| `timeout_ms` | 0 ~ 1000，`0` 表示用 50 ms 默认值 |
-| `description` | 备注，上限 512 字符 |
-| `site_id` | 三态：**字段缺失**保持原值；**显式 `null`** 改为全站；**正整数**绑定站点（`0` 与非数字会报错）。非空值由宿主强制隔离，仅对应站点的请求会执行该脚本；全站脚本才会对所有站点执行 |
+`Decision` 的 JSON 键就是 Go 字段名（该结构体无 json tag，`runtime.go:78-108`），与多数响应体的
+snake_case 约定不同。dry-run 与线上三处差异：用独立状态机池、不注入生产 KV（`kv_available` 恒
+`false`）、不经过线上 `Evaluate` 的可用性门禁与 `post` 判定合并（`dryrun.go:56-113`、
+`admin:493-495`）。脚本返回 `block`/`log_only` 时试运行会显示别名，界面判定不能当作最终 WAF 响应。
 
-### dry-run 的请求体
+**章节来源**
+- [internal/admin/router.go:159-163](file://internal/admin/router.go#L159-L163)
+- [internal/admin/router.go:300-305](file://internal/admin/router.go#L300-L305)
+- [internal/admin/system/luaplugin/lua_plugin.go:110-148](file://internal/admin/system/luaplugin/lua_plugin.go#L110-L148)
+- [internal/admin/system/luaplugin/lua_plugin.go:248-497](file://internal/admin/system/luaplugin/lua_plugin.go#L248-L497)
 
-```json
-{
-  "stage": "post",
-  "source": "function handle(ctx) ... end",
-  "timeout_ms": 200,
-  "request": {
-    "client_ip": "203.0.113.9",
-    "method": "POST",
-    "path": "/api/report/render",
-    "query": "id=1",
-    "host": "app.example.com",
-    "user_agent": "Mozilla/5.0",
-    "site_id": 1,
-    "content_type": "application/json",
-    "body": "{\"tpl\":\"a\"}",
-    "headers": {"x-real-ip": "203.0.113.9"},
-    "query_params": {"id": "1"},
-    "tls_version": "TLS13",
-    "tls_ja3": "",
-    "tls_ja4": "t13d1516h2_8daaf6152771_e5627efa2ab1",
-    "tls_sni": "app.example.com",
-    "phase": "owasp_default",
-    "action": "intercept"
-  }
-}
+### 新增一个 Lua 脚本的流程
+
+| 步 | 动作 | 参照位置 | 完成判据 |
+|:--:|------|----------|----------|
+| 1 | 定阶段：昂贵检测之前决策用 `pre`，需读内置判定用 `post` | `engine.go:491-494`、`:369-370` | 能一句话说清「谁先看到我的判定」 |
+| 2 | 只读 `ctx` 已有字段，不假设未文档化的键 | `api.go:45-99` | 字段名逐项对照本文表格 |
+| 3 | 头几行早退，绝大多数请求 `return nil` | `exec.go:252-270` | 热路径分支位于函数顶部 |
+| 4 | 需要跨请求状态才用 `kv`，且先判 `available()` | `api.go:232-237` | Redis 缺席时脚本不报错 |
+| 5 | `POST /lua-plugins/validate` 过编译 | `admin:391-413` | `valid == true` |
+| 6 | `POST /lua-plugins/dry-run` 固定样例看判定与耗时 | `admin:449-497` | `decision` 与 `elapsed_ms` 符合预期 |
+| 7 | `POST /lua-plugins` 保存，必要时给 `site_id`/`priority`/`timeout_ms` | `admin:248-276` | 返回 201 且列表无 `compile_error` |
+| 8 | 观察 `GET /lua-plugins/stats` 与 `openwaf_lua_script_*` | `admin:225-243`、`metrics.go:611-633` | `failures`/`timeouts` 占比可接受 |
+
+```lua
+-- 误报放行：post 阶段唯一能推翻内置拦截的动作是 allow
+function handle(ctx)
+  if ctx.phase == "owasp_default" and ctx.action == "intercept"
+     and ctx.path == "/api/report/render" and ctx.query_params["id"] == "12" then
+    return { action = "allow", message = "confirmed false positive" }
+  end
+  return nil
+end
 ```
 
-`request.phase` / `request.action` 用来模拟内置判定，是验证 post 脚本分支的关键。`timeout_ms` 必须为 0~1000 的整数；0 使用默认超时，超出范围的请求会被拒绝。
+`lua-examples/` 的六个示例都经 `luaplugin.DryRun` 口径验证：限速（`01`）、误报放行（`02`）、
+扫描器拦截（`03`）、JA4 指纹分流（`04`）、观察打点（`05`）、全站脚本按站点分流（`06`）。
 
-响应：
+**章节来源**
+- [internal/core/engine/engine.go:369-494](file://internal/core/engine/engine.go#L369-L494)
+- [internal/waf/luaplugin/api.go:45-99](file://internal/waf/luaplugin/api.go#L45-L99)
+- [internal/waf/luaplugin/exec.go:252-270](file://internal/waf/luaplugin/exec.go#L252-L270)
+- [internal/admin/system/luaplugin/lua_plugin.go:248-497](file://internal/admin/system/luaplugin/lua_plugin.go#L248-L497)
 
-```json
-{
-  "compile_error": "",
-  "runtime_error": "",
-  "decision": {"Action": "allow", "Message": "known false positive", "RedirectTo": "", "StatusCode": 0, "SetHeaders": null, "ResponseBody": "", "Tags": null},
-  "elapsed_ms": 0.12
-}
+### 新增一个 Lua 宿主 API 的流程
+
+给脚本加新能力（新 `ctx` 子表或新 `kv` 动词）横跨五个文件，顺序错了会出现
+「Lua 侧可见但 Go 侧未限额」的危险组合。
+
+| 步 | 动作 | 参照位置 | 完成判据 |
+|:--:|------|----------|----------|
+| 1 | 扩 `RequestView`（Go 侧输入） | `exec.go:28-63` | 字段是宿主确定、脚本无法自报的 |
+| 2 | 在 `buildContextTable` 挂到 `ctx` | `api.go:45-99` | map 类走 `stringMapToTable`，自动获得 256 项与 16 KiB 截断 |
+| 3 | 敏感值与体积净化 | `api.go:101-115`、`exec.go:382-390` | `authorization`/`cookie` 类不外泄 |
+| 4 | 新增函数一律走 `budget.allow()` | `api.go:33-43`、`runtime.go:53` | 单次执行的宿主调用有 128 次上界 |
+| 5 | 若产生命中，扩 `Decision` 与 `decisionFromTable` | `runtime.go:78-108`、`exec.go:299-377` | 未识别字段静默忽略 |
+| 6 | 宿主消费侧显式处理新字段 | `lua_phase.go:101-131`、`engine.go:265-309` | `pre`/`post` 作用域写清 |
+| 7 | 需 KV 时扩 `ContextKVBackend` 而非 `KVBackend` | `runtime.go:148-169` | 不响应取消的后端按不可用处理 |
+| 8 | 补 dry-run 入口与本文常量表 | `admin:416-497`、本文件附录 | 校验与试跑覆盖新字段 |
+
+```go
+// 与实测契约一致的宿主 API 注册骨架：预算 + 类型校验 + 降级而非报错
+t.RawSetString("path_class", L.NewFunction(func(l *lua.LState) int {
+	if !budget.allow() {
+		l.Push(lua.LNil)
+		return 1
+	}
+	prefix := l.CheckString(1)
+	if len(prefix) > kvMaxKeyLen {
+		l.Push(lua.LBool(false)) // 非法入参降级为 false，不抛错
+		return 1
+	}
+	l.Push(lua.LBool(strings.HasPrefix(req.Path, prefix)))
+	return 1
+}))
 ```
 
-`compile_error` 非空时其余字段无意义。`runtime_error` 非空表示执行出错（含超时）。`decision.Action` 为空串表示脚本未做判定。
+**章节来源**
+- [internal/waf/luaplugin/exec.go:28-63](file://internal/waf/luaplugin/exec.go#L28-L63)
+- [internal/waf/luaplugin/api.go:33-115](file://internal/waf/luaplugin/api.go#L33-L115)
+- [internal/waf/luaplugin/runtime.go:52-58](file://internal/waf/luaplugin/runtime.go#L52-L58)
+- [internal/waf/luaplugin/exec.go:299-390](file://internal/waf/luaplugin/exec.go#L299-L390)
 
-> dry-run 使用独立的状态机池，不复用线上状态机，试运行不会污染生产请求；同时不注入生产 RedisKV，`ctx.kv.available()` 固定为 false，KV 操作不会写入生产数据。dry-run 直接执行脚本，不经过线上 `Engine.Evaluate` 的可用性门禁，因此即使脚本返回 `decision`，也不代表线上会采纳该判定。线上宿主在 KV 不可用时始终强制 fail-open。
->
-> dry-run 返回的是**脚本原始 `Decision`**，不会调用线上动作归一化，也不会执行 `post` 阶段的最终判定合并。因此脚本返回 `block` / `log_only` 时，试运行可能显示别名；线上分别按 `intercept` / `observe` 处理。若线上已有终止判定，`post` 脚本返回非 `allow` 的动作在线上会保留原判定，而 dry-run 只展示脚本自身返回值。界面中的判定结果不能当作最终 WAF 响应。
+## 依赖关系分析
 
-## 排错指引
+| 模块 | 依赖方向 | 抽象形式 | 位置 |
+|------|----------|----------|------|
+| `rules.luaPhase` → `luaplugin.Engine` | 消费方定义接口 | `LuaPluginEvaluator`（仅 `HasScripts`/`Evaluate`） | `lua_phase.go:14-17` |
+| `luaplugin` → `cache.RedisKV` | 消费方定义接口 | `KVBackend` / `ContextKVBackend` | `runtime.go:148-169` |
+| `core/engine` → `luaplugin` | 直接依赖 | `applyPostLuaDecision` 复用 `rules.BuildLuaRequestView` | `engine.go:234-240` |
+| `snapshot` → `luaplugin` | 直接依赖 | 装载期 `Compile` + `DryRunNContext` | `snapshot/lua.go:148-161` |
+| `dataplane` → Lua 改写 | 意图传递 | `RequestMutator`/`ResponseMutator`，不含 Lua 类型 | `handler.go:1056`、`engine.go:265` |
+| `proxy` → Lua 响应改写 | 查找函数注入 | `LuaResponseRewrite` 自定义于 proxy 侧 | `js_plugin_response.go:25-44` |
+| `admin` → `snapshot` | 只读错误映射 | `LuaPluginErrors` → `compile_error` | `admin:142-148` |
 
-### 保存时报错
+新 KV 后端若只实现同步 `KVBackend` 而不实现 `ContextKVBackend`，会被宿主按不可用处理
+（`engine.go:196-201`），因为无法响应取消的同步 I/O 会阻塞数据面请求；`pipeline` 既不认识 hertz
+也不认识 luaplugin，改写意图必须经 `RequestCtx` 中转（`pipeline.go:282-296` 注释）。
 
-`POST /lua-plugins` 与 `/update` 在写库前调用 `luaplugin.Validate`，语法错误和超限会直接以 400 返回，错误文案形如：
+| 外部实体 | 交互 | 触发时机 | 失败影响 | 容错 |
+|----------|:----:|----------|----------|------|
+| `lua_plugins` 表 | 读 | 每次快照构建 | 脚本不进集合 | 单脚本失败不中断整次重载 |
+| Redis（经 `RedisKV`，含频道） | 双向 | 脚本 `ctx.kv` / 管理端写操作 | Lua 判定被丢弃 / 他节点不重载 | 1s 超时 + 5s 熔断 + fail-open；发布仅告警 |
+| 上游源站 | 出向 | 放行后 | 改写不生效即原样转发 | 逐项丢弃非法改写 |
 
+**章节来源**
+- [internal/core/rules/lua_phase.go:14-17](file://internal/core/rules/lua_phase.go#L14-L17)
+- [internal/waf/luaplugin/runtime.go:148-169](file://internal/waf/luaplugin/runtime.go#L148-L169)
+- [internal/waf/luaplugin/engine.go:192-201](file://internal/waf/luaplugin/engine.go#L192-L201)
+- [internal/core/pipeline/pipeline.go:282-296](file://internal/core/pipeline/pipeline.go#L282-L296)
+
+## 性能考虑
+
+- **固定成本来自每次新建状态机**：`newSandboxedState` 要建栈、逐个 `PCall` 开四个库、把 17 个 base
+  函数置 nil，结束即 `Close`（`sandbox.go:74-124`）。这是为可靠性付的代价——标准库与 `_G` 是可变对象，
+  复用无法安全复原。因此脚本的**调用次数**比单条指令数更值得关注。
+- **顶层代码每请求重跑**：顶层 `local T = {...}` 每请求重建一遍，哪怕 `handle` 第一行就返回；
+  热路径上的大常量表应放到早退判断之后。「尽早 `return nil`」是收益最大的一条。
+- 用 `string.find(s, needle, 1, true)` 的 plain 模式做子串匹配，比模式匹配快且不解析特殊字符；
+  不要遍历 `ctx.body`（可达 48 KiB）；每请求一次 `kv.incr` 就是每请求一次 Redis 往返，
+  先用路径/方法过滤掉不需要计数的请求。
+- `HasScripts` 每请求都会走，已用 `atomic.Pointer` 无锁读（`engine.go:141-160`）；无脚本时 `lua_pre`
+  不入链、`lua_post` 被短路，零配置部署不付额外代价。单次执行的宿主 API 调用上限 128、map 表项上限
+  256（`runtime.go:53-54`），超预算的 `ctx.kv`/`ctx.log` 调用静默返回空值。
+- 改动检测引擎后按项目约定压测（`./blazehttp -t http://127.0.0.1:80 -c 40`），确认无明显回退。
+
+[本节为总结，无需特定文件来源]
+
+## 故障排查指南
+
+| 症状 | 原因 | 排查 | 方案 |
+|------|------|------|------|
+| 保存返回 400 | 编译或装载期运行校验失败 | 文案含 `compile`/`runtime validation` | 先 `validate` 再 `dry-run` |
+| 脚本存下来但不生效 | 重载时校验失败被跳过 | 列表接口 `compile_error`（`admin:142-148`） | 修脚本；其余脚本不受影响 |
+| 完全不执行且无失败日志 | KV 后端不可用，宿主门禁生效 | `openwaf_lua_script_runs_total` 不增长 | 恢复 Redis；这是 fail-open 设计 |
+| `runs` 与 `failures` 同步增长 | 入口非全局 / 返回类型不支持 / `incr` TTL 非法 | 日志 `lua plugin failed, skipping` | 对照 `exec.go` 与 `api.go:375-389` |
+| `timeouts` 偶发 | GC 停顿或 CPU 争抢 | `Timeouts / Runs` 占比 + `avg_ms` | 占比稳定即可忽略 |
+| 改写没生效或部分丢失 | 阶段用反 / 非法条目逐项丢弃 | `dry-run` 返回的 mutation 字段 | 换阶段；检查保留头与 `path` 规则 |
+| 观察打点没日志 | 用了 `tag` 或放在 `post` | `ShouldLog()` 与 `IsTerminal()` | 改 `pre` + `observe` |
+| 想拦但拦不住 | 内置已判终止而脚本给非 `allow` | `applyPostLuaDecision` 规则 3 | 改用 `pre` 脚本 |
+| Redis 里找不到键 | 真实键是双层前缀 | `SCAN MATCH openwaf:owaf:lua:*` | 按双层前缀查 |
+| 计数不像限速 | `incr` 是固定窗口 | `redis_kv.go:20-26` | 接受语义或改用内置限速阶段 |
+| `ctx.headers["User-Agent"]` 取不到 | 键一律小写 | `api.go:59` | 用 `ctx.headers["user-agent"]` |
+| 试运行显示拦截、线上未拦 | dry-run 不经过门禁与 post 合并 | `engine.go:196-201` | 以线上统计与安全事件为准 |
+
+```bash
+# 校验与试跑（写操作只有 POST；令牌与地址均为占位）
+curl -s -X POST "{ADMIN}/api/v1/lua-plugins/validate" \
+  -H "Authorization: Bearer {占位}" -H 'Content-Type: application/json' \
+  -d '{"stage":"pre","source":"function handle(ctx) return nil end"}'
+
+# 回归口径：改动 luaplugin 后至少跑这三组
+CGO_ENABLED=1 go test -tags=quickjs ./internal/waf/luaplugin/... ./internal/snapshot/... ./internal/core/engine/...
 ```
-luaplugin: compile "validate": <file>:3: unexpected symbol near 'end'
-```
 
-想在写代码时快速循环，用 `POST /lua-plugins/validate`，它只编译不执行。
+**章节来源**
+- [internal/admin/system/luaplugin/lua_plugin.go:142-148](file://internal/admin/system/luaplugin/lua_plugin.go#L142-L148)
+- [internal/core/engine/engine.go:290-309](file://internal/core/engine/engine.go#L290-L309)
+- [internal/waf/luaplugin/api.go:341-389](file://internal/waf/luaplugin/api.go#L341-L389)
+- [internal/cache/redis_kv.go:20-26](file://internal/cache/redis_kv.go#L20-L26)
 
-### 脚本存下来了但不生效
+## 结论
 
-按这个顺序查：
+Lua 插件的能力被刻意限定在「读一份只读请求视图、做一次有界计算、给一个词表内动作」三件事上。
+相对旧版本，本文纠正了四处与代码不符的描述：状态机**不再跨请求复用**（每次新建并关闭，共享的只有
+编译原型）；`resetGlobals`/`scriptGlobalWhitelist` 已不存在，隔离由全新状态机保证；`ctx.kv.incr`
+走一段只在首次写入设过期的 Lua 脚本，是**固定窗口**而非空闲过期窗口；装载期除编译外还有隔离运行校验，
+报错脚本同样进不了执行集合。同时补齐旧版遗漏的输入面（`ctx.query_values`、`ctx.verdict`、
+`ctx.response`、`ctx.config`、`ctx.runtime`、`ctx.metrics`、`ctx.log`/`ctx.debug`）与 dry-run 的
+`iterations` 及批量响应形态。下一步值得推进三项：给装载期校验失败加独立指标（目前只有列表接口能看见）、
+把 `ctx.kv` 后端可用性纳入 `/metrics`、为 `lua_post` 的非终止判定补一条可观测出口
+（现在 `post` + `observe` 完全无痕）。
 
-1. **`enabled` 是不是 true。** `LuaPluginRepo.Create` 对 `enabled=false` 有专门的回写处理，但列表接口返回的值是权威的，直接看它。
-2. **reload 时有没有编译失败。** 保存成功不代表能加载——`snapshot.Build` 会重新编译一次。失败的脚本被跳过，同时：
-   - 进程日志有一条 warn：`lua plugin compile failed, skipped`，带 `script` 与 `err` 字段（`internal/app/server.go` 的 reload 回调）。
-   - 错误也记在 `Snapshot.LuaPluginErrors` 里（`map[脚本名]错误信息`）。
-   查日志时按 logger 名 `lua_plugin` 或消息 `lua plugin compile failed` 过滤。
-3. **入口函数是不是全局的 `handle`。** `local function handle` 拿不到，会被判为 `ErrNoHandler`（记入 `failures` 统计，不产生判定）。
-4. **阶段选对了没。** 想推翻内置拦截必须是 `post` + `allow`；想在 OWASP 之前决策必须是 `pre`。
-5. **前面有没有别的脚本先给了判定。** 同阶段按 `priority` 升序执行，`Engine.Evaluate` 返回第一个有判定的结果，后面的脚本根本不会跑。
-6. **返回的动作名是不是有效的。** 无法识别的动作被静默忽略。对照上面的动作表。
-7. **是不是踩了 Lua 响应控制范围或 KV fail-open 这几个坑。** `headers` / `response_body` 只在普通 Lua 终止拦截响应分支使用；`headers` 还会过滤敏感/逐跳/`Content-Length`/`Location`/非法字段名/CRLF。`tags` 只进入 `action.Result.Tags`，当前没有独立日志持久化字段。线上 KV 不可用时宿主强制丢弃 Lua 判定。
+**章节来源**
+- [internal/waf/luaplugin/sandbox.go:66-124](file://internal/waf/luaplugin/sandbox.go#L66-L124)
+- [internal/cache/redis_kv.go:186-205](file://internal/cache/redis_kv.go#L186-L205)
 
-### 运行时报错与超时
+## 附录
 
-每次脚本失败都会写一条 warn 日志（`Engine.Evaluate`）：
+### 常量速查
 
-```
-lua plugin failed, skipping   script=<脚本名> stage=<pre|post> err=<错误>
-```
+| 项 | 值 | 定义:行 |
+|----|:--:|---------|
+| 入口函数名 | `handle` | `exec.go:17` |
+| 默认超时 / 下限 / 上限 | 50 ms / 1 ms / 1000 ms | `runtime.go:45-47`、`admin:43` |
+| 脚本源码上限 | 256 KiB | `runtime.go:50` |
+| 宿主 API 调用上限 / map 表项 / 单值 | 128 / 256 项 / 16 KiB | `runtime.go:53-55` |
+| Lua 响应头值 / 响应体 / `ctx.log` 消息 | 4 KiB / 16 KiB / 2 KiB | `runtime.go:56-58` |
+| 判定 headers / tags / 表遍历 / 状态码区间 | 32 项（名 256、值 2048）/ 32 项 128 B / 128 / 100..599 | `runtime.go:62-72` |
+| 改写体 / 字段 / 头数 / 头值 | 16 KiB / 16 KiB / 32 / 2048 B | `mutation.go:22-33` |
+| KV 前缀（脚本侧 / 最终键） | `owaf:lua:` / `openwaf:owaf:lua:` | `api.go:18`、`redis_kv.go:16` |
+| KV 键长 / 值 / 默认 TTL / TTL 上限 | 256 B / 64 KiB / 5 min / 24 h | `api.go:22-29` |
+| 请求体可见上限 | 48 KiB | `handler.go:377` |
+| 同阶段执行顺序 | `stage, priority, id` 升序 | `snapshot/lua.go:126` |
+| name / description 上限 / dry-run 迭代上限 | 128 / 512 字符 / 100 次 | `store:24`、`admin:536-582`、`dryrun.go:72-74` |
 
-错误文案的几种形态：
+**章节来源**
+- [internal/waf/luaplugin/runtime.go:40-72](file://internal/waf/luaplugin/runtime.go#L40-L72)
+- [internal/waf/luaplugin/api.go:15-29](file://internal/waf/luaplugin/api.go#L15-L29)
+- [internal/waf/luaplugin/mutation.go:22-33](file://internal/waf/luaplugin/mutation.go#L22-L33)
+- [internal/store/luaplugin/lua_plugin.go:24-42](file://internal/store/luaplugin/lua_plugin.go#L24-L42)
 
-| 文案 | 含义 |
-| --- | --- |
-| `luaplugin: "x" exceeded 50ms: context deadline exceeded` | 超时 |
-| `luaplugin: "x" handle() failed: ...` | `handle` 内部报错 |
-| `luaplugin: "x" init failed: ...` | 顶层代码报错 |
-| `luaplugin: "x" panicked: ...` | panic 被 recover |
-| `luaplugin: script must define a global function handle(ctx)` | 入口缺失 |
+### 与 QuickJS 插件的对照
 
-每个脚本的累计 `runs` / `failures` / `timeouts` / 平均耗时有三个查看入口，数据同源（`Engine.Stats()`），都是**进程级计数器，重启归零**：
+| 维度 | Lua 策略插件 | QuickJS 插件 |
+|------|--------------|--------------|
+| 后端 | gopher-lua，纯 Go | QuickJS，需 `-tags=quickjs` 与 CGO（`types.go:16-30`） |
+| 阶段名 | `pre` / `post` | `request` / `response`（`store/js_plugin.go:11-12`） |
+| 默认超时 | 50 ms（`runtime.go:45`） | 10 ms（`types.go:45`） |
+| 源码上限 | 256 KiB | 256 KiB（`types.go:49`） |
+| 执行资源 | 每次新建状态机 | 有界执行槽，默认 4 槽、8 MiB 堆、512 KiB 栈（`types.go:37-43`） |
+| 失败语义 | 恒 fail-open | 脚本可选 `fail_open` / `fail_closed` |
+| 跨请求状态 | `ctx.kv`（Redis） | 无对应 KV 通道 |
+| 响应改写落点 | proxy 链尾（最后消费） | proxy 链中，早于 Lua |
 
-- **管理页面**：Lua 策略页的运行时统计区，按脚本名与列表行对应，直接给出失败率与超时率
-- **管理 API**：`GET /api/v1/lua-plugins/stats`，返回 `{"items":[{"name","stage","runs","failures","timeouts","avg_ms"}],"total"}`
-- **Prometheus**：`/metrics` 上的 `openwaf_lua_script_runs_total`、`openwaf_lua_script_failures_total`、`openwaf_lua_script_timeouts_total`、`openwaf_lua_script_avg_duration_ms`，label 为 `{script,stage}`
+**章节来源**
+- [internal/waf/jsplugin/types.go:16-49](file://internal/waf/jsplugin/types.go#L16-L49)
+- [internal/store/js_plugin.go:11-18](file://internal/store/js_plugin.go#L11-L18)
+- [internal/proxy/js_plugin_response.go:113-160](file://internal/proxy/js_plugin_response.go#L113-L160)
 
-用它判断某个脚本是不是在持续失败或持续超时。`avg_duration_ms` 尤其值得和超时阈值对照看：实测一个只做两次字符串比较的脚本平均耗时约 **0.13 ms**，而默认超时是 50 ms——两者差三个数量级时，出现的超时基本都来自运行时抖动而非脚本本身。
+### 相关文档
 
-看 `Timeouts` 时请看**占比**而不是绝对值。默认超时是 50 ms 挂钟时间，而正常脚本只需一两百微秒，中间三个数量级的余量会被 GC 停顿、CPU 争抢这类运行时抖动吃掉——实测在 4000 次连续调用里出现过一次孤立超时，脚本本身并没有问题。偶发几次不用查；`Timeouts / Runs` 持续偏高才说明脚本真的太慢或卡在某个分支上。
+- [中间件开发](中间件开发.md)：`lua_pre`/`lua_post` 在处理层与响应变换链中的位置
+- [执行阶段系统](规则引擎扩展/执行阶段系统.md)：11 阶段链与新增阶段流程；[管道执行机制](../WAF%20引擎系统/引擎核心架构/管道执行机制.md)：`Run` 的短路与挑战延迟裁决
+- [NoSQL 存储适配](存储后端扩展/NoSQL%20存储适配.md)：`ctx.kv` 后端与前缀体系的能力边界
+- [消息队列集成](第三方集成/消息队列集成.md)：`store.BumpRevision` 驱动的重载广播链路
+- [规则引擎扩展](规则引擎扩展/规则引擎扩展.md)：QuickJS 侧同一套改写契约与四条扩展路线
 
-### 判定和预期不符
-
-用 `POST /lua-plugins/dry-run` 固定一个样例请求逐步排查。它返回确切的 `decision` 与 `elapsed_ms`，比看线上日志快得多。注意两点差异：
-
-- dry-run 与线上都会从原始查询串填充 `query_params`；重复键保留首个值。两者使用同一映射契约。
-- dry-run 里的 `phase` / `action` 是你自己填的，不代表内置引擎真的会那样判。想知道内置怎么判，看安全事件里的 `phase` 与 `action` 字段。
-
-### 排查 KV
-
-脚本写的键在 Redis 里的完整键名是 `openwaf:owaf:lua:<脚本里的键>`。想确认脚本到底写没写进去，按这个前缀扫。`kv.available()` 返回 false 说明 Redis 根本没配置、客户端未连上或后端已不可用，此时所有 KV 调用都静默降级；线上宿主还会强制丢弃所有 Lua 判定并继续后续流程。dry-run 不经过这道线上门禁，不能用 KV 不可用时的 dry-run `decision` 推断线上结果。
-
-### 性能
-
-脚本在数据面每请求同步执行，所以单次开销直接进 P99。
-
-关键机制：**每次调用都会重新执行脚本的顶层代码**。`exec.go` 的 `callHandler` 每次都 `NewFunctionFromProto` + `PCall(0, MultRet)` 跑完整个 chunk，然后才取全局 `handle` 来调用。也就是说写在顶层的 `local T = {...}` **每个请求都会重建一遍**，哪怕 `handle` 第一行就 `return nil`。
-
-在本机实测（`Engine.Evaluate` 共享状态机池，每脚本 2000~4000 次取均值）：
-
-| 脚本形态 | 单次均值 |
-| --- | --- |
-| `function handle(ctx) return nil end`（固定开销下限） | 约 75 µs |
-| 顶层两张十几项的常量表 + 两个闭包，`handle` 立刻返回 | 约 240 µs |
-| 同样的表挪进 `handle`、放在早退判断之后 | 约 130 µs |
-| `lua-examples/` 里的六个示例 | 约 150 ~ 275 µs |
-
-约 75 µs 是拿不掉的固定成本（`resetGlobals` 清全局 + 跑顶层 chunk + 构造 `ctx` 表 + 调 `handle`）。剩下的差值几乎全是顶层常量表的重建开销。
-
-据此的建议：
-
-- **尽早 `return nil`。** 绝大多数请求应该在头几行就被排除掉，这是收益最大的一条。
-- **热路径上的大常量表，放进 `handle` 的早退判断之后再构造**，而不是留在顶层——上表第二行和第三行的差距就是这个。表小（几项）时不值得为此牺牲可读性，`lua-examples/` 里的示例为了易读都用了顶层写法。
-- 优先用 `string.find(s, needle, 1, true)`（plain 模式）做子串匹配，比模式匹配快，也避免特殊字符被当模式解析。
-- 避免遍历 `ctx.body`——它可能有 48 KiB。
-- 每个请求都调 `kv.incr` 就是每个请求加一次 Redis 往返。先用路径/方法过滤掉不需要计数的请求。
-- 别指望顶层的可变状态跨请求存活。它每次都会被重建，且 `resetGlobals` 会清掉非白名单全局。跨请求状态只能用 `ctx.kv`。
-
-检测引擎相关改动后按项目约定跑压测（`./blazehttp -t http://127.0.0.1:80 -c 40`），确认没有明显性能回退。
-
-## 示例脚本
-
-`lua-examples/` 目录下的脚本都经过 `luaplugin.DryRun` 验证，可直接复制到管理界面使用。使用前请按注释调整常量（路径、阈值、指纹、站点 ID）。
-
-| 文件 | 阶段 | 用途 |
-| --- | --- | --- |
-| [01-ip-rate-limit.lua](./lua-examples/01-ip-rate-limit.lua) | `pre` | 用 `kv.incr` 做按 IP 的自定义限速 |
-| [02-post-allow-false-positive.lua](./lua-examples/02-post-allow-false-positive.lua) | `post` | 对已确认误报的路径放行，推翻内置拦截 |
-| [03-scanner-block.lua](./lua-examples/03-scanner-block.lua) | `pre` | 按 UA + 路径组合拦截扫描器 |
-| [04-ja4-client-classify.lua](./lua-examples/04-ja4-client-classify.lua) | `pre` | 基于 TLS JA4 指纹识别与分流客户端 |
-| [05-observe-suspicious.lua](./lua-examples/05-observe-suspicious.lua) | `pre` | 给可疑请求打观察记录而不拦截 |
-| [06-per-site-policy.lua](./lua-examples/06-per-site-policy.lua) | `pre` | 全站脚本用 `ctx.site_id` 对不同站点进一步分流 |
-
-## 常量速查表
-
-| 项 | 值 | 定义位置 |
-| --- | --- | --- |
-| 入口函数名 | `handle` | `exec.go` `handlerName` |
-| 默认执行超时 | 50 ms | `runtime.go` `defaultTimeout` |
-| 单脚本超时可配范围 | 0 ~ 1000 ms | `admin/system/lua_plugin.go` `luaMaxTimeoutMS` |
-| 脚本源码上限 | 256 KiB | `runtime.go` `maxScriptBytes` |
-| 请求体可见上限 | 48 KiB | `dataplane/handler.go` `maxWAFBody` |
-| Lua 响应体上限 | 16 KiB | `runtime.go` `maxResponseBody` |
-| 单个 Lua 响应头值上限 | 4 KiB | `runtime.go` `maxHeaderValue` |
-| KV 键前缀 | `owaf:lua:` | `api.go` `kvKeyPrefix` |
-| KV 键长上限 | 256 字节 | `api.go` `kvMaxKeyLen` |
-| KV 值大小上限 | 64 KiB | `api.go` `kvMaxValueLen` |
-| KV 默认 TTL | 5 分钟 | `api.go` `kvDefaultTTL` |
-| KV TTL 上限 | 24 小时 | `api.go` `kvMaxTTL` |
-| Redis 实际键前缀 | `openwaf:` | `cache/redis_kv.go` `redisPrefix` |
-| 同阶段执行顺序 | `priority ASC, id ASC` | `snapshot/lua.go` |
-| 描述字段上限 | 512 字符 | `store/lua_plugin.go` |
+[本节为总结，无需特定文件来源]

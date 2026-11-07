@@ -324,3 +324,46 @@ func TestListRequestsLastSeenIsMaxCreatedAt(t *testing.T) {
 		t.Errorf("last_seen = %s, want %s (MAX(created_at))", items[0].LastSeen, newest)
 	}
 }
+
+// TestSecurityEventRepoFindByRequestIDDoesNotCacheEmptyResult 覆盖“读侧先看到
+// 空集、写侧随后异步提交”的竞态：空结果一旦被缓存，写侧的 DEL 完全可能
+// 早于这次 SET，刚写入的事件就会在整个 TTL 内对追踪页不可见。
+func TestSecurityEventRepoFindByRequestIDDoesNotCacheEmptyResult(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.SecurityEvent{}); err != nil {
+		t.Fatalf("migrate security event: %v", err)
+	}
+	repo := NewSecurityEventRepo(db)
+	hotCache := newTestKVHotCache()
+	repo.SetHotCache(hotCache)
+
+	const requestID = "empty-then-written"
+	items, err := repo.FindByRequestID(requestID)
+	if err != nil {
+		t.Fatalf("first lookup: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("first lookup items = %d, want 0", len(items))
+	}
+	if _, cached := hotCache.values[store.SecurityEventRequestCacheKey(requestID)]; cached {
+		t.Fatal("empty result must not be cached: a later SET could outlive the writer's DEL")
+	}
+
+	row := store.SecurityEvent{RequestID: requestID, Action: "intercept", StatusCode: 403}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	items, err = repo.FindByRequestID(requestID)
+	if err != nil {
+		t.Fatalf("second lookup: %v", err)
+	}
+	if len(items) != 1 || items[0].RequestID != requestID {
+		t.Fatalf("second lookup items = %#v, want the just-written event", items)
+	}
+	if _, cached := hotCache.values[store.SecurityEventRequestCacheKey(requestID)]; !cached {
+		t.Fatal("non-empty result should be cached")
+	}
+}

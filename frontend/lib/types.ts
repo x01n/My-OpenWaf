@@ -18,6 +18,8 @@ export interface TLSFingerprintSummary {
   tls_version?: string
   tls_alpn?: string
   tls_sni?: string
+  /** TLS SNI 为空的两义消歧：present / absent（客户端未发 server_name 扩展），缺失表示未知 */
+  tls_sni_presence?: string
   tls_cipher_suites?: string
   tls_extensions?: string
   tls_curves?: string
@@ -277,6 +279,7 @@ export interface Policy {
   site_count?: number
   rule_count?: number
 }
+export type CiscoASAMode = "legacy" | "strict" | "scoped"
 
 export interface OWASPRuleItem {
   id: string
@@ -297,6 +300,7 @@ export interface OWASPRuleItem {
   status_code?: number
   redirect_to?: string
   captcha_type?: CaptchaType
+  cisco_asa_mode?: CiscoASAMode | ""
   whitelist?: string[]
   note?: string
   overridden?: boolean
@@ -495,6 +499,8 @@ export interface SecurityEvent {
 
   tls_version?: string
   tls_sni?: string
+  /** TLS SNI 为空的两义消歧：present / absent（客户端未发 server_name 扩展），缺失表示未知 */
+  tls_sni_presence?: string
   tls_alpn?: string
   tls_ja3?: string
   tls_ja3_hash?: string
@@ -569,6 +575,8 @@ export interface RealtimeSecurityEventItem {
   match_desc?: string
   tls_version?: string
   tls_sni?: string
+  /** TLS SNI 为空的两义消歧：present / absent（客户端未发 server_name 扩展），缺失表示未知 */
+  tls_sni_presence?: string
   tls_alpn?: string
   tls_ja3_hash?: string
   tls_ja4?: string
@@ -637,8 +645,12 @@ export interface AccessLog {
 
   http_protocol?: string
   upstream_http_protocol?: string
+  /** 该请求来自 HTTP/3 0-RTT（early data）。0-RTT 数据可被重放，审计时需与 1-RTT 区分。 */
+  zero_rtt?: boolean
   tls_version?: string
   tls_sni?: string
+  /** TLS SNI 为空的两义消歧：present / absent（客户端未发 server_name 扩展），缺失表示未知 */
+  tls_sni_presence?: string
   tls_alpn?: string
   tls_ja3?: string
   tls_ja3_hash?: string
@@ -712,6 +724,8 @@ export interface BotScoreLog {
   tls_ja4?: string
   tls_version?: string
   tls_sni?: string
+  /** TLS SNI 为空的两义消歧：present / absent（客户端未发 server_name 扩展），缺失表示未知 */
+  tls_sni_presence?: string
   tls_alpn?: string
   header_order?: string
   total_score: number
@@ -809,6 +823,8 @@ export interface RecordedResource {
   content_type?: string
   tls_version?: string
   tls_sni?: string
+  /** TLS SNI 为空的两义消歧：present / absent（客户端未发 server_name 扩展），缺失表示未知 */
+  tls_sni_presence?: string
   tls_alpn?: string
   ja3_hash?: string
   ja4?: string
@@ -952,6 +968,7 @@ export interface NetworkConfig {
   http2_enabled: boolean
   http3_enabled: boolean
   http3_bind: string
+  http3_per_port_enabled: boolean
   default_alpn: string
   default_network: "tcp" | "tcp4" | "tcp6"
 }
@@ -975,12 +992,55 @@ export interface TLSConfig {
   curve_preferences: string
   prefer_server_cipher_suites: boolean
   session_tickets_enabled: boolean
+  /** HTTP/3 是否接受 0-RTT 早期数据；需与 has_explicit_allow_0rtt 一起读。 */
+  allow_0rtt: boolean
+  /** 为 false 表示 allow_0rtt 未显式配置，运行态继承 session_tickets_enabled。 */
+  has_explicit_allow_0rtt: boolean
   self_signed_on_ip: boolean
 }
 
+/**
+ * TLS 全局默认配置的局部更新载荷。
+ *
+ * allow_0rtt 单独放宽为可空：`null` 表示清除显式配置、回到继承
+ * session_tickets_enabled，缺省才表示「本次不涉及该字段」。
+ */
 export type TLSConfigUpdate = Partial<
-  Omit<TLSConfig, "has_explicit_default_alpn">
->
+  Omit<
+    TLSConfig,
+    "has_explicit_default_alpn" | "has_explicit_allow_0rtt" | "allow_0rtt"
+  >
+> & {
+  allow_0rtt?: boolean | null
+}
+
+/**
+ * 图像转换全局配置。
+ *
+ * 与后端 `imagery.Config` 的 JSON 键一一对应（internal/imagery/config.go）。
+ * 该能力由 URL 查询参数 `image_process=...` 逐请求触发，不依赖站点的
+ * HTML/JS 混淆开关。
+ */
+export interface ImageTransformConfig {
+  /** 总开关；关闭时数据面完全忽略 image_process 参数。 */
+  enabled: boolean
+  /** 自适应 WebP：Accept 含 image/webp 时自动转码并声明 Vary: Accept。 */
+  adaptive_webp: boolean
+  /** 单张图的宽×高上限（像素）。 */
+  max_pixels: number
+  /** 单边长度上限（像素）。 */
+  max_side: number
+  /** 输入字节上限。 */
+  max_bytes: number
+  /** 单张图转换的墙钟预算（毫秒）。 */
+  timeout_ms: number
+  /** 并发转换数量上限；0 表示按 CPU 核数。 */
+  concurrency: number
+  /** 未显式给出 quality 参数时的编码质量；0 表示用编码器默认值。 */
+  default_quality: number
+}
+
+export type ImageTransformConfigUpdate = Partial<ImageTransformConfig>
 
 /** 快照构建时发现的稳定、脱敏配置诊断。 */
 export interface SnapshotConfigDiagnostic {
@@ -1003,6 +1063,99 @@ export interface SnapshotConfigDiagnostic {
 export interface RuntimeConfig {
   revision: number
   config_diagnostics: SnapshotConfigDiagnostic[]
+}
+
+/**
+ * 环境变量覆盖：域标识。
+ *
+ * 与后端注册表的 group 字段逐字一致；`bootstrap`（引导类）与 `internal`
+ * （测试专用）两个域只读展示。
+ */
+export type EnvOverrideGroupKey =
+  | "network"
+  | "detection"
+  | "observability"
+  | "limits"
+  | "cache"
+  | "queue"
+  | "http3"
+  | "bootstrap"
+  | "internal"
+
+/** 环境变量覆盖：值类型，决定渲染哪种控件。 */
+export type EnvOverrideValueType = "bool" | "int" | "string" | "duration"
+
+/** 环境变量覆盖：生效值来源。 */
+export type EnvOverrideSource = "env" | "db" | "default"
+
+/**
+ * 环境变量覆盖：单个域的元数据。
+ *
+ * 后端契约：GET/POST /api/v1/runtime-config/env-overrides 的 groups[]。
+ */
+export interface EnvOverrideGroup {
+  key: EnvOverrideGroupKey
+  label_key: string
+}
+
+/**
+ * 环境变量覆盖：单个键的完整状态。
+ *
+ * 后端契约：GET/POST /api/v1/runtime-config/env-overrides 的 items[]。
+ * `source === "env"` 表示当前由环境变量决定；`overridden === true` 表示
+ * 页面已显式保存过（此时 source 必为 "db"）；`sensitive === true` 时
+ * env_value 与 value 是掩码，不回显真值。无环境变量载体的键 `env` 为空串。
+ */
+export interface EnvOverrideItem {
+  key: string
+  env: string
+  group: EnvOverrideGroupKey
+  type: EnvOverrideValueType
+  default_value: string | number | boolean | null
+  /** env 自身的解析取值；未设置或不可用时为 null，密钥类恒为 null。 */
+  env_value: string | number | boolean | null
+  effective_value: string | number | boolean | null
+  source: EnvOverrideSource
+  overridden: boolean
+  value: string | number | boolean | null
+  sensitive: boolean
+  editable: boolean
+  /** 无边界时后端返回显式 null（不得省略该字段）。 */
+  min: number | null
+  max: number | null
+  label_key: string
+  description_key: string
+  /**
+   * delegated 键的专用写入口端点路径（例如 `/api/v1/tls-config`）。
+   *
+   * 后端对 `omitempty` 字段：只有 `scope=delegated` 的键才有该字段，
+   * 因此「该字段非空」本身就是「delegated」的判据。
+   */
+  delegated_to?: string
+  /**
+   * 为真表示覆盖要等进程重启才生效（启动固化类键）。
+   *
+   * 与 `RedisConfigResponse.restart_required` 同名的另一个端点字段，
+   * 两者语义一致但互不相关，勿混用。
+   */
+  restart_required?: boolean
+}
+
+/** 环境变量覆盖读写响应（GET 与 POST 形状相同，POST 为写后回读）。 */
+export interface EnvOverridesResponse {
+  groups: EnvOverrideGroup[]
+  items: EnvOverrideItem[]
+}
+
+/**
+ * 环境变量覆盖写载荷。
+ *
+ * `overrides` 里出现的键才被改写；`clear` 里的键回到 unset 并重新跟随
+ * env；未出现在任何一边的键保持原状。
+ */
+export interface EnvOverridesUpdate {
+  overrides: Record<string, string | number | boolean>
+  clear: string[]
 }
 
 export interface RedisConfigResponse {
@@ -1164,6 +1317,8 @@ export interface BotSettings {
   browser_sign_enabled?: boolean
   browser_sign_ttl?: number
   browser_sign_action?: string
+  /** 全局 HTML→Markdown 协商开关；客户端显式 Accept: text/markdown 时才转换。 */
+  html_to_markdown_enabled?: boolean
   js_obfuscation_paths?: string[]
   image_watermark_paths?: string[]
   watermark_text?: string
@@ -1561,6 +1716,8 @@ export interface LuaDryRunRequestView {
   tls_ja3?: string
   tls_ja4?: string
   tls_sni?: string
+  /** TLS SNI 为空的两义消歧：present / absent（客户端未发 server_name 扩展），缺失表示未知 */
+  tls_sni_presence?: string
   /** 模拟内置引擎命中的阶段，仅 post 阶段有意义 */
   phase?: string
   /** 模拟内置引擎的判定动作，仅 post 阶段有意义 */
@@ -1755,6 +1912,14 @@ export interface JSPluginStatsItem {
   failures: number
   timeouts: number
   avg_ms: number
+  /** 最近一次失败的脱敏错误消息；脚本从未失败时省略。 */
+  last_error?: string
+  /** 最近一次失败发生的执行阶段；脚本从未失败时省略。 */
+  last_error_stage?: JSPluginStage
+  /** 最近一次失败时间（RFC3339）；脚本从未失败时省略。 */
+  last_error_at?: string
+  /** 最近一次错误消息的累计出现次数；脚本从未失败时省略。 */
+  last_error_count?: number
 }
 
 /** JS 插件统计响应。 */

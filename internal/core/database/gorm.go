@@ -86,12 +86,9 @@ func openSQLite(opt Options, gcfg *gorm.Config) (*gorm.DB, error) {
 	//   cache_size=-64000      — 64MB 页缓存
 	//   foreign_keys=ON        — 强制外键约束
 	//   wal_autocheckpoint=1000 — 每 1000 页做一次检查点，避免 WAL 长时间堆积
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)"
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)&_time_format=sqlite"
 	if opt.LogDB {
-		// 日志库 append-only 且无长事务，自动 checkpoint 窗口取 2000 页（≈8MB），
-		// 避免 WAL 在两次 archiver 维护之间膨胀到数百 MB、放大只读查询并拖慢 crash 恢复。
-		// 相比原 64000 页（≈256MB），代价仅是 synchronous=NORMAL 下多几次 checkpoint fsync。
-		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=foreign_keys(OFF)&_pragma=wal_autocheckpoint(2000)"
+		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=foreign_keys(OFF)&_pragma=wal_autocheckpoint(4000)&_time_format=sqlite"
 	}
 
 	db, err := gorm.Open(sqlite.Open(dsn), gcfg)

@@ -277,7 +277,7 @@ func TestRunHotReloadedRedisReceivesUnifiedObservabilityWritesInSeparateProcess(
 		t.Fatal("HTTP response missing X-Request-ID header")
 	}
 
-	trace := appProc.waitForRequestTrace(t, requestID)
+	trace := appProc.waitForRequestTraceWithAccessLogs(t, requestID)
 	if len(trace.AccessLogs) == 0 {
 		t.Fatal("request trace access_logs is empty")
 	}
@@ -377,7 +377,7 @@ func TestRunHotReloadedRedisEnablesAccessAndSecurityHotCacheInSeparateProcess(t 
 		t.Fatal("HTTP response missing X-Request-ID header")
 	}
 
-	trace := appProc.waitForRequestTrace(t, requestID)
+	trace := appProc.waitForRequestTraceWithAccessAndSecurityLogs(t, requestID)
 	if len(trace.AccessLogs) == 0 {
 		t.Fatal("request trace access_logs is empty")
 	}
@@ -4260,7 +4260,7 @@ func TestRunServesHTTP2RequestsWithTraceableProtocolMetadataInSeparateProcess(t 
 		t.Fatalf("access log request_id = %q, want %q", accessLog.RequestID, requestID)
 	}
 
-	trace := appProc.waitForRequestTrace(t, requestID)
+	trace := appProc.waitForRequestTraceWithAccessLogs(t, requestID)
 	if trace.RequestID != requestID {
 		t.Fatalf("request trace request_id = %q, want %q", trace.RequestID, requestID)
 	}
@@ -11622,7 +11622,7 @@ func TestRunServesHTTP3ThroughLegacyTLSLoopbackListenersInSeparateProcess(t *tes
 				t.Fatalf("fingerprint tls_cipher_suites = %q, want inbound QUIC TLS1.3 suites", fingerprint.TLSCipherSuites)
 			}
 
-			trace := appProc.waitForRequestTrace(t, requestID)
+			trace := appProc.waitForRequestTraceWithAccessLogs(t, requestID)
 			if trace.RequestID != requestID {
 				t.Fatalf("request trace request_id = %q, want %q", trace.RequestID, requestID)
 			}
@@ -14524,33 +14524,55 @@ func (h *appProcessHarness) waitRuntimeResponseCompressionState(t *testing.T, wa
 	)
 }
 
-func (h *appProcessHarness) waitForRequestTrace(t *testing.T, requestID string) struct {
-	RequestID      string                `json:"request_id"`
-	AccessLogs     []store.AccessLog     `json:"access_logs"`
-	SecurityEvents []store.SecurityEvent `json:"security_events"`
-} {
+func (h *appProcessHarness) waitForRequestTrace(t *testing.T, requestID string) appProcessRequestTrace {
+	t.Helper()
+
+	return h.waitForRequestTraceUntil(t, requestID, func(accessLogs, securityEvents int) bool {
+		return accessLogs > 0 || securityEvents > 0
+	})
+}
+
+func (h *appProcessHarness) waitForRequestTraceWithAccessLogs(t *testing.T, requestID string) appProcessRequestTrace {
+	t.Helper()
+
+	return h.waitForRequestTraceUntil(t, requestID, func(accessLogs, _ int) bool {
+		return accessLogs > 0
+	})
+}
+
+func (h *appProcessHarness) waitForRequestTraceWithAccessAndSecurityLogs(t *testing.T, requestID string) appProcessRequestTrace {
+	t.Helper()
+
+	return h.waitForRequestTraceUntil(t, requestID, func(accessLogs, securityEvents int) bool {
+		return accessLogs > 0 && securityEvents > 0
+	})
+}
+
+func (h *appProcessHarness) waitForRequestTraceUntil(
+	t *testing.T,
+	requestID string,
+	predicate func(accessLogs, securityEvents int) bool,
+) appProcessRequestTrace {
 	t.Helper()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var trace struct {
-			RequestID      string                `json:"request_id"`
-			AccessLogs     []store.AccessLog     `json:"access_logs"`
-			SecurityEvents []store.SecurityEvent `json:"security_events"`
-		}
+		var trace appProcessRequestTrace
 		h.getJSON(t, "/api/v1/request/"+url.PathEscape(requestID), &trace)
-		if len(trace.AccessLogs) > 0 || len(trace.SecurityEvents) > 0 {
+		if predicate(len(trace.AccessLogs), len(trace.SecurityEvents)) {
 			return trace
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	t.Fatalf("request trace did not appear for request_id=%q\n%s", requestID, h.output.String())
-	return struct {
-		RequestID      string                `json:"request_id"`
-		AccessLogs     []store.AccessLog     `json:"access_logs"`
-		SecurityEvents []store.SecurityEvent `json:"security_events"`
-	}{}
+	return appProcessRequestTrace{}
+}
+
+type appProcessRequestTrace struct {
+	RequestID      string                `json:"request_id"`
+	AccessLogs     []store.AccessLog     `json:"access_logs"`
+	SecurityEvents []store.SecurityEvent `json:"security_events"`
 }
 
 func waitForAppMockRedisCommand(t *testing.T, srv *appMockRedisServer, prefix string) {
@@ -16240,7 +16262,7 @@ func requireAppProcessAccessLogTrace(t *testing.T, h *appProcessHarness, accessL
 		}
 	}
 
-	trace := h.waitForRequestTrace(t, expect.requestID)
+	trace := h.waitForRequestTraceWithAccessLogs(t, expect.requestID)
 	if trace.RequestID != expect.requestID {
 		t.Fatalf("%s request trace request_id = %q, want %q", expect.label, trace.RequestID, expect.requestID)
 	}
@@ -16372,7 +16394,7 @@ func requireAppProcessObservedRequest(t *testing.T, h *appProcessHarness, expect
 		}
 	}
 
-	trace := h.waitForRequestTrace(t, expect.requestID)
+	trace := h.waitForRequestTraceWithAccessLogs(t, expect.requestID)
 	if trace.RequestID != expect.requestID {
 		t.Fatalf("%s request trace request_id = %q, want %q", expect.label, trace.RequestID, expect.requestID)
 	}

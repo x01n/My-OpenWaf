@@ -53,8 +53,8 @@ func (c *h2ResetProbeConn) ResetStreamHandler(code forkhttp2.ErrCode) bool {
 }
 
 /**
- * h2ResetRefuseConn 的 ResetStreamHandler 返回 false，
- * 用于覆盖 drop 路径的兜底顺序（502 在链路中更靠后）。
+ * h2ResetRefuseConn 的 ResetStreamHandler 返回 false，用于覆盖
+ * drop 路径的兜底顺序（流级复位失败后关闭底层连接）。
  */
 type h2ResetRefuseConn struct{}
 

@@ -52,6 +52,8 @@ func NewHotCache(redis rueidis.Client, log *slog.Logger) *HotCache {
 	}
 }
 
+func HotKey(key string) string { return hotCachePrefix + key }
+
 func (h *HotCache) redisClient() rueidis.Client {
 	if h == nil {
 		return nil
@@ -208,6 +210,50 @@ func (h *HotCache) SetBytes(key string, data []byte, ttl time.Duration) {
 	h.noteHealthy(client)
 }
 
+/**
+ * SetIfAbsent 仅在键不存在时写入（SET key value NX PX ttl），返回是否实际写入。
+ *
+ * 回填路径必须用它而不是 Set：写侧（日志提交后的 Redis 推送）以 7 天 TTL 写入
+ * request_id 详情键，读侧回源数据库后只想在键缺失时补一份短 TTL 副本。若读侧
+ * 直接 Set 覆盖，热门追踪请求会把 7 天键降级成短 TTL，随后再次回源，形成
+ * 「回源 → 缩短 TTL → 更频繁回源」的退化。
+ *
+ * @param key 缓存键（不含全局前缀）。
+ * @param value 需要 JSON 序列化的值。
+ * @param ttl 键的存活时间。
+ * @return 写入成功为 true；键已存在、序列化失败或 Redis 不可用均为 false。
+ */
+func (h *HotCache) SetIfAbsent(key string, value any, ttl time.Duration) bool {
+	if !h.Available() {
+		return false
+	}
+	client := h.redisClient()
+	if client == nil {
+		return false
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ok, err := client.Do(ctx, client.B().Set().Key(h.prefix+key).Value(string(data)).Nx().Px(ttl).Build()).AsBool()
+	if err != nil {
+		// NX 未命中时 Redis 返回 nil 回复：这是正常的「键已存在」，不能计入故障，
+		// 否则每次回填撞上写侧键都会推进熔断窗口，把缓存整体打成不可用。
+		if errors.Is(err, rueidis.Nil) {
+			h.noteHealthy(client)
+			return false
+		}
+		h.recordReadErr(client, key, err)
+		return false
+	}
+	if ok {
+		h.noteHealthy(client)
+	}
+	return ok
+}
+
 // GetBytes 取出原始字节；未命中返回 nil。
 func (h *HotCache) GetBytes(key string) []byte {
 	if !h.Available() {
@@ -240,6 +286,32 @@ func (h *HotCache) Invalidate(key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	client.Do(ctx, client.B().Del().Key(h.prefix+key).Build())
+}
+
+/**
+ * InvalidateMany 在一次往返中删除多个键。
+ *
+ * keys 是不含 openwaf:hot: 前缀的裸键，与 Get/Set 的入参约定一致。
+ * 逐个调用 Invalidate 会产生 N 次网络往返，失效一批指纹聚合键时开销明显；
+ * 一次 DEL 多键把成本压到一次往返。
+ *
+ * @param keys 待删除的裸键列表，空列表直接返回。
+ */
+func (h *HotCache) InvalidateMany(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	client := h.redisClient()
+	if client == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	prefixed := make([]string, len(keys))
+	for i, key := range keys {
+		prefixed[i] = h.prefix + key
+	}
+	client.Do(ctx, client.B().Del().Key(prefixed...).Build())
 }
 
 /**

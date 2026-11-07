@@ -3,7 +3,7 @@
 > [返回 管理 API 系统](../管理 API 系统.md)
 
 <cite>
-**本文引用的文件**
+**本文档引用的文件**
 - [rule.go](file://internal/admin/rule/rule.go)
 - [validate.go](file://internal/admin/rule/validate.go)
 - [rule.go](file://internal/store/repository/rule.go)
@@ -13,19 +13,19 @@
 - [API 端点参考.md](file://docs/管理 API 系统/REST API 设计规范/API 端点参考.md)
 - [规则管理 API.md](file://docs/管理 API 系统/规则管理 API/规则管理 API.md)
 - [page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
-- [crud-page.tsx](file://frontend/components/crud-page.tsx)
 - [api.ts](file://frontend/lib/api.ts)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
-4. [架构概览](#架构概览)
+4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
 7. [性能考虑](#性能考虑)
-8. [故障排除指南](#故障排除指南)
+8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
 10. [附录](#附录)
 
@@ -118,7 +118,7 @@ class RuleRepo {
 - [rule.go:18-138](file://internal/admin/rule/rule.go#L18-L138)
 - [rule.go:24-51](file://internal/store/repository/rule.go#L24-L51)
 
-## 架构概览
+## 架构总览
 
 ```mermaid
 sequenceDiagram
@@ -576,8 +576,8 @@ subgraph "路由层"
 Router[router.go]
 end
 subgraph "规则模块"
-RuleHandler[rule.go]
-ValidateHandler[validate.go]
+RuleHandler[admin/rule/rule.go]
+ValidateHandler[rule/validate.go]
 RuleRepo[repository/rule.go]
 end
 subgraph "存储层"
@@ -618,7 +618,7 @@ RuleRepo --> DB
 - 支持批量创建规则，减少数据库连接开销
 - 使用事务确保数据一致性
 
-## 故障排除指南
+## 故障排查指南
 
 ### 常见错误类型
 
@@ -688,12 +688,10 @@ CRUD-->>Page : 更新页面状态
 
 **图表来源**
 - [page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
-- [crud-page.tsx](file://frontend/components/crud-page.tsx)
 - [api.ts](file://frontend/lib/api.ts)
 
 **章节来源**
 - [API 端点参考.md:290-358](file://docs/管理 API 系统/REST API 设计规范/API 端点参考.md#L290-L358)
 - [规则管理 API.md:430-440](file://docs/管理 API 系统/规则管理 API/规则管理 API.md#L430-L440)
 - [page.tsx](file://frontend/app/(dashboard)/rules/page.tsx)
-- [crud-page.tsx](file://frontend/components/crud-page.tsx)
 - [api.ts](file://frontend/lib/api.ts)

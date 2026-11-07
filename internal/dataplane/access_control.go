@@ -36,6 +36,15 @@ func SetAccessStoreRedisClients(redisClient rueidis.Client) {
 	}
 }
 
+/**
+ * RevokeAllAccessSessions 全量吊销所有站点访问控制会话（内存与 Redis 双端）。
+ *
+ * @return 存储层返回的错误；成功或无会话可吊销时为 nil。
+ */
+func RevokeAllAccessSessions() error {
+	return globalAccessSessionStore.RevokeAll()
+}
+
 // accessSessionCleaner 定期清理过期会话和 OAuth state。
 func accessSessionCleaner() {
 	ticker := time.NewTicker(5 * time.Minute)

@@ -14,6 +14,23 @@ import (
 	"time"
 )
 
+// oauthOutboundTimeout 是 OAuth/OIDC 出站请求（token、userinfo）的整体超时。
+//
+// 这些调用位于数据面请求路径上：IdP 端点挂起（对端不响应、网络黑洞、恶意慢端点）
+// 会一直占住 hertz 的工作 goroutine，直到进程退出。修复前调用走 http.DefaultClient
+// （Timeout 为 0，永不超时），构成一条拒绝服务面。
+//
+// 取 10s：与同文件 OIDC discovery 的既有超时一致；OIDC 规范未对 token/userinfo
+// 端点设期限，正常网络下远低于 1s，域内自建 IdP 最坏也在数秒级，10s 既留足余量，
+// 又把单个请求占用工作 goroutine 的最坏时长限制在可预期量级。
+const oauthOutboundTimeout = 10 * time.Second
+
+// oauthOutboundClient 是 OAuth/OIDC 出站请求专用的 HTTP 客户端。
+//
+// 有意不使用 http.DefaultClient：后者全进程共享，改其 Timeout 会波及所有
+// http.Get/http.Post 调用点。此客户端自带超时，同时复用同一连接池。
+var oauthOutboundClient = &http.Client{Timeout: oauthOutboundTimeout}
+
 // OAuthFlow 管理 OAuth2/OIDC 认证流程。
 type OAuthFlow struct {
 	ProviderID   uint
@@ -199,7 +216,7 @@ func (f *OAuthFlow) ExchangeCode(code string, state *OAuthState) (string, error)
 		params.Set("code_verifier", state.CodeVerifier)
 	}
 
-	resp, err := http.PostForm(tokenURL, params)
+	resp, err := oauthOutboundClient.PostForm(tokenURL, params)
 	if err != nil {
 		return "", fmt.Errorf("token request failed: %w", err)
 	}
@@ -250,7 +267,7 @@ func (f *OAuthFlow) FetchUserInfo(accessToken string) (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthOutboundClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("userinfo request failed: %w", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -114,12 +113,10 @@ func (c *h2LoopCore) ServeHTTP(ctx context.Context, rc *app.RequestContext) {
 		// 不再写任何响应字节。
 		return
 	}
+	// 生产 handler.go drop 分支的兜底：流级复位失败时关闭底层连接，
+	// 绝不再回写 403/502 拦截页。
 	if !g.Execute(exec, reason) {
-		// 生产 handler.go drop 分支的兜底语义：没有流级 RST 可发时
-		// 降级为 403 拦截页，并带 X-OWAF-Drop-Degraded 标记。
-		// （h2 在 fork v0.2.0 无 ResetStreamHandler 时的确定性行为。）
-		rc.Response.Header.Set("X-OWAF-Drop-Degraded", "h2-h3-no-stream-reset")
-		rc.AbortWithStatus(http.StatusForbidden)
+		rc.Abort()
 	}
 }
 

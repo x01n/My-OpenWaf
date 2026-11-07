@@ -47,7 +47,7 @@ func refNextSQLiHit(normalized string, threshold int) (OWASPHit, bool) {
 		if !refEarlyStopGate(threshold > 3, p, signals) {
 			continue
 		}
-		if !shouldScanSQLiPatternWithSignals(normalized, p, signals) {
+		if !shouldScanSQLiPatternWithSignals(normalized, p, signals, nil) {
 			continue
 		}
 		if !p.re.MatchString(normalized) {
@@ -86,7 +86,7 @@ func equivSQLiHit(normalized string, threshold int) (ruleID string, score int, o
 	signals := collectSQLiPatternSignals(normalized)
 	total := 0
 	for _, p := range sqliPatterns {
-		if !shouldScanSQLiPatternWithSignals(normalized, p, signals) {
+		if !shouldScanSQLiPatternWithSignals(normalized, p, signals, nil) {
 			continue
 		}
 		if !p.re.MatchString(normalized) {

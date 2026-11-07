@@ -1,374 +1,731 @@
 # NoSQL 存储适配
 
-> [返回 扩展与插件系统](../扩展与插件系统.md)
+> [返回 存储后端扩展](存储后端扩展.md) · [返回 扩展与插件系统](../扩展与插件系统.md)
 
 <cite>
-
-<cite>
-**本文引用的文件**
+**本文档引用的文件**
+- [README.md](file://README.md)
+- [go.mod](file://go.mod)
 - [internal/core/redis/redis.go](file://internal/core/redis/redis.go)
-- [internal/cache/redis_kv.go](file://internal/cache/redis_kv.go)
-- [internal/cache/response_cache.go](file://internal/cache/response_cache.go)
-- [internal/waf/ratelimit/redis.go](file://internal/waf/ratelimit/redis.go)
 - [internal/core/redis/pubsub.go](file://internal/core/redis/pubsub.go)
 - [internal/core/runtime.go](file://internal/core/runtime.go)
-- [internal/core/config.go](file://internal/core/config.go)
+- [internal/app/server.go](file://internal/app/server.go)
+- [internal/core/database/gorm.go](file://internal/core/database/gorm.go)
+- [internal/cache/redis_kv.go](file://internal/cache/redis_kv.go)
+- [internal/cache/hot_cache.go](file://internal/cache/hot_cache.go)
+- [internal/waf/ratelimit/redis.go](file://internal/waf/ratelimit/redis.go)
+- [internal/waf/ratelimit/ratelimit.go](file://internal/waf/ratelimit/ratelimit.go)
+- [internal/waf/ratelimit/dynamic.go](file://internal/waf/ratelimit/dynamic.go)
+- [internal/waf/luaplugin/runtime.go](file://internal/waf/luaplugin/runtime.go)
+- [internal/waf/luaplugin/api.go](file://internal/waf/luaplugin/api.go)
+- [internal/waf/accessgate/store_redis.go](file://internal/waf/accessgate/store_redis.go)
+- [internal/waf/challenge/captcha.go](file://internal/waf/challenge/captcha.go)
+- [internal/waf/challenge/shield.go](file://internal/waf/challenge/shield.go)
+- [internal/waf/challenge/chain.go](file://internal/waf/challenge/chain.go)
+- [internal/waf/escalation/escalation.go](file://internal/waf/escalation/escalation.go)
 - [internal/waf/antireplay/antireplay.go](file://internal/waf/antireplay/antireplay.go)
-- [docs/扩展与插件系统/存储后端扩展/NoSQL 存储适配.md](file://docs/扩展与插件系统/存储后端扩展/NoSQL 存储适配.md)
-- [docs/数据存储层/Redis 集成.md](file://docs/数据存储层/Redis 集成.md)
-- [docs/缓存与性能优化/Redis 集成与分布式缓存.md](file://docs/缓存与性能优化/Redis 集成与分布式缓存.md)
-- [docs/配置管理系统/分布式同步机制.md](file://docs/配置管理系统/分布式同步机制.md)
-- [docs/扩展与插件系统/存储后端扩展/连接池管理.md](file://docs/扩展与插件系统/存储后端扩展/连接池管理.md)
+- [internal/observability/unified_writer.go](file://internal/observability/unified_writer.go)
+- [internal/dataplane/resource_aggregator.go](file://internal/dataplane/resource_aggregator.go)
+- [internal/dataplane/access_control.go](file://internal/dataplane/access_control.go)
+- [internal/admin/system/dashboard/dashboard.go](file://internal/admin/system/dashboard/dashboard.go)
+- [internal/admin/system/network.go](file://internal/admin/system/network.go)
+- [internal/admin/router.go](file://internal/admin/router.go)
+- [internal/store/system.go](file://internal/store/system.go)
+- [internal/store/repository/repository.go](file://internal/store/repository/repository.go)
+- [internal/store/repository/access_log.go](file://internal/store/repository/access_log.go)
+- [internal/store/repository/security_event.go](file://internal/store/repository/security_event.go)
+- [internal/store/repository/fingerprint_cache.go](file://internal/store/repository/fingerprint_cache.go)
+- [internal/core/rules/phases.go](file://internal/core/rules/phases.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
-5. [组件详解](#组件详解)
+5. [详细组件分析](#详细组件分析)
 6. [依赖关系分析](#依赖关系分析)
-7. [性能考量](#性能考量)
+7. [性能考虑](#性能考虑)
 8. [故障排查指南](#故障排查指南)
 9. [结论](#结论)
-10. [附录：扩展与部署指南](#附录扩展与部署指南)
+10. [附录](#附录)
 
 ## 简介
-本文件面向 NoSQL 存储适配系统，聚焦于 Redis 适配器的设计与实现，涵盖连接管理、命令封装、数据序列化；缓存层集成（RedisKV 分布式键值缓存、响应缓存）、缓存失效策略；以及 Redis Pub/Sub 在分布式配置同步中的应用。同时给出 NoSQL 数据模型设计思路（键值映射、集合操作、过期管理），并提供扩展到其他 NoSQL 数据库的适配方法与性能优化建议，最后给出 Redis 集群与高可用部署要点。
+
+本篇的标题沿用了目录里既有的文件名 `NoSQL 存储适配`，但**定位需要纠偏**：本项目不存在
+MongoDB、Cassandra、DynamoDB、RedisJSON、RedisSearch 等任何 NoSQL 数据库驱动或适配器，
+也不存在形如 `NoSQLStore`、`DocumentRepository` 的抽象接口。实测依据有三条：
+
+1. `go.mod` 的 require 段里与非关系型存储有关的客户端只有一个
+   `github.com/redis/rueidis v1.0.78`，没有任何 mongo/cassandra/dynamo/influx 依赖；
+2. 持久化只有 `sqlite`（默认）/ `mysql` / `postgres` 三种 GORM 方言，且驱动分支为白名单式，
+   其余值直接报错（`internal/core/database/gorm.go:45-53`）；
+3. 全库使用 `rueidis` 的非测试文件只有 16 个（`internal/cache`、`internal/core/redis`、
+   `internal/waf/{ratelimit,challenge,escalation,antireplay,accessgate,luaplugin}`、
+   `internal/observability`、`internal/dataplane`、`internal/admin`、`internal/app`、
+   `internal/core/runtime.go`），全部是 KV / ZSET / HASH / LIST / Pub-Sub 五类用法。
+
+因此本篇的真实主题是：**Redis 作为可选扩展存储后端的能力边界与接入方式**——它能承担什么、
+不能承担什么、键怎么设计、原子性靠什么保证、失败时每条路径各自降级到什么行为。
+任何把本篇当作「新增 NoSQL 后端的扩展指南」的读法都会落空；新增关系型后端的流程见
+[数据库适配器](数据库适配器.md)，替换 KV/限流类扩展存储的流程见
+[存储后端扩展](存储后端扩展.md) 的「替换 KV / 限流类扩展存储」一节。
+
+Redis 在本项目中的定位是**可选加速与跨节点协同件，不是事实源**：所有权威状态都在
+SQLite/MySQL/Postgres 里，Redis 只承载计数、会话、缓存与通知。这一句是后文所有降级设计的前提。
+
+**章节来源**
+- [go.mod:5-37](file://go.mod#L5-L37)
+- [internal/core/database/gorm.go:45-53](file://internal/core/database/gorm.go#L45-L53)
+- [internal/cache/redis_kv.go:12-13](file://internal/cache/redis_kv.go#L12-L13)
 
 ## 项目结构
-该系统围绕“运行时环境”组织，核心由数据库（GORM）与可选的 Redis 组成，并通过缓存层与 WAF 功能模块协同工作。入口程序启动应用后，初始化运行时、加载快照、构建引擎、启动监听器，并在需要时启用 Redis 连接与 Pub/Sub 同步。
+
+Redis 能力分散在四层：客户端工厂（连接与可选启用）、通用 KV/锁（`internal/cache`）、
+领域内直接使用原生客户端的模块（挑战、访问会话、防重放、升级计数、限流）、
+以及两类横切消费方（事件扇出与读穿透缓存）。
+
+| 路径 | 职责 | 关键符号 | 规模 | 启用形式 |
+|------|------|----------|:----:|----------|
+| `internal/core/redis/redis.go` | 可选客户端工厂与连通性探测 | `RedisOptions`、`OptionalClient`、`Ping` | 42 行 | `Addr` 为空即返回 nil |
+| `internal/core/redis/pubsub.go` | 配置重载广播与订阅 | `ConfigSync`、`PublishReload`、`Subscribe` | 132 行 | client 为 nil 时构造函数返回 nil |
+| `internal/cache/redis_kv.go` | 全局前缀 KV、固定窗口自增、HASH 聚合、分布式锁 | `RedisKV`、`AcquireLock`、`ReleaseLock` | 401 行 | `NewRedisKV(nil)` 仍可用，全程降级 |
+| `internal/cache/hot_cache.go` | 读穿透热缓存与击穿合并 | `HotCache`、`SetList`、`GetListRaw` | 367 行 | `NewHotCache(nil,…)` 为空操作实例 |
+| `internal/waf/ratelimit/redis.go` | 分布式滑动窗口限流 | `RedisRateLimiter` 与三段 Lua | 194 行 | client nil 时构造函数返回 nil |
+| `internal/observability/unified_writer.go` | 事件扇出到四个 LIST | `pushToRedis`、`SetRedis` | 1198 行 | `SetRedis(nil)` 时整体跳过 |
+| `internal/dataplane/resource_aggregator.go` | 资源命中跨节点卸载 + sink 选主 | `HAggregateFlush`、`DrainAggregated` | 332 行 | `redis.Available()` 判定 |
+| `internal/waf/{challenge,accessgate,antireplay,escalation}` | 领域状态直接持有原生 client | 各 `SetRedis` | — | 构造可为 nil，运行期热替换 |
 
 ```mermaid
 graph TB
-A["入口程序<br/>cmd/main.go"] --> B["应用服务<br/>internal/app/server.go"]
-B --> C["运行时环境<br/>internal/core/runtime.go"]
-C --> D["Redis 客户端工厂<br/>internal/core/redis/redis.go"]
-C --> E["本地快照缓存<br/>internal/cache/layer.go"]
-C --> F["分布式KV缓存(RedisKV)<br/>internal/cache/redis_kv.go"]
-B --> G["响应缓存(内存LRU)<br/>internal/cache/response_cache.go"]
-B --> H["速率限制(分布式)<br/>internal/waf/ratelimit/redis.go"]
-B --> I["配置同步(Pub/Sub)<br/>internal/core/redis/pubsub.go"]
-B --> J["仓库聚合<br/>internal/store/repository/repository.go"]
+  subgraph CFG["配置入口"]
+    ENV["环境变量<br/>MY_OPENWAF_REDIS_*"]
+    API["POST /api/v1/redis-config<br/>internal/admin/router.go:394"]
+  end
+  subgraph FACTORY["客户端工厂"]
+    OC["OptionalClient<br/>core/redis/redis.go:18"]
+    KV["RedisKV<br/>cache/redis_kv.go:35"]
+    HC["HotCache<br/>cache/hot_cache.go:43"]
+    CS["ConfigSync<br/>core/redis/pubsub.go:38"]
+  end
+  subgraph DOMAIN["领域直接使用原生 client"]
+    RL["RedisRateLimiter<br/>waf/ratelimit/redis.go:22"]
+    CG["Captcha/Shield/Chain<br/>waf/challenge/*.go"]
+    AR["AntiReplay<br/>waf/antireplay/antireplay.go:50"]
+    ES["Escalation<br/>waf/escalation/escalation.go"]
+    AS["AccessSession/OAuthState<br/>waf/accessgate/store_redis.go"]
+    UW["UnifiedWriter 事件扇出<br/>observability/unified_writer.go:1094"]
+    RA["资源聚合 sink 选主<br/>dataplane/resource_aggregator.go:286"]
+  end
+  ENV --> OC
+  API --> OC
+  OC --> KV
+  OC --> HC
+  OC --> CS
+  OC --> RL
+  OC --> CG
+  OC --> AR
+  OC --> ES
+  OC --> AS
+  OC --> UW
+  KV --> RA
 ```
 
-图表来源
-- [internal/app/server.go:1-490](file://internal/app/server.go#L1-L490)
-- [internal/core/runtime.go:1-127](file://internal/core/runtime.go#L1-L127)
-- [internal/core/redis/redis.go:1-39](file://internal/core/redis/redis.go#L1-L39)
-- [internal/cache/layer.go:1-65](file://internal/cache/layer.go#L1-L65)
-- [internal/cache/redis_kv.go:1-113](file://internal/cache/redis_kv.go#L1-L113)
-- [internal/cache/response_cache.go:1-163](file://internal/cache/response_cache.go#L1-L163)
-- [internal/waf/ratelimit/redis.go:1-89](file://internal/waf/ratelimit/redis.go#L1-L89)
-- [internal/core/redis/pubsub.go:1-77](file://internal/core/redis/pubsub.go#L1-L77)
-- [internal/store/repository/repository.go:1-43](file://internal/store/repository/repository.go#L1-L43)
+**图表来源**
+- [internal/core/redis/redis.go:18-34](file://internal/core/redis/redis.go#L18-L34)
+- [internal/core/redis/pubsub.go:38-54](file://internal/core/redis/pubsub.go#L38-L54)
+- [internal/cache/redis_kv.go:35-39](file://internal/cache/redis_kv.go#L35-L39)
+- [internal/cache/hot_cache.go:43-51](file://internal/cache/hot_cache.go#L43-L51)
+- [internal/waf/ratelimit/redis.go:22-37](file://internal/waf/ratelimit/redis.go#L22-L37)
+- [internal/observability/unified_writer.go:1094-1152](file://internal/observability/unified_writer.go#L1094-L1152)
+- [internal/dataplane/resource_aggregator.go:286-291](file://internal/dataplane/resource_aggregator.go#L286-L291)
+- [internal/admin/router.go:394](file://internal/admin/router.go#L394)
+- [README.md:322-333](file://README.md#L322-L333)
 
-章节来源
-- [internal/app/server.go:35-305](file://internal/app/server.go#L35-L305)
-- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
+**章节来源**
+- [internal/core/runtime.go:100-131](file://internal/core/runtime.go#L100-L131)
+- [internal/app/server.go:304-325](file://internal/app/server.go#L304-L325)
 
 ## 核心组件
-- 运行时环境（Runtime）：负责打开数据库与可选 Redis，建立本地快照缓存与分布式 KV 缓存实例，并提供快照重载能力。
-- Redis 客户端工厂：提供可选客户端创建与连通性探测。
-- 本地快照缓存（Layer）：基于 Ristretto 的进程内缓存，用于存放不可变的配置快照。
-- 分布式 KV 缓存（RedisKV）：基于 Redis 的跨节点共享状态存储，支持字节与 JSON 序列化、自增计数、存在性检查等。
-- 响应缓存（ResponseCache）：内存级 LRU-like 缓存，按分片互斥降低竞争，支持默认 TTL 与后台清理。
-- 速率限制（RedisRateLimiter）：基于 Redis Lua 脚本的分布式滑动窗口限流器。
-- 配置同步（Pub/Sub）：通过 Redis 发布/订阅实现多节点配置变更通知与热重载。
 
-章节来源
-- [internal/core/runtime.go:17-80](file://internal/core/runtime.go#L17-L80)
-- [internal/core/redis/redis.go:10-39](file://internal/core/redis/redis.go#L10-L39)
-- [internal/cache/layer.go:19-65](file://internal/cache/layer.go#L19-L65)
-- [internal/cache/redis_kv.go:13-113](file://internal/cache/redis_kv.go#L13-L113)
-- [internal/cache/response_cache.go:25-163](file://internal/cache/response_cache.go#L25-L163)
-- [internal/waf/ratelimit/redis.go:12-89](file://internal/waf/ratelimit/redis.go#L12-L89)
-- [internal/core/redis/pubsub.go:13-77](file://internal/core/redis/pubsub.go#L13-L77)
+`OptionalClient` 是唯一的启用判定入口：地址为空直接返回 nil，构造失败同样返回 nil 而不向上报错，
+调用方据此决定「无 Redis」形态。运行时的 `Runtime.Redis` 与 `Runtime.RedisKV` 由此分离——
+前者是原生 client（可为 nil），后者是永不 nil 的包装体（`NewRedisKV(nil)` 依然可用）。
+
+```go
+// internal/core/redis/redis.go:11-34
+type RedisOptions struct {
+	Addr     string
+	Password string
+	DB       int
+}
+
+func OptionalClient(opt RedisOptions) rueidis.Client {
+	if opt.Addr == "" {
+		return nil
+	}
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:      []string{opt.Addr},
+		Password:         opt.Password,
+		SelectDB:         opt.DB,
+		Dialer:           net.Dialer{Timeout: 5 * time.Second},
+		ConnWriteTimeout: 3 * time.Second,
+		DisableCache:     true,
+	})
+	if err != nil {
+		return nil
+	}
+	return client
+}
+```
+
+| 符号 | 定义位置 | 形态 | 职责 | 可扩展点 |
+|------|----------|------|------|----------|
+| `OptionalClient(opt RedisOptions) rueidis.Client` | `core/redis/redis.go:18` | 工厂函数 | 可选启用判定 | 唯一 client 构造入口 |
+| `RedisKV` | `cache/redis_kv.go:28` | struct（含 health 熔断） | KV/计数/锁 | `SetClient` 支持热替换 |
+| `RedisKV.IncrContext(ctx, key, ttl)` | `cache/redis_kv.go:190` | 脚本执行 | 固定窗口自增 | 新脚本照 `NewLuaScript` 口径 |
+| `RedisKV.AcquireLock(key, token, ttl) bool` | `cache/redis_kv.go:367` | SET NX PX | 单写者选主 | 可被任意后台任务复用 |
+| `HotCache.SetList(key, items, total, ttl)` | `cache/hot_cache.go:357` | 接口 `HotCacheBackend` | 大结果集读穿透 | 新增仓储只需实现该接口 |
+| `RateLimiterBackend` | `waf/ratelimit/ratelimit.go:10` | 6 方法接口 | 限流后端抽象 | 新后端接 `DynamicRateLimiter.Swap` |
+| `KVBackend` / `ContextKVBackend` | `waf/luaplugin/runtime.go:148,162` | 插件侧接口 | Lua `ctx.kv` 契约 | 非 Redis KV 后端接入点 |
+| `ConfigSync` | `core/redis/pubsub.go:29` | struct + `Close` _once_ | 重载广播 | 频道名与消息体可扩展 |
+
+组件与降级口径的对应关系如下，这张表是判断「Redis 挂了会怎样」的唯一依据：
+
+| 组件 | 抽象层级 | 键空间 | 单命令超时 | 故障时的降级动作 |
+|------|----------|--------|:----------:|------------------|
+| `RedisKV` | 全局 KV + 锁 | `openwaf:` 自动前缀 | 1s（聚合命令 2s） | 记 error、5s 熔断，`Available()` 转假 |
+| `HotCache` | 读穿透缓存 | `openwaf:hot:` | 1s | 回源 DB，故障计入 `errs` 而非 `misses` |
+| `RedisRateLimiter` | 限流后端 | `openwaf:{request,error}:rl:` | 50ms | **fail-open**，放行请求 |
+| `CaptchaManager` | 挑战会话 | `owaf:captcha:` | 50ms | 签发返回 error，不回落内存 |
+| `ShieldManager` | 5 秒盾会话 | `owaf:shield:` | 3s | 签发返回 error |
+| `ChainChallengeManager` | 链式状态 | `owaf:chain:` | 3s | 写入静默失败，读取返回 nil 视为过期 |
+| `AntiReplayManager` | nonce 消费表 | `waf:nonce:*` | 80ms | **fail-closed**，判定无效并拦截 |
+| `EscalationManager` | 升级计数 | `owaf:escalation:` | 50ms | 回落进程内 `sync.Map` 计数 |
+| `RedisSessionStore` | 访问控制会话 | `owaf:access:session:` | 100ms | 回落内存实现 `local` |
+| `UnifiedWriter` | 事件扇出 | 四个 LIST | 整批 5s | 记 `redis push failed` 日志，DB 事务照常 |
+| `recordedResourceAggregator` | 跨节点计数卸载 | 两个 HASH + 锁 | 2s / 1s | 退化为纯内存聚合 + 本地直写 |
+| `ConfigSync` | 重载通知 | 1 个频道 | 发布 2s | 发布失败仅告警，本地重载不受影响 |
+
+**章节来源**
+- [internal/core/redis/redis.go:11-42](file://internal/core/redis/redis.go#L11-L42)
+- [internal/cache/hot_cache.go:357-372](file://internal/cache/hot_cache.go#L357-L372)
+- [internal/waf/luaplugin/runtime.go:148-169](file://internal/waf/luaplugin/runtime.go#L148-L169)
+- [internal/waf/ratelimit/redis.go:127-138](file://internal/waf/ratelimit/redis.go#L127-L138)
+- [internal/waf/antireplay/antireplay.go:140-146](file://internal/waf/antireplay/antireplay.go#L140-L146)
+- [internal/waf/escalation/escalation.go:119-139](file://internal/waf/escalation/escalation.go#L119-L139)
+- [internal/waf/accessgate/store_redis.go:18](file://internal/waf/accessgate/store_redis.go#L18)
 
 ## 架构总览
-系统采用“本地缓存 + 分布式 KV + Redis Pub/Sub”的分层缓存与同步架构。本地快照缓存仅存放不可变配置，分布式 KV 用于跨节点共享状态（如响应缓存元数据、限流计数、封禁同步等）。配置变更通过 Pub/Sub 广播，触发各节点重新加载快照并热更新监听器。
 
-```mermaid
-graph TB
-subgraph "控制面"
-Admin["管理接口<br/>internal/admin/*"] --> RT["运行时<br/>internal/core/runtime.go"]
-RT --> CS["配置同步<br/>internal/core/redis/pubsub.go"]
-end
-subgraph "数据面"
-DP["数据平面监听器<br/>internal/app/server.go"] --> Eng["WAF 引擎"]
-Eng --> RL["请求限流<br/>internal/waf/ratelimit/redis.go"]
-Eng --> IPRep["IP 黑白名单/自动封禁<br/>internal/waf/*"]
-DP --> RC["响应缓存<br/>internal/cache/response_cache.go"]
-DP --> RKV["分布式KV<br/>internal/cache/redis_kv.go"]
-DP --> Layer["本地快照缓存<br/>internal/cache/layer.go"]
-end
-CS --> DP
-RT --> DP
-```
-
-图表来源
-- [internal/app/server.go:127-260](file://internal/app/server.go#L127-L260)
-- [internal/core/runtime.go:66-79](file://internal/core/runtime.go#L66-L79)
-- [internal/core/redis/pubsub.go:13-77](file://internal/core/redis/pubsub.go#L13-L77)
-- [internal/waf/ratelimit/redis.go:12-89](file://internal/waf/ratelimit/redis.go#L12-L89)
-- [internal/cache/response_cache.go:25-163](file://internal/cache/response_cache.go#L25-L163)
-- [internal/cache/redis_kv.go:13-113](file://internal/cache/redis_kv.go#L13-L113)
-- [internal/cache/layer.go:19-65](file://internal/cache/layer.go#L19-L65)
-
-## 组件详解
-
-### Redis 适配器与连接管理
-- 可选客户端创建：根据环境配置决定是否启用 Redis，避免未配置时的空依赖。
-- 连接超时与读写超时：统一设置拨号、读、写超时，保证调用路径可控。
-- 连通性探测：启动阶段进行 Ping 检查，失败则关闭并报错。
-- 运行时注入：在运行时中创建 Redis 客户端与分布式 KV 实例，并记录启用日志。
-
-```mermaid
-classDiagram
-class RedisOptions {
-+string Addr
-+string Password
-+int DB
-}
-class OptionalClient {
-+OptionalClient(opt) *Client
-+Ping(ctx, client) error
-}
-class Runtime {
-+Config
-+DB
-+Redis
-+RedisKV
-+Snapshot
-+Cache
-+ReloadSnapshot()
-}
-OptionalClient --> Runtime : "创建并校验客户端"
-```
-
-图表来源
-- [internal/core/redis/redis.go:10-39](file://internal/core/redis/redis.go#L10-L39)
-- [internal/core/runtime.go:27-80](file://internal/core/runtime.go#L27-L80)
-
-章节来源
-- [internal/core/redis/redis.go:17-39](file://internal/core/redis/redis.go#L17-L39)
-- [internal/core/runtime.go:49-79](file://internal/core/runtime.go#L49-L79)
-
-### RedisKV：分布式键值缓存
-- 键前缀与命名空间：统一使用固定前缀隔离键空间。
-- 基础操作：Set/Get/Delete/Exists；支持字节与 JSON 序列化。
-- 计数器：Incr 原子自增并设置 TTL，结合流水线减少往返。
-- 错误处理：对空实例返回安全行为（如返回 false/0），避免 panic。
-
-```mermaid
-classDiagram
-class RedisKV {
--client : Client
-+Set(key, value, ttl) error
-+Get(key) ([]byte,bool)
-+Delete(key)
-+SetJSON(key, v, ttl) error
-+GetJSON(key, dest) bool
-+Incr(key, ttl) (int64,error)
-+Exists(key) bool
-}
-```
-
-图表来源
-- [internal/cache/redis_kv.go:19-113](file://internal/cache/redis_kv.go#L19-L113)
-
-章节来源
-- [internal/cache/redis_kv.go:31-113](file://internal/cache/redis_kv.go#L31-L113)
-
-### 响应缓存：内存级 LRU-like
-- 结构设计：64 个分片，每个分片独立读写锁，降低热点竞争。
-- 元数据：包含状态码、内容类型、体内容、缓存时间与 TTL。
-- 过期判定：以当前时间与 CachedAt+TTL 判断是否过期。
-- 写入策略：若单条目过大则拒绝缓存；更新时原子替换并维护当前总大小。
-- 清理机制：后台定时器周期扫描并删除过期项，释放内存。
-
-```mermaid
-flowchart TD
-Start(["进入 Set/Get"]) --> CheckEnabled["是否启用缓存?"]
-CheckEnabled --> |否| ReturnNil["返回空结果"]
-CheckEnabled --> |是| ComputeKey["计算缓存键"]
-ComputeKey --> ShardSelect["选择分片"]
-ShardSelect --> RWLock["读锁/写锁"]
-RWLock --> Action{"操作类型"}
-Action --> |Get| CheckExpire["检查是否过期"]
-CheckExpire --> |是| ReturnNil
-CheckExpire --> |否| ReturnEntry["返回缓存项"]
-Action --> |Set| InsertOrUpdate["插入或更新"]
-InsertOrUpdate --> UpdateSize["更新总大小"]
-UpdateSize --> End(["结束"])
-ReturnNil --> End
-```
-
-图表来源
-- [internal/cache/response_cache.go:25-163](file://internal/cache/response_cache.go#L25-L163)
-
-章节来源
-- [internal/cache/response_cache.go:25-163](file://internal/cache/response_cache.go#L25-L163)
-- [internal/cache/response_cache_test.go:5-79](file://internal/cache/response_cache_test.go#L5-L79)
-
-### 速率限制：分布式滑动窗口
-- 滑动窗口：使用有序集合记录时间戳，Lua 脚本原子清理过期与计数判断。
-- 参数：窗口秒数与最大请求数可动态重配置，支持启用/禁用。
-- 失败开路：Redis 调用异常时允许请求通过，确保系统韧性。
-- 使用场景：跨节点共享的请求/错误速率限制。
+一次典型的管理端变更，与一次数据面请求对 Redis 的使用是两条互不阻塞的链路。下图以真实调用
+顺序给出「写入 → 广播 → 他节点重载」和「读计数 → Redis 故障 → 放行」两条路径。
 
 ```mermaid
 sequenceDiagram
-participant C as "调用方"
-participant RL as "RedisRateLimiter"
-participant RS as "Redis"
-C->>RL : Allow(key)
-RL->>RL : 计算redisKey/now/window/max
-RL->>RS : Lua脚本执行(ZREM/ZADD/EXPIRE)
-RS-->>RL : 返回是否允许
-RL-->>C : true/false
+    autonumber
+    participant ADM as "管理端 handler"
+    participant APP as "reloadRuntime<br/>app/server.go:1001"
+    participant CS as "ConfigSync"
+    participant RS as "Redis"
+    participant PEER as "其他节点"
+    participant DP as "数据面阶段链"
+    participant RL as "RedisRateLimiter"
+    ADM->>APP : "store.BumpRevision 后触发 reload"
+    APP->>CS : "publishConfigReload()"
+    CS->>RS : "PUBLISH openwaf:config:reload {source_id,action}"
+    RS-->>PEER : "推送消息"
+    PEER->>PEER : "sourceID 不等 → 调用 reload 回调"
+    Note over DP,RL : 限流与广播同属一个 client，但走不同超时
+    DP->>RL : "Allow(RateLimitKey(bind,siteID,host,clientIP))"
+    RL->>RS : "EVALSHA 滑动窗口脚本（50ms 上限）"
+    alt 脚本返回 1
+        RS-->>RL : "1（计数已写入）"
+        RL-->>DP : "true 放行"
+    else 脚本返回 0
+        RL-->>DP : "false 触发 rate_limit 动作"
+    else 超时或连接错误
+        RL-->>DP : "true（fail-open，不做回退计数）"
+    end
 ```
 
-图表来源
-- [internal/waf/ratelimit/redis.go:47-85](file://internal/waf/ratelimit/redis.go#L47-L85)
+**图表来源**
+- [internal/app/server.go:1001-1029](file://internal/app/server.go#L1001-L1029)
+- [internal/core/redis/pubsub.go:64-82](file://internal/core/redis/pubsub.go#L64-L82)
+- [internal/waf/ratelimit/redis.go:115-139](file://internal/waf/ratelimit/redis.go#L115-L139)
+- [internal/core/rules/phases.go:63-70](file://internal/core/rules/phases.go#L63-L70)
 
-章节来源
-- [internal/waf/ratelimit/redis.go:12-89](file://internal/waf/ratelimit/redis.go#L12-L89)
+Redis 关闭（`rt.Redis == nil`）时，上图所有 `RS` 参与者都不存在：限流改用本地固定窗口
+（`buildRateLimiterBackend` 回落到 `NewRateLimiter`），事件不再扇出，热缓存全部回源，
+挑战与防重放改用进程内存储。整条链路没有一处会因缺 Redis 而中断服务。
 
-### 配置同步：Redis Pub/Sub
-- 通道命名：统一通道名用于配置重载事件。
-- 发布者：当配置变更发生时，向通道发布“reload”消息。
-- 订阅者：后台协程订阅通道，收到消息后触发快照重载、参数重配置与监听器热重启。
-- 关闭流程：通过停止通道优雅关闭订阅者。
+**章节来源**
+- [internal/app/server.go:123-128](file://internal/app/server.go#L123-L128)
+- [internal/waf/ratelimit/redis.go:22-37](file://internal/waf/ratelimit/redis.go#L22-L37)
+
+## 详细组件分析
+
+### 可选启用与运行时热切换
+
+启用路径有两条：进程启动时的环境变量，以及管理端 `POST /api/v1/redis-config`
+（`internal/admin/router.go:394`，落库键 `redis_config`，见 `internal/store/system.go:12`）。
+两条路径最终都汇聚到同一组 `SetClient`/`SetRedis` 调用，把新 client 逐个换进持有者。
 
 ```mermaid
-sequenceDiagram
-participant Admin as "管理员操作"
-participant App as "应用服务"
-participant CS as "ConfigSync"
-participant Redis as "Redis"
-participant Nodes as "其他节点"
-Admin->>App : 触发配置变更
-App->>CS : PublishReload()
-CS->>Redis : Publish(channel,"reload")
-Redis-->>Nodes : 推送消息
-Nodes->>CS : Subscribe()
-CS->>App : 调用reload回调
-App->>App : ReloadSnapshot()/Reconfigure()/Hot-restart listeners
+stateDiagram-v2
+    state "未启用（client 为 nil）" as OFF
+    state "启动探测" as PROBE
+    state "已启用" as ON
+    state "命令失败熔断 5s" as BREAK
+    OFF --> PROBE : "MY_OPENWAF_REDIS_ADDR 非空"
+    PROBE --> OFF : "OptionalClient/Ping 失败仅告警<br/>runtime.go:104-116"
+    PROBE --> ON : "Ping 通过"
+    OFF --> ON : "redis-config 保存并通过 probe<br/>network.go:554-575"
+    ON --> ON : "applyRedisRuntimeReload 逐个 Swap 持有者"
+    ON --> OFF : "enabled=false → 地址清空 → nextClient 为 nil"
+    ON --> BREAK : "命令出错，noteCommandResult 记 unavailableUntil"
+    BREAK --> ON : "5s 后 Available 恢复"
+    BREAK --> BREAK : "期间调用方直接回源"
 ```
 
-图表来源
-- [internal/app/server.go:220-260](file://internal/app/server.go#L220-L260)
-- [internal/core/redis/pubsub.go:13-77](file://internal/core/redis/pubsub.go#L13-L77)
+**图表来源**
+- [internal/core/runtime.go:100-131](file://internal/core/runtime.go#L100-L131)
+- [internal/admin/system/network.go:538-575](file://internal/admin/system/network.go#L538-L575)
+- [internal/app/server.go:1179-1253](file://internal/app/server.go#L1179-L1253)
+- [internal/cache/redis_kv.go:71-97](file://internal/cache/redis_kv.go#L71-L97)
 
-章节来源
-- [internal/app/server.go:127-260](file://internal/app/server.go#L127-L260)
-- [internal/core/redis/pubsub.go:13-77](file://internal/core/redis/pubsub.go#L13-L77)
+热切换的关键约束有两条，都是实测出来的：
 
-### 数据模型设计与键空间
-- 键空间隔离：RedisKV 统一使用固定前缀，避免键冲突。
-- 键语义：
-  - 响应缓存元数据键：用于标识请求指纹（方法+主机+路径+查询）。
-  - 限流键：带前缀的有序集合，记录时间戳。
-  - 共享状态键：如封禁列表、API 密钥等跨节点共享数据。
-- 序列化：
-  - 字节存储：适合二进制数据或已编码数据。
-  - JSON 存储：适合结构化对象，便于跨语言读取。
-- 过期管理：
-  - TTL 设置：在写入时指定；Incr 场景通过 Expire 延长生命周期。
-  - 自动清理：响应缓存内置后台清理；RedisKV 不自动过期，需上层显式设置。
+- `reloadRedisRuntimeInternal`（`internal/app/server.go:925-978`）在换 client 时会用
+  `currentProtection()` 的**全局**窗口/配额重建限流后端并 `Swap`（:1241、:1244），
+  但它**不重建快照、不改站点级配置**，也不触碰 `cc_rate` 共享状态
+  （`internal/core/rules/matcher.go:45` 的 `ccRateStates` 是进程级 `sync.Map`，不随 Swap 清理）；
+  保存 Redis 配置不触发快照重载，这与 `log-config` 同属「不 propagate」的两处例外。
+- `ConfigSync` 的重建走 `replaceConfigSync`（`internal/app/server.go:834-846`）：先新建再
+  `old.Close()`，而 `ConfigSync.Close()` 会连带 `cs.client.Close()`（`pubsub.go:93-96`），
+  因此旧实例只能持有旧 client，复用同一实例会导致订阅被误杀。
 
-章节来源
-- [internal/cache/redis_kv.go:11-113](file://internal/cache/redis_kv.go#L11-L113)
-- [internal/cache/response_cache.go:11-23](file://internal/cache/response_cache.go#L11-L23)
-- [internal/waf/ratelimit/redis.go:74-84](file://internal/waf/ratelimit/redis.go#L74-L84)
+**章节来源**
+- [internal/core/runtime.go:100-131](file://internal/core/runtime.go#L100-L131)
+- [internal/app/server.go:925-978](file://internal/app/server.go#L925-L978)
+- [internal/app/server.go:1179-1253](file://internal/app/server.go#L1179-L1253)
+- [internal/core/redis/pubsub.go:86-132](file://internal/core/redis/pubsub.go#L86-L132)
+
+### RedisKV 键空间与数据结构
+
+`RedisKV` 的所有命令都对入参键加上全局前缀 `openwaf:`（`redis_kv.go:16`），
+因此「键设计表」里的最终形态要区分三类：经 `RedisKV` 写入（自动加前缀）、
+`HotCache` 写入（`openwaf:hot:`）、以及领域模块直接持有原生 client 自拼前缀（`owaf:` 与 `waf:nonce:`）。
+实测键空间共 **22 个前缀 + 1 个发布/订阅频道**，无文档型集合、无二级索引、无事务。
+
+| 键前缀（最终形态） | 数据结构 | TTL | 写入方:行 | 主要消费方 | 失败行为 |
+|--------------------|----------|-----|-----------|------------|----------|
+| `openwaf:`（基前缀） | STRING | 调用方传入 | `redis_kv.go:107-117` | 全部 `RedisKV` 使用者 | 返回 error；5s 熔断 |
+| `openwaf:dashboard:summary` | STRING(JSON) | 30s | `dashboard/dashboard.go:161` | 同文件 :139 `GetJSON` | 回源 DB，本地缓存退避 2s |
+| `openwaf:hot:al_list:<filters>:o<off>:l<limit>` | STRING(JSON) | 5s | `repository/access_log.go:406` | 同文件 :333 | 回源 DB + 进程内 queryCache |
+| `openwaf:hot:se_list:<filters>:o<off>:l<limit>` | STRING(JSON) | 5s | `repository/security_event.go:157` | 同文件 :116 | 回源 DB |
+| `openwaf:hot:fp_list:v1:n<ns>:g<gen>:<digest>` | STRING(JSON) | 5s | `repository/access_log.go:549`（键名由 `fingerprint_cache.go:20,246` 生成） | 同文件 :536 指纹列表查询 | 回源 DB |
+| `openwaf:request:rl:<bind\|site\|host\|ip>` | ZSET | 窗口+1s（脚本内 EXPIRE） | `ratelimit/redis.go:130-134` | 引擎 `rate_limit` 阶段 | fail-open 放行 |
+| `openwaf:error:rl:<bind\|site\|host\|ip>` | ZSET | 窗口+1s | `ratelimit/redis.go:156-160` | 错误率限流与 `IsOverLimit` | fail-open / 返回 0 |
+| `openwaf:recorded_res:counts` | HASH | 10min | `dataplane/resource_aggregator.go:249` | sink 节点 `DrainAggregated` | 退化为内存聚合直写 DB |
+| `openwaf:recorded_res:meta` | HASH | 10min | 同上 | 同上 | 同上 |
+| `openwaf:recorded_res:sink_lock` | STRING(token)+NX | 30s | `resource_aggregator.go:286` | 同文件 :289 `ReleaseLock` | 未抢到锁则本轮不回流 |
+| `openwaf:security_events` | LIST(LPUSH+LTRIM 99999) | 7 天 | `observability/unified_writer.go:1130` | 外部实时消费方 | 记 warn，DB 事务继续 |
+| `openwaf:access_logs` | LIST(LTRIM 99999) | 7 天 | 同文件 :1137 | 同上 | 同上 |
+| `openwaf:drop_events` | LIST(LTRIM 49999) | 7 天 | 同文件 :1144 | 同上 | 同上 |
+| `openwaf:bot_scores` | LIST(LTRIM 49999) | 7 天 | 同文件 :1151 | 同上 | 同上 |
+| `openwaf:owaf:lua:<脚本键>` | STRING | 默认 5min，上限 24h | `luaplugin/api.go:347`→`redis_kv.go:107` | Lua 脚本 `ctx.kv.get/incr` | 脚本侧返回 nil/false |
+| `owaf:captcha:<sessionID>` | STRING(JSON) | 签发超时值（默认 120s） | `challenge/captcha.go:595-598` | :374 一次性兑换 | 签发返回 error |
+| `owaf:shield:<sessionID>` | STRING(JSON) | 会话 `TimeoutSecs` | `challenge/shield.go:646` | :667 `takeAndDeleteBound` | 签发返回 error |
+| `owaf:chain:<sessionID>` | STRING(JSON) | 10min（`chainStateTTL`） | `challenge/chain.go:682` | :697/:734 | 写失败静默返回，读失败视为过期 |
+| `owaf:access:session:<token>` | STRING(JSON) | 剩余会话寿命 | `accessgate/store_redis.go:136` | :249 SCAN + 校验 | 回落 `local` 内存实现 |
+| `owaf:access:oauth-state:<state>` | STRING(JSON) | 剩余 state 寿命 | `accessgate/store_redis.go:400` | :526 SCAN 清理 | 回落 `local` |
+| `owaf:escalation:<ip>:<siteID>` | STRING(计数) | `WindowSecs` | `escalation/escalation.go:126-128` | :160-173 `getCountRedis` | 回落本地 `sync.Map` |
+| `waf:nonce:spent:<nonce>` | STRING NX | 会话剩余寿命，下限 5s、上限 1 天 | `antireplay/antireplay.go:142-144` | 同段 Lua | fail-closed，判定非法并重签 |
+| `waf:nonce:idem:<nonce>` | STRING(新 nonce) | 8s（`antiReplayIdemSeconds`） | 同上 | 同上 | 同上 |
+| 频道 `openwaf:config:reload` | Pub/Sub 消息 | 不适用 | `core/redis/pubsub.go:79` | `Subscribe` :97 | 发布失败仅告警 |
+
+两处命名口径值得特别注意：`owaf:lua:` 前缀本身已由脚本层拼好，再经 `RedisKV` 加 `openwaf:`，
+最终键形如 `openwaf:owaf:lua:foo`（双层前缀，实测于 `api.go:347` + `redis_kv.go:114`）；
+而 `waf:nonce:` 与 `owaf:` 系列因为直接使用原生 client，不含 `openwaf:` 前缀。
+这两条是排查「键找不到」时最常见的误判点。
+
+**章节来源**
+- [internal/cache/redis_kv.go:15-26](file://internal/cache/redis_kv.go#L15-L26)
+- [internal/dataplane/resource_aggregator.go:26-40](file://internal/dataplane/resource_aggregator.go#L26-L40)
+- [internal/observability/unified_writer.go:1094-1152](file://internal/observability/unified_writer.go#L1094-L1152)
+- [internal/waf/luaplugin/api.go:15-31](file://internal/waf/luaplugin/api.go#L15-L31)
+- [internal/waf/challenge/chain.go:73-74](file://internal/waf/challenge/chain.go#L73-L74)
+- [internal/waf/antireplay/antireplay.go:32-48](file://internal/waf/antireplay/antireplay.go#L32-L48)
+- [internal/store/repository/fingerprint_cache.go:18-20](file://internal/store/repository/fingerprint_cache.go#L18-L20)
+- [internal/store/repository/access_log.go:536-549](file://internal/store/repository/access_log.go#L536-L549)
+
+### Lua 原子操作：`Incr` 走脚本而非 Pipeline
+
+`RedisKV.Incr` 的语义是「固定窗口首次写入才设置过期」。用 Pipeline 表达这条语义存在竞态：
+并发下两个自增都可能观察到「键刚创建」，第二次 `PEXPIRE` 会把窗口往后推，形成滑动漂移。
+实测实现为一段脚本，`rueidis.NewLuaScript` 预加载后 `EvalSha` 执行：
+
+```go
+// internal/cache/redis_kv.go:20-26,188-204
+const incrFixedWindowScript = `
+local value = redis.call("INCR", KEYS[1])
+if value == 1 then
+	redis.call("PEXPIRE", KEYS[1], ARGV[1])
+end
+return value
+`
+
+var incrFixedWindowLua = rueidis.NewLuaScript(incrFixedWindowScript)
+
+func (r *RedisKV) IncrContext(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	client := r.clientValue()
+	if client == nil {
+		return 0, errors.New("redis kv unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	resp := incrFixedWindowLua.Exec(ctx, client, []string{redisPrefix + key},
+		[]string{strconv.FormatInt(ttl.Milliseconds(), 10)})
+	value, err := resp.AsInt64()
+	r.noteCommandResult(client, err)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+```
+
+同理，`releaseLockScript`、`drainHashPairScript`（`redis_kv.go:222-227`）、
+防重放 `redisNonceLua`（`antireplay.go:32-45`）、限流三段脚本
+（`ratelimit/redis.go:77-113`）与挑战的一次性兑换 `takeAndDeleteBoundScript` 都必须原子执行。
+**唯一使用 Pipeline 的是 `HAggregateFlush`**（`redis_kv.go:234-265`，`DoMulti` 批量
+`HINCRBY`/`HSET`/`EXPIRE`），因为它只做累加与刷新 TTL，不含读-判-写分支，
+因此不需要原子性；`escalation.recordHitRedis` 的 `DoMulti`（`INCR` + `EXPIRE`）同理。
+旧文档把 `Incr` 描述为「流水线自增」是错的，必须按脚本口径理解。
+
+**章节来源**
+- [internal/cache/redis_kv.go:20-26](file://internal/cache/redis_kv.go#L20-L26)
+- [internal/cache/redis_kv.go:188-204](file://internal/cache/redis_kv.go#L188-L204)
+- [internal/cache/redis_kv.go:222-265](file://internal/cache/redis_kv.go#L222-L265)
+- [internal/waf/ratelimit/redis.go:77-113](file://internal/waf/ratelimit/redis.go#L77-L113)
+- [internal/waf/antireplay/antireplay.go:32-48](file://internal/waf/antireplay/antireplay.go#L32-L48)
+- [internal/waf/escalation/escalation.go:119-139](file://internal/waf/escalation/escalation.go#L119-L139)
+
+### `AcquireLock` 与 `ReleaseLock`：sink 选主
+
+锁的实现是 `SET key token NX PX ttl`（`redis_kv.go:367-381`），释放是带令牌比对的 Lua `DEL`
+（:383-401），因此不会误删他人持有的锁；`client == nil` 时 `AcquireLock` 直接返回 false，
+调用方据此走单节点路径。目前唯一的锁持有者是资源聚合器的 sink 选主：
+同一时刻只有持锁节点把两个 HASH 排空并回写 DB，避免多节点重复 `Upsert` 造成双重累加。
+
+```go
+// internal/dataplane/resource_aggregator.go:286-291
+if !a.redis.AcquireLock(aggregatorSinkLockKey, a.sinkToken, aggregatorSinkLockTTL) {
+	return
+}
+defer a.redis.ReleaseLock(aggregatorSinkLockKey, a.sinkToken)
+
+counts, metas, err := a.redis.DrainAggregated(aggregatorRedisCountKey, aggregatorRedisMetaKey)
+```
+
+锁的 TTL 为 30s（`aggregatorSinkLockTTL`，:35），回流周期为 5s
+（`aggregatorSinkInterval`，:32），因此节点崩溃后最迟 30s 由其他节点接管，
+期间未回流的计数留在两个 HASH 里，10min TTL 是最后一道防残留栅栏。
+需要强调：这把锁**只提供「同一时刻单写者」语义，不提供 fencing token**，
+若 sink 节点 GC 停顿超过 30s，可能出现两个写者短暂并存；由于 `Upsert` 是累加语义，
+后果是计数重复而非丢失，这一点在扩展时必须自行评估。
+
+**章节来源**
+- [internal/cache/redis_kv.go:365-401](file://internal/cache/redis_kv.go#L365-L401)
+- [internal/dataplane/resource_aggregator.go:26-40](file://internal/dataplane/resource_aggregator.go#L26-L40)
+- [internal/dataplane/resource_aggregator.go:249-291](file://internal/dataplane/resource_aggregator.go#L249-L291)
+
+### 配置同步频道与回环抑制
+
+频道名固定为 `openwaf:config:reload`（`pubsub.go:16`），消息体是
+`{"source_id":"...","action":"reload"}`。发布侧 2s 超时（:77），失败只写 warn 日志（:80），
+不影响本地重载已完成的事实。订阅侧的核心是回环抑制：
+
+```go
+// internal/core/redis/pubsub.go:111-120
+if event.Action != configSyncActionReload {
+	return
+}
+if event.SourceID != "" && event.SourceID == cs.sourceID {
+	return
+}
+cs.log.Info("received config sync reload")
+if err := reload(); err != nil {
+	cs.log.Error("config sync reload failed", slog.Any("err", err))
+}
+```
+
+`sourceID` 由 `NewConfigSync` 在缺省时用 8 字节随机数生成（:45-62），
+`replaceConfigSync` 传的正是空串，所以每次 Redis 热切换都会得到新的 `sourceID`。
+这条链路有两个必须知道的边界：
+
+1. 兼容旧格式：裸字符串 `"reload"` 也会被处理（:98-104），但裸串没有 `source_id`，
+   因此**发起节点自身也会再次重载一次**；新代码必须走 JSON 形态。
+2. `Subscribe` 只调用一次 `client.Receive` 且不重连（:97），返回即结束订阅；
+   Redis 端断连后本节点会静默失去跨节点重载通知，只能靠下一次本地变更或重启恢复。
+
+**章节来源**
+- [internal/core/redis/pubsub.go:16-22](file://internal/core/redis/pubsub.go#L16-L22)
+- [internal/core/redis/pubsub.go:64-132](file://internal/core/redis/pubsub.go#L64-L132)
+- [internal/app/server.go:834-865](file://internal/app/server.go#L834-L865)
+- [internal/app/server.go:1001-1029](file://internal/app/server.go#L1001-L1029)
+
+### 限流后端与 fail-open
+
+`RateLimiterBackend` 是唯一的限流抽象接口（`ratelimit/ratelimit.go:10-17`），
+本地固定窗口与 Redis 滑动窗口都实现它，`DynamicRateLimiter` 用读写锁持有可换后端
+（`dynamic.go:6-31`）。Redis 侧的三个入口 `Allow` / `Increment` / `IsOverLimit`
+统一采用 **50ms 超时 + 出错即放行**的口径：
+
+```go
+// internal/waf/ratelimit/redis.go:127-138
+ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+defer cancel()
+
+redisKey := rl.prefix + ":rl:" + key
+now := time.Now().UnixMilli()
+windowMs := windowS * 1000
+
+result, err := slidingWindowScript.Exec(ctx, rl.client, []string{redisKey},
+	[]string{strconv.FormatInt(now, 10), strconv.FormatInt(windowMs, 10), strconv.FormatInt(maxReqs, 10)}).AsInt64()
+if err != nil {
+	return true
+}
+return result == 1
+```
+
+三个细节容易踩坑：`NewRedisRateLimiter` 在 `client == nil` 时返回 nil，
+因此调用方必须做 nil 接口判空（`buildRateLimiterBackend` 正是为此存在）；
+`SetEnabled`/`Reconfigure` 不接受非法 window/quota 组合，会把 enabled 强制压回 false（:50-75）；
+`Close()` 是空函数（:194），Redis 连接由共享 client 统一管理，不在限流器内关闭。
+
+**章节来源**
+- [internal/waf/ratelimit/redis.go:22-75](file://internal/waf/ratelimit/redis.go#L22-L75)
+- [internal/waf/ratelimit/redis.go:115-194](file://internal/waf/ratelimit/redis.go#L115-L194)
+- [internal/waf/ratelimit/ratelimit.go:10-17](file://internal/waf/ratelimit/ratelimit.go#L10-L17)
+- [internal/waf/ratelimit/dynamic.go:6-31](file://internal/waf/ratelimit/dynamic.go#L6-L31)
+- [internal/app/server.go:123-128](file://internal/app/server.go#L123-L128)
+
+### 事件扇出与读穿透缓存
+
+`UnifiedWriter` 在每次 flush 前把四类记录 `LPUSH` 到各自的 LIST，随后 `LTRIM` + `EXPIRE`
+（`unified_writer.go:1094-1152`），整批 5s 超时（:1099）。要点有三：
+扇出**先于** DB 事务执行（:922-927），因此 Redis 里可能短暂存在尚未落库的记录；
+`LTRIM` 上限为 99999（事件、访问日志）与 49999（drop、bot 分数），TTL 固定 7 天；
+失败只置 `failed` 标记并告警，不影响落库，也不会重试——LIST 是**尽力而为的下游通道**，
+不是可靠队列。需要可靠消费时应当读 DB，而不是读这四个 LIST。
+
+读穿透侧 `HotCache` 用 `singleflight` 合并同键回源（`hot_cache.go:22`），
+并把「键不存在」与「Redis 故障」分开计数（:27-32、`recordReadErr` :104-120），
+这一区分直接决定 `/metrics` 里 `owaf_cache_*_total{cache="hot"}` 的可解释性：
+若混记，Redis 整体故障会显示为命中率 0%，把排障方向引向「缓存没生效」。
+
+**章节来源**
+- [internal/observability/unified_writer.go:916-935](file://internal/observability/unified_writer.go#L916-L935)
+- [internal/observability/unified_writer.go:1094-1152](file://internal/observability/unified_writer.go#L1094-L1152)
+- [internal/cache/hot_cache.go:16-51](file://internal/cache/hot_cache.go#L16-L51)
+- [internal/store/repository/access_log.go:331-340](file://internal/store/repository/access_log.go#L331-L340)
+- [internal/store/repository/security_event.go:114-157](file://internal/store/repository/security_event.go#L114-L157)
+- [internal/store/repository/repository.go:16-26](file://internal/store/repository/repository.go#L16-L26)
+
+### 能力边界
+
+| 用途 | 是否支持（证据） | 说明 |
+|------|------------------|------|
+| 跨节点计数与限流 | 支持：`ratelimit/redis.go:77-113` | ZSET 滑动窗口，50ms 超时，fail-open |
+| 跨节点共享 KV / 会话 | 支持：`redis_kv.go:100-179` | 仅字节与 JSON 两种编码，无压缩 |
+| 分布式锁与单写者选主 | 支持：`redis_kv.go:367-401` | 无 fencing token，最坏 30s 接管窗口 |
+| 配置变更广播 | 支持：`pubsub.go:64-121` | 至少一次语义，无持久化，断连不重连 |
+| 事件流下游通道 | 部分：`unified_writer.go:1130-1151` | 尽力而为、有 `LTRIM` 上限，不可靠 |
+| 文档/集合模型（NoSQL DB） | 不支持：`go.mod` 无相应驱动 | 全库只有 KV/ZSET/HASH/LIST/频道 |
+| 二级索引与范围查询 | 不支持 | 只有 `SCAN MATCH 前缀*`（`store_redis.go:249,284,526`） |
+| 事务与多键原子提交 | 不支持 | 原子性只由单个 Lua 脚本提供 |
+| Redis Cluster / Sentinel | 不支持：`redis.go:22-29` | `InitAddress` 单地址，无 TLS、无哨兵发现 |
+| 作为权威数据源 | 不支持 | 所有权威状态在关系库，TTL 到期即消失 |
+| 多租户键隔离 | 部分 | 前缀只有 `openwaf:`/`owaf:`/`waf:` 三套体系，无租户维度 |
+| 缓存预热 | 不支持 | 只有被动 `Set`/`SetList`，无启动预热逻辑 |
+
+**章节来源**
+- [internal/core/redis/redis.go:18-34](file://internal/core/redis/redis.go#L18-L34)
+- [internal/cache/redis_kv.go:100-179](file://internal/cache/redis_kv.go#L100-L179)
+- [internal/waf/accessgate/store_redis.go:249-284](file://internal/waf/accessgate/store_redis.go#L249-L284)
+- [internal/observability/unified_writer.go:1130-1151](file://internal/observability/unified_writer.go#L1130-L1151)
+
+### 接入新消费方的流程与步骤表
+
+新增一个依赖 Redis 的模块时，顺序不能颠倒：先定降级语义，再定键与原子性，最后才接热替换。
+
+| 步 | 动作 | 参照位置 | 完成判据 | 跳过的后果 |
+|:--:|------|----------|----------|------------|
+| 1 | 明确失败语义（放行 / 拦截 / 回落本地） | `ratelimit/redis.go:134-138`、`antireplay.go:145-150` | 断连场景有单测覆盖 | 故障时行为不可预期 |
+| 2 | 决定走 `RedisKV` 还是原生 client，并写死前缀口径 | `redis_kv.go:16`、`captcha.go:207` | `SCAN MATCH` 能看到真实键形态 | 出现 `openwaf:owaf:` 双层前缀误判 |
+| 3 | 读-判-写逻辑改用 Lua 脚本，不用 Pipeline 拼装 | `redis_kv.go:20-26`、`ratelimit/redis.go:77-113` | 并发窗口只有一次过期设置生效 | 计数窗口漂移 |
+| 4 | 依赖接口而非 `*RedisKV` 具体类型 | `repository/repository.go:18-26`、`luaplugin/runtime.go:162` | `go vet -tags=quickjs ./...` 通过 | 形成反向依赖或 import cycle |
+| 5 | 暴露 `SetClient`/`SetRedis` 以便热替换 | `redis_kv.go:51-60`、`server.go:1208-1235` | `redis-config` 切换后读写恢复 | 热切换漏配，新后端拿不到 client |
+| 6 | 设置分级超时并接入熔断统计 | `redis_kv.go:82-97`、`hot_cache.go:118-140` | 慢节点不会拖平请求延迟 | 每请求都等满超时 |
+| 7 | 命中/未命中/故障三类计数分开 | `hot_cache.go:19-32` | `/metrics` 可区分故障与未命中 | 排障方向被引偏 |
+| 8 | 回填本篇键设计表与能力边界表 | 本文件 | 表格行与代码行号一致 | 文档与实现漂移 |
+
+**章节来源**
+- [internal/waf/ratelimit/redis.go:134-138](file://internal/waf/ratelimit/redis.go#L134-L138)
+- [internal/waf/antireplay/antireplay.go:145-150](file://internal/waf/antireplay/antireplay.go#L145-L150)
+- [internal/cache/redis_kv.go:51-97](file://internal/cache/redis_kv.go#L51-L97)
+- [internal/cache/hot_cache.go:19-32](file://internal/cache/hot_cache.go#L19-L32)
+- [internal/app/server.go:1208-1235](file://internal/app/server.go#L1208-L1235)
 
 ## 依赖关系分析
-- 运行时依赖 Redis 客户端工厂与本地缓存层；在启用 Redis 时创建分布式 KV。
-- 应用服务在启动时注册配置同步订阅者，配置变更时通过 Pub/Sub 广播。
-- 速率限制器直接依赖 Redis 客户端；响应缓存为纯内存实现。
-- 仓库聚合提供数据源，驱动快照构建与配置变更。
 
 ```mermaid
 graph LR
-RT["Runtime"] --> RCli["Redis 客户端"]
-RT --> Layer["本地快照缓存"]
-RT --> RKV["RedisKV"]
-App["应用服务"] --> CS["ConfigSync"]
-App --> Eng["WAF 引擎"]
-Eng --> RL["RedisRateLimiter"]
-Eng --> RC["ResponseCache"]
-Repo["仓库聚合"] --> App
+  CFG["core.Config<br/>RedisAddr/Password/DB"] --> RT["core.Runtime"]
+  RT -->|原生 client| RL["ratelimit.RedisRateLimiter"]
+  RT -->|原生 client| CH["challenge 三态管理器"]
+  RT -->|原生 client| AR["antireplay"]
+  RT -->|原生 client| ES["escalation"]
+  RT -->|原生 client| UW["observability.UnifiedWriter"]
+  RT -->|原生 client| HC["cache.HotCache"]
+  RT -->|原生 client| CS["redis.ConfigSync"]
+  RT --> KV["cache.RedisKV"]
+  KV --> RA["dataplane 资源聚合 sink"]
+  KV --> LUA["luaplugin ctx.kv"]
+  KV --> DASH["admin dashboard"]
+  REPO["store/repository"] -->|HotCacheBackend 接口| HC
+  IFACE["luaplugin.KVBackend<br/>ContextKVBackend"] --> KV
 ```
 
-图表来源
-- [internal/core/runtime.go:66-79](file://internal/core/runtime.go#L66-L79)
-- [internal/app/server.go:127-260](file://internal/app/server.go#L127-L260)
-- [internal/waf/ratelimit/redis.go:12-89](file://internal/waf/ratelimit/redis.go#L12-L89)
-- [internal/cache/response_cache.go:25-163](file://internal/cache/response_cache.go#L25-L163)
-- [internal/store/repository/repository.go:24-43](file://internal/store/repository/repository.go#L24-L43)
+**图表来源**
+- [internal/store/repository/repository.go:16-26](file://internal/store/repository/repository.go#L16-L26)
+- [internal/waf/luaplugin/runtime.go:148-169](file://internal/waf/luaplugin/runtime.go#L148-L169)
+- [internal/core/runtime.go:100-141](file://internal/core/runtime.go#L100-L141)
 
-章节来源
-- [internal/core/runtime.go:66-79](file://internal/core/runtime.go#L66-L79)
-- [internal/app/server.go:127-260](file://internal/app/server.go#L127-L260)
-- [internal/store/repository/repository.go:24-43](file://internal/store/repository/repository.go#L24-L43)
+依赖方向上唯一的抽象点有两处：`repository.HotCacheBackend`
+（`repository.go:18-26`，为避免 `store → cache` 反向依赖而定义）与
+`luaplugin.KVBackend`/`ContextKVBackend`（`runtime.go:148-169`，
+脚本侧 KV 的可插拔契约，`RedisKV` 是其唯一实现）。
+新增其他 KV 后端只需满足 `ContextKVBackend`：不实现它，Lua 侧一律按不可用处理，
+因为无法响应取消的同步 I/O 会阻塞数据面请求。
 
-## 性能考量
-- 连接与超时：合理设置 Dial/Read/Write 超时，避免阻塞影响请求处理。
-- 流水线与脚本：RedisKV 的 Incr 使用流水线；速率限制使用 Lua 脚本原子化，减少网络往返。
-- 内存缓存分片：响应缓存采用 64 分片与读写锁，降低热点竞争。
-- 后台清理：响应缓存定期清理过期项，避免内存膨胀。
-- 失败开路：速率限制在 Redis 异常时允许请求，保障系统韧性。
-- 建议：
-  - 对高频键使用短 TTL 并结合本地缓存命中率优化。
-  - 控制单条缓存体大小，避免占用过多内存。
-  - 在高并发场景下评估 Redis 命令队列长度与网络延迟。
+| 外部实体 | 类型 | 交互方向 | 协议/方式 | 触发时机 | 失败影响 | 容错处理 |
+|----------|------|:--------:|-----------|----------|----------|----------|
+| Redis 实例 | 存储 | 出向 | RESP（rueidis） | 计数/会话/缓存/锁 | 限流与缓存退化 | 50ms-5s 分级超时 + 5s 熔断 |
+| Redis 频道 | 消息通道 | 双向 | Pub/Sub | 配置变更广播 | 他节点不重载 | 本地重载照常，发布仅告警 |
+| 下游事件消费方 | 第三方 | 入向 | `LRANGE`/`BLPOP` 自取 | 实时分析 | 事件缺失 | `LTRIM` + 7 天 TTL，DB 为准 |
+| SQLite/MySQL/Postgres | 存储 | 出向 | GORM | 权威读写 | 服务不可用 | 与 Redis 无关，独立降级 |
+| Lua/JS 插件脚本 | 扩展 | 出向 | `ctx.kv` | 脚本执行 | 策略降级不中断站点 | 返回 nil/false + 调用配额 |
 
-章节来源
-- [internal/core/redis/redis.go:32-38](file://internal/core/redis/redis.go#L32-L38)
-- [internal/core/runtime.go:54-59](file://internal/core/runtime.go#L54-L59)
-- [internal/core/redis/pubsub.go:21-76](file://internal/core/redis/pubsub.go#L21-L76)
-- [internal/app/server.go:244-260](file://internal/app/server.go#L244-L260)
-- [internal/waf/ratelimit/redis.go:47-84](file://internal/waf/ratelimit/redis.go#L47-L84)
-- [internal/cache/response_cache.go:94-122](file://internal/cache/response_cache.go#L94-L122)
-- [internal/cache/response_cache.go:142-162](file://internal/cache/response_cache.go#L142-L162)
+
+**章节来源**
+- [internal/core/runtime.go:100-141](file://internal/core/runtime.go#L100-L141)
+- [internal/waf/luaplugin/runtime.go:148-169](file://internal/waf/luaplugin/runtime.go#L148-L169)
+- [internal/store/repository/repository.go:16-26](file://internal/store/repository/repository.go#L16-L26)
+
+## 性能考虑
+
+- 超时分级：热路径（限流、升级计数）50ms、防重放 80ms、访问会话 100ms、
+  KV 与热缓存 1s、聚合与排空 2s、链式会话与 5 秒盾 3s、事件扇出整批 5s。
+  新增调用点必须显式 `context.WithTimeout`，不要沿用 `context.Background()` 无超时写法。
+- 往返合并：`HAggregateFlush` 用一次 `DoMulti` 提交 `2 + len(counts) + len(metas)` 条命令
+  （`redis_kv.go:244-255`），`pushToRedis` 同理；单键原子语义一律走脚本而非多命令拼装。
+- 熔断与回源：`noteCommandResult` 在失败时写入 `unavailableUntil`（5s），
+  期间 `Available()` 返回假，调用方直接回源，避免每请求都等一次超时（`redis_kv.go:82-97`）。
+- 内存侧的镜像成本：`ccRateStates` 全局 `sync.Map` 与 `regexCache` 都不做淘汰，
+  Redis 卸载失败时聚合器还会退回 2048 键封顶的内存表（`resource_aggregator.go:21`），
+  三者叠加是长期运行进程的主要粘滞来源，扩容前应优先控制规则与资源键基数。
+
+**章节来源**
+- [internal/cache/redis_kv.go:82-97](file://internal/cache/redis_kv.go#L82-L97)
+- [internal/cache/redis_kv.go:234-265](file://internal/cache/redis_kv.go#L234-L265)
+- [internal/dataplane/resource_aggregator.go:19-24](file://internal/dataplane/resource_aggregator.go#L19-L24)
 
 ## 故障排查指南
-- Redis 连接失败：检查地址、密码、DB 索引；确认 Ping 成功后再继续启动。
-- Pub/Sub 不生效：确认通道名称一致；检查订阅协程是否被关闭；查看发布/订阅日志。
-- 速率限制异常：关注 Redis 调用错误；注意脚本执行耗时与窗口设置。
-- 响应缓存命中异常：确认缓存键生成逻辑一致；检查默认 TTL 与过期判定。
-- 快照未更新：确认配置同步广播是否成功；检查 reload 回调链路。
 
-章节来源
-- [internal/core/redis/redis.go:32-39](file://internal/core/redis/redis.go#L32-L39)
-- [internal/core/redis/pubsub.go:33-43](file://internal/core/redis/pubsub.go#L33-L43)
-- [internal/waf/ratelimit/redis.go:79-84](file://internal/waf/ratelimit/redis.go#L79-L84)
-- [internal/cache/response_cache.go:20-23](file://internal/cache/response_cache.go#L20-L23)
-- [internal/app/server.go:220-260](file://internal/app/server.go#L220-L260)
+| 症状 | 原因 | 排查 | 方案 |
+|------|------|------|------|
+| 日志出现 `redis unavailable, continuing without redis` | 启动时 Ping 失败，地址/密码/DB 不对 | `runtime.go:104-116` 打印的 addr/db | 修正 `MY_OPENWAF_REDIS_*` 后重启，或改走 redis-config |
+| 限流形同不存在 | Redis 慢/断连触发 fail-open | 抓 `Allow` 返回与 50ms 超时 | 恢复 Redis；不可用时接受放行语义 |
+| 防重放在 Redis 抖动时大量拦截 | `ValidateAndRotate` 出错返回 `valid=false` | `antireplay.go:145-150` + `phases.go:1277-1287` | 与限流不同，这里是 fail-closed，需保证 Redis 可用性 |
+| 多节点配置不同步 | `Receive` 返回后不重连；或旧裸串触发回环 | `pubsub.go:97`、`PublishReload` 日志 | 触发一次本地变更重载，或重启节点 |
+| 找不到 Lua 脚本写的键 | 键实际是 `openwaf:owaf:lua:*` 双层前缀 | `api.go:347` + `redis_kv.go:114` | 按双层前缀 SCAN |
+| 资源命中数重复累加 | sink 锁 TTL 30s 内出现双写者 | `resource_aggregator.go:286`、锁剩余 TTL | 缩短回流周期或接受重复（累加语义） |
+| 事件 LIST 无限增长 | 消费方停摆但写入继续 | `LTRIM` 上限 99999/49999 | 上限由 `pushJSON` 控制，属自保护而非丢数据 |
+| 保存 redis-config 返回 400 | `validateRedisConfig` 或 `probeRedisConfig` 失败 | `network.go:538-575` | 地址必须是 `host:port`，密码含特殊字符时注意分词 |
+
+```bash
+# 环境变量口径（README.md:322-333），密码一律脱敏
+export MY_OPENWAF_REDIS_ADDR="127.0.0.1:6379"
+export MY_OPENWAF_REDIS_PASSWORD="{占位}"
+export MY_OPENWAF_REDIS_DB=0
+
+# 回归口径（README.md:433-435）
+CGO_ENABLED=1 go test -tags=quickjs -timeout=30m ./internal/cache/... ./internal/waf/ratelimit/...
+```
+
+**章节来源**
+- [internal/core/runtime.go:104-116](file://internal/core/runtime.go#L104-L116)
+- [internal/admin/system/network.go:538-575](file://internal/admin/system/network.go#L538-L575)
+- [internal/core/rules/phases.go:1277-1287](file://internal/core/rules/phases.go#L1277-L1287)
+- [README.md:322-333](file://README.md#L322-L333)
+- [README.md:422-435](file://README.md#L422-L435)
 
 ## 结论
-该系统通过“本地快照缓存 + 分布式 KV + Redis Pub/Sub”的组合，实现了高效、可扩展且具备韧性的一致性与缓存体系。RedisKV 提供了简洁而强大的跨节点共享状态能力；响应缓存与速率限制分别覆盖了热点响应与流量治理两大关键场景；配置同步确保多节点在变更后保持一致。整体设计兼顾易用性与性能，适合在分布式环境中稳定运行。
 
-## 附录：扩展与部署指南
+本项目对 Redis 的使用边界非常清晰：**只做计数、会话、缓存、锁与通知，不做数据源**。
+本篇把旧的「NoSQL 适配器」叙述纠正为实测口径——单一可选 client（rueidis）、
+22 个键空间加 1 个频道、原子性一律由 Lua 脚本而非 Pipeline 提供、
+限流 fail-open 而防重放 fail-closed、事件扇出为尽力而为。
+这样的设计带来一个直接好处：Redis 全灭时系统仍可对外服务，代价是
+「跨节点一致性」从强保证退化为尽力保证。扩展者在决定是否依赖 Redis 之前，
+应先回答「该状态丢了会怎样」——答案决定它是进 `RedisKV`、进关系库，还是留在进程内。
 
-### 扩展到其他 NoSQL 数据库的适配方法
-- 抽象接口：定义统一的 KV 接口（如 Set/Get/Delete/Exists/Incr），并在不同后端实现。
-- 命令封装：针对目标数据库的特性（如 TTL、事务、脚本）进行封装。
-- 序列化策略：提供字节与 JSON 两种序列化方式，满足不同数据形态。
-- 过期管理：在适配层实现 TTL 设置与清理策略，必要时引入后台任务。
-- 集成点：将新适配器注入运行时，替换 RedisKV 实例，保持上层调用不变。
+**章节来源**
+- [internal/cache/redis_kv.go:100-401](file://internal/cache/redis_kv.go#L100-L401)
+- [internal/core/redis/pubsub.go:64-132](file://internal/core/redis/pubsub.go#L64-L132)
 
-### 性能优化策略
-- 连接池与超时：合理配置连接池大小与超时参数，避免阻塞。
-- 命令批量化：批量写入与流水线执行，减少网络往返。
-- 缓存分层：热点数据优先命中本地缓存，再回退到分布式缓存。
-- 限流与熔断：在上游增加限流与熔断，保护下游存储。
-- 监控与告警：对慢查询、错误率、内存使用等指标进行监控。
+## 附录
 
-### Redis 集群与高可用部署方案
-- 集群模式：使用 Redis Cluster 或云托管集群，提升吞吐与可用性。
-- 主从复制：配置主从复制与哨兵/集群自动故障转移，确保高可用。
-- 网络与安全：启用 TLS 与认证，限制访问来源，优化网络延迟。
-- 分片策略：对键空间进行哈希分片，避免热点集中在单一节点。
-- 运维工具：结合持久化、备份与监控工具，保障生产环境稳定。
+### 配置项表
+
+| 配置项 | 载体 | 默认值 | 生效方式 | 校验点 |
+|--------|------|--------|----------|--------|
+| `MY_OPENWAF_REDIS_ADDR` | 环境变量 | 空（不启用） | 启动时 | `OptionalClient` 判空 |
+| `MY_OPENWAF_REDIS_PASSWORD` | 环境变量 | 空 | 启动时 | 原样传入 `ClientOption` |
+| `MY_OPENWAF_REDIS_DB` | 环境变量 | `0` | 启动时 | `SelectDB`；负值在加载期拒绝 |
+| `redis_config.enabled` | 系统设置表 | 假 | `POST /api/v1/redis-config` | `validateRedisConfig` |
+| `redis_config.addr` | 系统设置表 | 空 | 同上 | 必须 `host:port` |
+| `redis_config.password` | 系统设置表 | 空 | 同上 | 响应中脱敏 |
+| `redis_config.db` | 系统设置表 | 0 | 同上 | 必须 `>= 0` |
+
+**章节来源**
+- [README.md:322-333](file://README.md#L322-L333)
+- [internal/admin/system/network.go:413-575](file://internal/admin/system/network.go#L413-L575)
+- [internal/store/system.go:12](file://internal/store/system.go#L12)
+
+### 兼容矩阵：三类后端的职责划分
+
+| 能力 | 关系库（sqlite/mysql/postgres） | Redis | 进程内实现 |
+|------|:-------------------------------:|:-----:|:----------:|
+| 站点/规则/证书权威存储 | ✓ | ✗ | ✗ |
+| 访问日志与安全事件落库 | ✓ | 部分（扇出副本，非可靠） | ✗ |
+| 跨节点限流计数 | ✗ | ✓ | ✗（仅本节点） |
+| 挑战会话跨节点共享 | ✗ | ✓ | ✓（单节点，重启丢失） |
+| 配置变更通知 | ✓（修订号） | ✓（频道广播） | ✗ |
+| 大结果集读缓存 | 回源代价高 | ✓（5s TTL） | queryCache 兜底 |
+
+[本节为总结，无需特定文件来源]
+
+### 相关文档
+
+- [存储后端扩展](存储后端扩展.md)：关系库适配器与替换 KV/限流后端的完整流程
+- [数据库适配器](数据库适配器.md)：三种方言的 DSN 与 PRAGMA 口径
+- [连接池管理](连接池管理.md)：GORM 与 rueidis 的连接参数边界
+- [消息队列集成](../第三方集成/消息队列集成.md)：Pub/Sub 与事件扇出的下游视角
+- [Redis 集成](../../数据存储层/Redis%20集成.md)：存储层视角的同一批事实
+
+[本节为总结，无需特定文件来源]

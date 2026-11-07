@@ -30,7 +30,7 @@ func (w *h3UnwrapLoopWriter) Unwrap() http.ResponseWriter { return w }
 // TestHTTP3ResponseStreamUnwrapsCancelAware 是 h3 流级取消的回归锁：
 // 生产传入的是 *http3CancelAwareResponseWriter（嵌入 http.ResponseWriter，
 // 无 str 字段），修复前 http3ResponseStream 对它恒返回 nil，导致
-// SetStream(nil) → ResetFn()==nil → h3 drop 只能降级为 HTTP 403。
+// SetStream(nil) → ResetFn()==nil → h3 drop 只能回写 HTTP 403。
 // 解包链必须穿过该包装器，抵达持有 QUIC 流的对象。
 func TestHTTP3ResponseStreamUnwrapsCancelAware(t *testing.T) {
 	t.Run("cancelAware wrapper reaches the stream", func(t *testing.T) {

@@ -18,7 +18,8 @@
     "check:site-cache-contract": "bun run scripts/check-site-cache-contract.ts",
     "check:site-challenge-contract": "bun run scripts/check-site-challenge-contract.ts",
     "check:site-protection-contract": "bun run scripts/check-site-protection-contract.ts",
-    "check:api-route-contract": "bun run scripts/check-api-route-contract.ts"
+    "check:api-route-contract": "bun run scripts/check-api-route-contract.ts",
+    "check:env-override-contract": "bun run scripts/check-env-override-contract.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",

@@ -115,7 +115,7 @@ pub fn solve_pow_batched(
         Err(err) => return format!(r#"{{"found":false,"error":"{}"}}"#, err.code()),
     };
 
-    // 读出长度按容器声明（契约式），不写死数字。
+    // 读出长度按容器声明，不写死数字。
     let out = match vm.read_output(parsed.header.out_len as usize) {
         Ok(out) => out,
         Err(err) => return format!(r#"{{"found":false,"error":"{}"}}"#, err.code()),

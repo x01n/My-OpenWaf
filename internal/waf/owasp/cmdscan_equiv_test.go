@@ -26,7 +26,7 @@ func assertCmdPatternMatched(t *testing.T, id, s string) {
 	if !pat.re.MatchString(s) {
 		t.Fatalf("%s 正例 %q 未被正则命中（正例自身失效，需换正例）", id, s)
 	}
-	if !shouldScanCmdPattern(s, pat) {
+	if !shouldScanCmdPattern(s, pat, nil) {
 		t.Fatalf("%s 前置把正则命中的输入 %q 滤掉了（漏杀，违反等价前置约束）", id, s)
 	}
 }
@@ -122,7 +122,7 @@ func TestCmdPrereqNegative(t *testing.T) {
 			if pat.re.MatchString(s) {
 				t.Fatalf("%s 负例 %q 竟被正则命中（负例失效，需换）", tt.id, s)
 			}
-			if shouldScanCmdPattern(s, pat) {
+			if shouldScanCmdPattern(s, pat, nil) {
 				t.Fatalf("%s 前置应剪掉非目标输入 %q（剪枝未生效）", tt.id, s)
 			}
 		}
@@ -145,7 +145,7 @@ func TestCmd029ExhaustiveSmall(t *testing.T) {
 			s := string(buf)
 			if pat.re.MatchString(s) {
 				hits++
-				if !shouldScanCmdPattern(s, pat) {
+				if !shouldScanCmdPattern(s, pat, nil) {
 					t.Fatalf("owasp:cmd:029 前置把正则命中的输入 %q 滤掉（穷举漏杀）", s)
 				}
 			}
@@ -305,7 +305,7 @@ func TestCmdScanRandomizedParity(t *testing.T) {
 		var b strings.Builder
 		build(&b)
 		s := b.String()
-		got, gotOK := checkCmdInjection(s, 4)
+		got, gotOK := checkCmdInjection(s, 4, nil)
 		want, wantOK := refCheckCmdInjection(s, 4)
 		// 采用「行为等价口径」判定本次对拍：判定一致 + 分数一致即视为行为未变；
 		// 归因（RuleID）变化不视为回归，但必须留痕（t.Logf）。
@@ -357,7 +357,7 @@ func TestCmdBacktickGateParity(t *testing.T) {
 		"plain text without any shell char",
 	}
 	for _, s := range fixed {
-		got, gotOK := checkCmdInjection(s, 4)
+		got, gotOK := checkCmdInjection(s, 4, nil)
 		want, wantOK := refCheckCmdInjection(s, 4)
 		if gotOK != wantOK {
 			if strings.Contains(s, "``") {
@@ -386,11 +386,11 @@ func TestCmd023SplittingLock(t *testing.T) {
 	}
 	pat := lookupCmdPattern(t, "owasp:cmd:023")
 	for _, s := range positives {
-		if !pat.re.MatchString(s) || !shouldScanCmdPattern(s, pat) {
+		if !pat.re.MatchString(s) || !shouldScanCmdPattern(s, pat, nil) {
 			t.Fatalf("拆字绕过正例 %q 未命中 owasp:cmd:023（正则或前置把它滤掉了）", s)
 		}
 		// 端到端仍须拦下（同串上 cmd:018 可能先行归因，故只断言「有命中」）。
-		if _, ok := checkCmdInjection(s, 4); !ok {
+		if _, ok := checkCmdInjection(s, 4, nil); !ok {
 			t.Fatalf("拆字绕过正例 %q 端到端未检出", s)
 		}
 	}
@@ -400,10 +400,10 @@ func TestCmd023SplittingLock(t *testing.T) {
 		if !pat.re.MatchString(s) {
 			t.Fatalf("负例 %q 未被正则命中（负例失效，需换；本锁依赖正则仍命中）", s)
 		}
-		if shouldScanCmdPattern(s, pat) {
+		if shouldScanCmdPattern(s, pat, nil) {
 			t.Fatalf("非命令词的随机空反引号输入 %q 仍通过 cmd:023 前置", s)
 		}
-		if hit, ok := checkCmdInjection(s, 4); ok && hit.RuleID == "owasp:cmd:023" {
+		if hit, ok := checkCmdInjection(s, 4, nil); ok && hit.RuleID == "owasp:cmd:023" {
 			t.Fatalf("非命令词的随机空反引号输入 %q 端到端仍被判为 cmd:023：%+v", s, hit)
 		}
 	}

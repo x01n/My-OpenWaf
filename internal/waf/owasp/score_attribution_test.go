@@ -30,7 +30,7 @@ func cmdGateOnly(s string, threshold int) (OWASPHit, bool) {
 	total, best := 0, ""
 	binaryChecked, binaryTarget := false, false
 	for _, p := range cmdInjectPatterns {
-		if !shouldScanCmdPattern(s, p) || !p.re.MatchString(s) {
+		if !shouldScanCmdPattern(s, p, nil) || !p.re.MatchString(s) {
 			continue
 		}
 		if p.score < binaryTargetMinCmdScore {
@@ -69,7 +69,7 @@ func sqliGateOnly(normalized string, threshold int) (OWASPHit, bool) {
 	signals := collectSQLiPatternSignals(normalized)
 	total, best := 0, ""
 	for _, p := range sqliPatterns {
-		if !shouldScanSQLiPatternWithSignals(normalized, p, signals) || !p.re.MatchString(normalized) {
+		if !shouldScanSQLiPatternWithSignals(normalized, p, signals, nil) || !p.re.MatchString(normalized) {
 			continue
 		}
 		if isSQLiFalsePositive(normalized, p.id) {
@@ -92,7 +92,7 @@ func xssGateOnly(normalized string, threshold int) (OWASPHit, bool) {
 	}
 	total, best := 0, ""
 	for _, p := range xssPatterns {
-		if !shouldScanXSSPattern(normalized, p) || !p.re.MatchString(normalized) {
+		if !shouldScanXSSPattern(normalized, p, nil) || !p.re.MatchString(normalized) {
 			continue
 		}
 		if isXSSSuppressedRule(normalized, p.id, threshold) {
@@ -256,7 +256,7 @@ func ssrfGateOnly(s string, threshold int) (OWASPHit, bool) {
 	}
 	total, best := 0, ""
 	for _, p := range ssrfPatterns {
-		if !shouldScanSSRFPattern(s, p) || !p.re.MatchString(s) {
+		if !shouldScanSSRFPattern(s, p, nil) || !p.re.MatchString(s) {
 			continue
 		}
 		total += p.score
@@ -424,22 +424,22 @@ var attributionGateOnlyBatteries = []gateOnlyBattery{
 
 // productionBatteries 是同一批类别的生产实现。
 var productionBatteries = []gateOnlyBattery{
-	{"ssrf", checkSSRF},
-	{"cmd_injection", checkCmdInjection},
-	{"xxe", checkXXE},
-	{"ldap_injection", checkLDAPInjection},
-	{"nosql_injection", checkNoSQLi},
-	{"template_injection", checkTemplateInjection},
-	{"jndi_injection", checkJNDI},
-	{"crlf_injection", checkCRLF},
-	{"expression_language", checkExprLang},
-	{"deserialization", checkDeserialization},
-	{"graphql_injection", checkGraphQLi},
-	{"webshell", checkWebshell},
-	{"revshell", checkRevShell},
-	{"xss", nextXSSHit},
+	{"ssrf", withGate(checkSSRF)},
+	{"cmd_injection", withGate(checkCmdInjection)},
+	{"xxe", withGate(checkXXE)},
+	{"ldap_injection", withGate(checkLDAPInjection)},
+	{"nosql_injection", withGate(checkNoSQLi)},
+	{"template_injection", withGate(checkTemplateInjection)},
+	{"jndi_injection", withGate(checkJNDI)},
+	{"crlf_injection", withGate(checkCRLF)},
+	{"expression_language", withGate(checkExprLang)},
+	{"deserialization", withGate(checkDeserialization)},
+	{"graphql_injection", withGate(checkGraphQLi)},
+	{"webshell", withGate(checkWebshell)},
+	{"revshell", withGate(checkRevShell)},
+	{"xss", withGate(nextXSSHit)},
 	{"sqli", nextSQLiHit},
-	{"path_traversal", checkPathTraversal},
+	{"path_traversal", withGate(checkPathTraversal)},
 }
 
 // TestOWASPAttributionIgnoresSuppressedFirstRule 归因修复的专项用例：
@@ -464,12 +464,12 @@ func TestOWASPAttributionIgnoresSuppressedFirstRule(t *testing.T) {
 	cases = append(cases, attributionCase{"sqli", nextSQLiHit, "id=x';for(i){chr(65)}", 3, "owasp:sqli:007"})
 
 	// CMD：`=\s*` 前缀的 cmd:010（3 分）单独出现即被抑制，cmd:001（5 分）才是跨阈规则。
-	cases = append(cases, attributionCase{"cmd", checkCmdInjection, "; ls -la", 5, "owasp:cmd:001"})
+	cases = append(cases, attributionCase{"cmd", withGate(checkCmdInjection), "; ls -la", 5, "owasp:cmd:001"})
 
 	// XSS：owasp:xss:001（`<script[;\s>/]`，5 分）在无活动 JS 上下文时被抑制，
 	// 同一串上的 owasp:xss:003（`javascript\s*:`，5 分）才是跨阈规则。
 	// 旧实现以 001 归因 → 整类被 isXSSFalsePositive 丢弃（漏报）。
-	cases = append(cases, attributionCase{"xss", nextXSSHit, "a=javascript:<script>", 5, "owasp:xss:003"})
+	cases = append(cases, attributionCase{"xss", withGate(nextXSSHit), "a=javascript:<script>", 5, "owasp:xss:003"})
 
 	// 抑制器前移导致的漏报修复：`or 1=1/*` 上 sqli:005（3 分）恒被抑制，
 	// 旧实现把它计入总分并在过阈后整类丢弃；新实现由 sqli:010（5 分）跨阈。
@@ -505,13 +505,13 @@ func TestOWASPAttributionIsCrossingRule(t *testing.T) {
 		input     string
 		threshold int
 	}{
-		{"cmd", checkCmdInjection, "id=1| cat /etc/passwd", 4},
+		{"cmd", withGate(checkCmdInjection), "id=1| cat /etc/passwd", 4},
 		{"sqli", nextSQLiHit, "id=1 union select 1,2 from users", 4},
-		{"xss", nextXSSHit, "<svg onload=alert(1)>", 4},
-		{"path_traversal", checkPathTraversal, "../../../../etc/passwd", 4},
-		{"nosql_injection", checkNoSQLi, `q[$ne]=1&q[$gt]=2`, 4},
-		{"crlf_injection", checkCRLF, "%0d%0aset-cookie:%20a=b", 4},
-		{"expression_language", checkExprLang, `${t(java.lang.Runtime).getRuntime()}`, 4},
+		{"xss", withGate(nextXSSHit), "<svg onload=alert(1)>", 4},
+		{"path_traversal", withGate(checkPathTraversal), "../../../../etc/passwd", 4},
+		{"nosql_injection", withGate(checkNoSQLi), `q[$ne]=1&q[$gt]=2`, 4},
+		{"crlf_injection", withGate(checkCRLF), "%0d%0aset-cookie:%20a=b", 4},
+		{"expression_language", withGate(checkExprLang), `${t(java.lang.Runtime).getRuntime()}`, 4},
 	}
 	for _, c := range cases {
 		hit, ok := c.run(c.input, c.threshold)
@@ -538,6 +538,35 @@ func TestOWASPAttributionIsCrossingRule(t *testing.T) {
 // 16 个电池的 gate-only 参照实现（下方 ssrfGateOnly…pathTravGateOnly）是这条口径的
 // 对照物：它们保留「首条命中」归因、但抑制器同样前移，因此两者之间的差异必然是
 // 纯归因差异。若本测试报出「非归因字段变化」，说明改动越过了这条口径的边界。
+func TestSQLiContinuesAfterRuleOverrideRejectsAttribution(t *testing.T) {
+	thresholds := CompileThresholds("strict")
+	input := "id=1 union select 1,2 from users or 1=1"
+
+	disabled := false
+	got, ok := FirstAcceptedOWASPHitWithThresholds(
+		thresholds, "/search", "", nil, []string{input},
+		map[string]OWASPRuleOverride{"owasp:sqli:001": {Enabled: &disabled}},
+	)
+	if !ok {
+		t.Fatal("expected later SQLi rule to be accepted after sqli:001 was disabled")
+	}
+	if got.RuleID == "owasp:sqli:001" {
+		t.Fatalf("disabled SQLi attribution was returned: %+v", got)
+	}
+
+	sensitivity := "off"
+	got, ok = FirstAcceptedOWASPHitWithThresholds(
+		thresholds, "/search", "", nil, []string{input},
+		map[string]OWASPRuleOverride{"owasp:sqli:001": {Sensitivity: sensitivity}},
+	)
+	if !ok {
+		t.Fatal("expected later SQLi rule to be accepted after sensitivity rejected the first attribution")
+	}
+	if got.RuleID == "owasp:sqli:001" {
+		t.Fatalf("sensitivity-rejected SQLi attribution was returned: %+v", got)
+	}
+}
+
 func TestOWASPBatteryAttributionParity(t *testing.T) {
 	inputs := owaspBatteryParityCorpus()
 	thresholds := []int{1, 2, 3, 4, 5, 7}
@@ -624,4 +653,9 @@ func owaspBatteryParityCorpus() []string {
 		// 通用噪声
 		"", "a", "hello world", "GET /index.html HTTP/1.1",
 	}
+}
+
+// withGate 把带门控参数的检测器适配成 (string, int) 签名，供等价性表驱动用例复用。
+func withGate(fn func(string, int, *scanGate) (OWASPHit, bool)) func(string, int) (OWASPHit, bool) {
+	return func(s string, threshold int) (OWASPHit, bool) { return fn(s, threshold, nil) }
 }

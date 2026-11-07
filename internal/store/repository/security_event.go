@@ -375,10 +375,34 @@ func (r *SecurityEventRepo) Create(item *store.SecurityEvent) error {
 }
 
 func (r *SecurityEventRepo) FindByRequestID(requestID string) ([]store.SecurityEvent, error) {
+	// 先读 Redis：追踪页会在同一次交互里同时请求访问日志与安全事件，
+	// 访问日志已由写侧推送，安全事件则在事务提交后失效该键，因此这里可以
+	// 缓存完整结果集，避免每次追踪都做一次按 request_id 的过滤查询。
+	if requestID != "" && r.hotCache != nil && r.hotCache.Available() {
+		var cached []store.SecurityEvent
+		if r.hotCache.Get(store.SecurityEventRequestCacheKey(requestID), &cached) {
+			return cached, nil
+		}
+	}
 	var items []store.SecurityEvent
 	err := r.db.Where("request_id = ?", requestID).Order("id ASC").Find(&items).Error
+	// 只缓存非空结果。空结果不能缓存：写侧是异步提交的，读侧很可能在提交
+	// 前先回源拿到空集；写侧提交后虽然会 DEL 该键，但读侧的 SET 完全可能
+	// 晚于这次 DEL，从而把空集重新写回并存活整个 TTL，使刚写入的事件在
+	// 追踪页上不可见。空集回源只是一次带索引的等值查询，代价远低于这种
+	// 「事件已落库但查不到」的错误。
+	if err == nil && requestID != "" && r.hotCache != nil && len(items) > 0 {
+		r.hotCache.Set(store.SecurityEventRequestCacheKey(requestID), items, securityEventRequestCacheTTL)
+	}
 	return items, err
 }
+
+// securityEventRequestCacheTTL 是 request_id 安全事件列表缓存的存活时间。
+//
+// 只需覆盖「追踪页在几秒内重复打开」的场景：写侧在安全事件事务提交后删除
+// 对应键，因此缓存陈旧窗口的上界就是这个 TTL，而正常写入路径的实际陈旧
+// 窗口接近 0。取值偏小是为了在写侧失效失败（Redis 抖动）时尽快自愈。
+const securityEventRequestCacheTTL = 10 * time.Second
 
 func (r *SecurityEventRepo) BatchCreate(items []store.SecurityEvent) error {
 	if len(items) == 0 {
@@ -412,7 +436,11 @@ func (r *SecurityEventRepo) DeleteOlderThan(before time.Time) (int64, error) {
 	const batchSize = 5000
 
 	for {
-		tx := r.db.Where("id IN (?)",
+		// 带 LIMIT 的子查询必须包进 derived table：MySQL 8.0 对
+		// `IN (SELECT ... LIMIT n)` 报 ERROR 1235，对同表子查询报 ERROR 1093；
+		// 别名不可省，否则 MySQL 报 ERROR 1248。含 LIMIT 的派生表不会被
+		// MySQL 合并回外层，因此 SQLite / PostgreSQL / MySQL 行为一致。
+		tx := r.db.Where("id IN (SELECT id FROM (?) AS archive_batch)",
 			r.db.Model(&store.SecurityEvent{}).Select("id").Where("created_at < ?", before).Limit(batchSize),
 		).Delete(&store.SecurityEvent{})
 		if tx.Error != nil {

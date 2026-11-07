@@ -24,6 +24,7 @@ const (
 	SettingKeyResponseCompressionZstdEnabled    = "response_compression_zstd_enabled"
 	SettingKeyResponseCompressionMinBytes       = "response_compression_min_bytes"
 	SettingKeyBrotliEnabled                     = "brotli_enabled"
+	SettingKeyRuntimeConfigOverrides            = "runtime_config_overrides"
 )
 
 // ConfigRevision 是单调递增的快照修订号。
