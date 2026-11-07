@@ -75,6 +75,11 @@ func TestGTWFNShell(t *testing.T) {
 	if _, ok := checkCmdInjection("|getent hosts somehost.burpcollaborator.net.&", 4, nil); !ok {
 		t.Fatal("shell 未检出 |getent")
 	}
+	// 同一载荷的 URL 编码形态：`+` 代表空格（gotestwaf JSONRequest 与
+	// HTMLMultipartForm 两个占位符都以此形态发送）。
+	if _, ok := checkCmdInjection("|getent+hosts+somehost.burpcollaborator.net.&", 4, nil); !ok {
+		t.Fatal("shell 未检出 URL 编码形态的 |getent")
+	}
 	// set /a 载荷（| set /a 3482*7301）
 	if _, ok := checkCmdInjection("| set /a 3482*7301", 4, nil); !ok {
 		t.Fatal("shell 未检出 | set /a")

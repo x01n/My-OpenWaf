@@ -408,3 +408,55 @@ func TestCmd023SplittingLock(t *testing.T) {
 		}
 	}
 }
+
+// TestCmd037To040ParamValueLock 锁定「参数值命令形态」四条规则：
+// 参数值直接是裸命令词（037）、命令词 + 可识别实参（038）、
+// 解释器执行绝对路径脚本（039）、管道输出哈希/编码（040）。
+//
+// 这些规则的全部前置都是空 hint，因此端到端判定依赖 hasCmdIndicator
+// 的参数值分支；负例同时锁定该分支不会对普通业务取值放行。
+func TestCmd037To040ParamValueLock(t *testing.T) {
+	positives := []struct{ id, s string }{
+		{"owasp:cmd:037", "cmd=whoami"},
+		{"owasp:cmd:037", "mdc=uname -a"},
+		{"owasp:cmd:037", "x=1&opt=ifconfig"},
+		{"owasp:cmd:037", "a=netstat;b=1"},
+		{"owasp:cmd:038", "cmd=cat /etc/passwd"},
+		{"owasp:cmd:038", "query=echo md5(\"CVE-2020-19625\");"},
+		{"owasp:cmd:038", "cmd=wget http://127.0.0.1/x.sh"},
+		{"owasp:cmd:038", "opt=rm TMQA.txt"},
+		{"owasp:cmd:038", "cmd=sleep 5"},
+		{"owasp:cmd:038", "ppp=bash /tmp/e776c"},
+		{"owasp:cmd:039", "x=bash /tmp/x"},
+		{"owasp:cmd:039", "cmd=sh /tmp/jaws"},
+		{"owasp:cmd:040", "cmd=echo -n 999|md5sum"},
+		{"owasp:cmd:040", "x=id|base64"},
+	}
+	for _, tt := range positives {
+		assertCmdPatternMatched(t, tt.id, tt.s)
+		if _, ok := checkCmdInjection(tt.s, 4, nil); !ok {
+			t.Fatalf("%s 正例 %q 端到端未检出", tt.id, tt.s)
+		}
+	}
+
+	negatives := []struct{ id, s string }{
+		{"owasp:cmd:037", "lang=javascript"},
+		{"owasp:cmd:037", "cmd=whomai"},
+		{"owasp:cmd:038", "status=php"},
+		{"owasp:cmd:038", "a=ls"},
+		{"owasp:cmd:038", "dt=php - MySQL"},
+		{"owasp:cmd:038", "area=sh"},
+		{"owasp:cmd:038", "cmd=cat @/var/lib/jenkins/users/admin/config.xml"},
+		{"owasp:cmd:038", "x=ls 300 lexus"},
+		{"owasp:cmd:038", "x=nc 8000 controller"},
+		{"owasp:cmd:039", "x=bash"},
+		{"owasp:cmd:039", "lang=zh /cn"},
+		{"owasp:cmd:040", "x=1|2"},
+	}
+	for _, tt := range negatives {
+		pat := lookupCmdPattern(t, tt.id)
+		if pat.re.MatchString(tt.s) {
+			t.Fatalf("%s 负例 %q 被正则命中（负例失效，需换）", tt.id, tt.s)
+		}
+	}
+}

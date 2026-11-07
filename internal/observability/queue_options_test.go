@@ -19,8 +19,8 @@ func TestDefaultOptionsMatchLegacyConstants(t *testing.T) {
 	if uw.DropBufferSize != 8192 {
 		t.Errorf("DropBufferSize = %d, want 8192", uw.DropBufferSize)
 	}
-	if uw.BatchSize != 256 {
-		t.Errorf("BatchSize = %d, want 256", uw.BatchSize)
+	if uw.BatchSize != 4096 {
+		t.Errorf("BatchSize = %d, want 4096", uw.BatchSize)
 	}
 	if uw.FlushInterval != 3*time.Second {
 		t.Errorf("FlushInterval = %s, want 3s", uw.FlushInterval)
@@ -39,7 +39,7 @@ func TestDefaultOptionsMatchLegacyConstants(t *testing.T) {
 }
 
 // TestNewUnifiedWriterMatchesLegacyRuntimeValues 断言默认构造路径落到运行时字段上的
-// 值与预期一致：通道容量、批大小（256，SQLite 写径审计上调）、drainLimit(4×BatchSize)、flush 周期。
+// 值与预期一致：通道容量、批大小（4096，SQLite 写径审计两次上调）、drainLimit(4×BatchSize)、flush 周期。
 func TestNewUnifiedWriterMatchesLegacyRuntimeValues(t *testing.T) {
 	w := NewUnifiedWriter(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(w.Close)
@@ -56,12 +56,12 @@ func TestNewUnifiedWriterMatchesLegacyRuntimeValues(t *testing.T) {
 	if got := cap(w.botScoreCh); got != 8192 {
 		t.Errorf("cap(botScoreCh) = %d, want 8192", got)
 	}
-	if w.batchSize != 256 {
-		t.Errorf("batchSize = %d, want 256", w.batchSize)
+	if w.batchSize != 4096 {
+		t.Errorf("batchSize = %d, want 4096", w.batchSize)
 	}
-	// drainLimit 保持 4×BatchSize 比例语义：256×4=1024。
-	if w.drainLimit != 1024 {
-		t.Errorf("drainLimit = %d, want 1024", w.drainLimit)
+	// drainLimit 保持 4×BatchSize 比例语义：4096×4=16384。
+	if w.drainLimit != 16384 {
+		t.Errorf("drainLimit = %d, want 16384", w.drainLimit)
 	}
 	if w.flushInterval != 3*time.Second {
 		t.Errorf("flushInterval = %s, want 3s", w.flushInterval)

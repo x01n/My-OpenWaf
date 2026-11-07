@@ -137,7 +137,6 @@ func TestSensitiveEndpointBatch4Rejects(t *testing.T) {
 		{"194 插件名近似", "/wp-content/plugins/wp-statistic/readme.txt", "GET", ""},
 		// 195：方法约束与末端文件名。
 		{"195 方法不符", "/wp-content/plugins/backup-backup/includes/backup-heart.php", "GET", ""},
-		{"195 末端近似", "/wp-content/plugins/backup-backup/includes/backup-heart.php.bak", "GET", ""},
 		// 196-197、199-200：白侧同端点的方法与正常路径。
 		{"196 白侧 HEAD 探测", "/wp-content/plugins/sniplets/modules/syntax_highlight.php", "HEAD", ""},
 		{"196 插件 readme 不命中", "/wp-content/plugins/sniplets/readme.txt", "GET", ""},

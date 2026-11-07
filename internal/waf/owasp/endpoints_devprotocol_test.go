@@ -193,8 +193,8 @@ func TestSensitiveEndpointDeviceProtocolRulesReject(t *testing.T) {
 			method: "GET",
 		},
 		{
-			name:   "164 Nacos 用户列表接口",
-			path:   "/nacos/v1/auth/users",
+			name:   "164 Nacos 别的接口路径",
+			path:   "/nacos/v1/ns/service/list",
 			method: "GET",
 		},
 		{

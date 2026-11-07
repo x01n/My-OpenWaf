@@ -155,3 +155,40 @@ func TestArchiverOptimizeSQLiteDoesNotPanicWithNilLogger(t *testing.T) {
 	archiver := &Archiver{db: db}
 	archiver.optimizeDB()
 }
+
+// TestArchiverCleanupDeletesOldBotScoreLogs 验证归档器会按保留期清理 Bot 评分
+// 日志，且保留未过期数据。
+func TestArchiverCleanupDeletesOldBotScoreLogs(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&store.BotScoreLog{}); err != nil {
+		t.Fatalf("migrate bot score logs: %v", err)
+	}
+	botRepo := repository.NewBotScoreRepo(db)
+
+	old := time.Now().Add(-48 * time.Hour)
+	if err := botRepo.Create(&store.BotScoreLog{RequestID: "old", ClientIP: "10.0.0.1", CreatedAt: old}); err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	if err := botRepo.Create(&store.BotScoreLog{RequestID: "fresh", ClientIP: "10.0.0.2"}); err != nil {
+		t.Fatalf("create fresh: %v", err)
+	}
+
+	var buf bytes.Buffer
+	archiver := &Archiver{
+		log:          slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		botScoreRepo: botRepo,
+	}
+	archiver.retention.Store(RetentionConfig{SecurityEventDays: 0, AccessLogDays: 1, DropEventDays: 0, StatsDays: 0})
+	archiver.cleanup()
+
+	var remaining []store.BotScoreLog
+	if err := db.Order("id ASC").Find(&remaining).Error; err != nil {
+		t.Fatalf("list remaining: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].RequestID != "fresh" {
+		t.Fatalf("remaining = %+v, want only fresh", remaining)
+	}
+}

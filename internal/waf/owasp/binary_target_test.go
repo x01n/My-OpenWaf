@@ -125,9 +125,10 @@ func decodeFPSample(t *testing.T, encoded string) string {
 }
 
 // normalizeBodyTarget 复现数据面对请求体目标的归一化（body target 的
-// queryPlusAsSpace 为 true，见 forEachOWASPTarget）。
+// queryPlusAsSpace 为 false，见 forEachOWASPTarget：`+` 只在表单中代表空格，
+// 且表单取值已由 extractFormValues 预先解码）。
 func normalizeBodyTarget(raw string) string {
-	n := normalizeWithDecodeTarget(raw, true)
+	n := normalizeWithDecodeTarget(raw, false)
 	if len(n) > maxTargetLen {
 		n = truncateTarget(n)
 	}

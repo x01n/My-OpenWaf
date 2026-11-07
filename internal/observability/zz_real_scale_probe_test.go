@@ -29,7 +29,7 @@ import (
 //	MY_OPENWAF_LOGLOSS_ROWS 每档写入行数（默认 40000）
 //	MY_OPENWAF_LOGLOSS_OUT  输出目录（默认 test.TempDir）
 
-const prodLogDSNSuffix = "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=foreign_keys(OFF)&_pragma=wal_autocheckpoint(2000)"
+const prodLogDSNSuffix = "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=foreign_keys(OFF)&_pragma=wal_autocheckpoint(4000)"
 
 func copyDB(tb testing.TB, src, dst string) string {
 	tb.Helper()
@@ -223,6 +223,7 @@ func TestWriteRateCombinedRealDB(t *testing.T) {
 	}{
 		{"prod-12idx-batch256-g8", nil, 256, 8},
 		{"trim9-batch256-g8", trimmed, 256, 8},
+		{"trim9-batch1024-g8", trimmed, 1024, 8},
 		{"trim9-batch4096-g8", trimmed, 4096, 8},
 		{"prod-12idx-batch4096-g8", nil, 4096, 8},
 	}

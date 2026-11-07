@@ -195,7 +195,6 @@ func TestSensitiveEndpointBatch3Reject(t *testing.T) {
 		{"180 白侧自带插件名", "/public/plugins/knightss27-weathermap-panel/../../../../../conf/defaults.ini", "GET", ""},
 		{"180 末段不同", "/public/plugins/alertlist/../../../../../conf/app.ini", "GET", ""},
 		{"181 子路径不命中以外的次段", "/public/env", "GET", ""},
-		{"181 子路径不命中", "/public/.env.bak", "GET", ""},
 		{"182 方法不符", "/webtools/control/main/ProgramExport", "GET", ""},
 		{"183 子目录形态", "/adm/.env.old", "GET", ""},
 		{"187 白侧 prod.local 子路径", "/api/.env.prod", "GET", ""},

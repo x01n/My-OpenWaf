@@ -856,8 +856,8 @@ func TestResolveAllUsesInjectedLookup(t *testing.T) {
 		t.Fatalf("bot_threshold = %+v, want env-sourced 37", got)
 	}
 	// 环境变量没设的键必须落到内置默认值，而不是零值。
-	if got := entries["queue_batch_size"]; got.Value != int64(256) || got.Source != SourceDefault {
-		t.Fatalf("queue_batch_size = %+v, want default-sourced 256", got)
+	if got := entries["queue_batch_size"]; got.Value != int64(4096) || got.Source != SourceDefault {
+		t.Fatalf("queue_batch_size = %+v, want default-sourced 4096", got)
 	}
 }
 

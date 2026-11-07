@@ -393,7 +393,9 @@ func TestUnifiedWriterFlushIsolatesFailingRecordType(t *testing.T) {
 }
 
 func TestUnifiedWriterFlushesAccessLogsWhenBatchIsFull(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "logs.db")), &gorm.Config{
+	// busy_timeout 与生产 LogDB 同一口径：批量写事务与轮询 Count 分属不同
+	// 连接，无超时会在写锁短暂持有窗口内直接报 SQLITE_BUSY。
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "logs.db")+"?_pragma=busy_timeout(5000)"), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
@@ -407,7 +409,10 @@ func TestUnifiedWriterFlushesAccessLogsWhenBatchIsFull(t *testing.T) {
 		t.Fatalf("migrate logs: %v", err)
 	}
 
+	// 本用例断言「批满即刷」语义，与批大小取值无关：显式钉一个小批量，
+	// 避免默认批量（4096）让单次写事务持续过久，使轮询 Count 撞上写锁。
 	opts := DefaultUnifiedWriterOptions()
+	opts.BatchSize = 64
 	opts.FlushInterval = time.Hour
 	writer := NewUnifiedWriterWithOptions(db, slog.New(slog.NewTextHandler(io.Discard, nil)), opts)
 	t.Cleanup(func() {

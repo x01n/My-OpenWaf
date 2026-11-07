@@ -204,3 +204,30 @@ func TestGTWBodyJSONUnionValue(t *testing.T) {
 		}
 	}
 }
+
+// TestJavaSerializedBodyIsExtracted 锁定 Java 原生序列化流的请求体抽取：
+// 序列化流天然是二进制，可打印率远低于 0.9，旧实现会直接 skipRawFallback，
+// 使 deser:001 在请求体形态下永远看不到 0xACED0005 流头。
+// 全语料黑 99 / 白 2（两条白样本实际是 JBoss FileReceiveServlet 反序列化
+// 文件写入攻击，标签噪声）。
+func TestJavaSerializedBodyIsExtracted(t *testing.T) {
+	body := []byte("\xac\xed\x00\x05sr\x00\x11java.util.HashMap\x00\x00\x00\x00\x00\x00")
+	for _, ct := range []string{
+		"application/x-java-serialized-object; class=org.jboss.invocation.MarshalledInvocation",
+		"application/octet-stream",
+		"multipart/form-data;",
+		"",
+	} {
+		targets := extractBodyTargets(body, ct)
+		if !targetsContain(targets, func(s string) bool {
+			return strings.HasPrefix(s, "\xac\xed\x00\x05")
+		}) {
+			t.Fatalf("ct=%q 时 Java 序列化请求体未被抽取为扫描目标：%q", ct, targets)
+		}
+	}
+	// 反例：普通二进制（PNG 文件头）不应被当成序列化对象流而整段扫描。
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06")
+	if targets := extractBodyTargets(png, "application/octet-stream"); targets != nil {
+		t.Fatalf("PNG 请求体不应被抽取为扫描目标：%q", targets)
+	}
+}

