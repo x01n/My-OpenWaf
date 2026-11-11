@@ -238,7 +238,7 @@ func GetLuaPluginStats(engine *luaplugin.Engine) app.HandlerFunc {
 				AvgMS:    float64(s.AvgTime.Nanoseconds()) / 1e6,
 			})
 		}
-		c.JSON(200, map[string]any{"items": items, "total": len(items)})
+		c.JSON(200, map[string]any{"items": items, "total": len(items), "kv_executable": engine.KVContextual()})
 	}
 }
 

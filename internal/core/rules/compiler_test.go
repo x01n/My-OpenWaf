@@ -79,6 +79,10 @@ func TestCompileQueryRegex(t *testing.T) {
 	if !compiled[0].Match(MatchCtx{Query: "id=1 UNION SELECT 1"}) {
 		t.Fatal("should match union select")
 	}
+	// 回归：载荷用 %20 编码空格规避对 raw query 的正则匹配，解码后必须仍能命中
+	if !compiled[0].Match(MatchCtx{Query: "id=1%20union%20select%201,2,3"}) {
+		t.Fatal("should match URL-encoded union select (%20)")
+	}
 }
 
 /**

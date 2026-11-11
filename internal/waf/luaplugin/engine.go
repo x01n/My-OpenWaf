@@ -123,6 +123,24 @@ func (e *Engine) Revision() uint64 {
 }
 
 /**
+ * KVContextual 报告当前 KV 后端是否支持请求级 context 语义。
+ *
+ * 为 false 时请求路径上的脚本不会执行（Evaluate 静默 fail-open，典型场景
+ * 是 Redis 未启用），管理端借此向用户提示「Lua 策略当前不生效」。
+ */
+func (e *Engine) KVContextual() bool {
+	if e == nil {
+		return false
+	}
+	h := e.kv.Load()
+	if h == nil || h.kv == nil {
+		return false
+	}
+	contextual, ok := h.kv.(ContextKVBackend)
+	return ok && contextual.AvailableContext(context.Background())
+}
+
+/**
  * scriptsFor 返回指定阶段的脚本快照。
  *
  * 返回的 slice 属于已发布的不可变集合，调用方可安全遍历而无需持锁。

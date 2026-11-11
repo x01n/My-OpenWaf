@@ -1,0 +1,608 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+/* ===== My-OpenWaf 管理台主题覆盖 ===== */
+:root {
+  --accent: oklch(0.55 0.19 255);
+  --accent-foreground: oklch(0.98 0.01 250);
+  --radius: 0.5rem;
+
+  /* 卡片层次阴影：贴近 Cloudflare 的极浅单层阴影 */
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+  --card-shadow-hover: 0 2px 6px rgb(0 0 0 / 0.08);
+
+  /* 统一动效曲线：快速进入、缓慢收尾 */
+  --ease-fluid: cubic-bezier(0.22, 1, 0.36, 1);
+  --header-height: 3.5rem;
+}
+
+.dark {
+  --background: oklch(0.155 0.015 255);
+  --surface: oklch(0.195 0.018 255);
+  --overlay: oklch(0.21 0.02 255);
+  --accent: oklch(0.72 0.14 235);
+  --accent-foreground: oklch(0.16 0.02 255);
+  --border: oklch(0.28 0.02 255);
+  --separator: oklch(0.25 0.018 255);
+
+  /* 表单字段增强（参考雷池/南墙 WAF：输入框带边框，与背景明确分层） */
+  --field-border-width: 1px;
+  --field-border: var(--separator);
+  --field-border-hover: oklch(0.35 0.02 255);
+  --field-border-focus: var(--accent);
+  --field-background: oklch(0.17 0.015 255);
+  --field-hover: oklch(0.19 0.015 255);
+
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --card-shadow-hover: 0 2px 6px rgb(0 0 0 / 0.5);
+}
+
+/* 弹窗内表单排版：Label 与控件的呼吸感 */
+.modal__body {
+  gap: 1rem;
+}
+.label {
+  font-weight: 500;
+}
+
+/* 表单弹窗宽度自适应（lg 档 464px 对多字段表单过窄，加宽至 620px 并随视口收缩） */
+.modal__dialog--lg {
+  /* HeroUI dialog 为内容自适应宽度，max-width 只封顶不撑开；显式 width 保证表单弹窗 ≥620px */
+  width: min(620px, 92vw);
+  max-width: 92vw;
+}
+
+/* 滚动条跟随主题 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+/* 表格密度与排版微调 */
+html {
+  font-size: 14.5px;
+}
+
+/* 数字等宽，用于指标展示 */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 动效基础设施 ===== */
+
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 45%, transparent);
+  }
+  60% {
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+/** 页面级入场：按 --enter-index 逐项错峰，避免整页同时弹出。 */
+.enter {
+  animation: enter-up 420ms var(--ease-fluid) both;
+  animation-delay: calc(var(--enter-index, 0) * 55ms);
+}
+
+/* ===== 外壳：实色表面与清晰分层 ===== */
+
+.sidebar-rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.brand-badge {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  color: var(--accent-foreground);
+  background: var(--accent);
+}
+
+.topbar-glass {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  height: var(--header-height);
+  background: var(--background);
+  border-bottom: 1px solid var(--border);
+}
+
+/* 内容区画布：纯色底，仅承载布局。 */
+.ambient-canvas {
+  position: relative;
+}
+
+/* 用户头像：取用户名首字符，替换灰底文字头像 */
+.user-avatar {
+  display: grid;
+  place-items: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent-soft-foreground);
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 24%, transparent);
+}
+
+/* ===== 导航 ===== */
+
+.nav-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  border-radius: 0.375rem;
+  padding: 0.42rem 0.625rem 0.42rem 0.75rem;
+  font-size: 0.875rem;
+  color: color-mix(in oklab, var(--foreground) 76%, transparent);
+  transition:
+    background-color 0.2s var(--ease-fluid),
+    color 0.2s var(--ease-fluid);
+}
+
+.nav-link:hover {
+  background: color-mix(in oklab, var(--default) 42%, transparent);
+  color: var(--foreground);
+}
+
+.nav-link--active {
+  font-weight: 600;
+  color: var(--accent-soft-foreground);
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+}
+
+.nav-link--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 58%;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: translateY(-50%);
+}
+
+.nav-link--active:hover {
+  background: color-mix(in oklab, var(--accent) 16%, transparent);
+}
+
+/* ===== 卡片与面板 ===== */
+
+.stat-card {
+  position: relative;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+  padding: 0.95rem 1.05rem;
+  transition: border-color 0.2s var(--ease-fluid), box-shadow 0.2s var(--ease-fluid);
+}
+
+.stat-card:hover {
+  border-color: color-mix(in oklab, var(--accent) 32%, var(--border));
+  box-shadow: var(--card-shadow-hover);
+}
+
+/** 强调卡：用于仪表盘主指标，仅以字号表达优先级。 */
+.stat-card--emphasis {
+  background: var(--surface);
+}
+
+.stat-card__icon {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.5rem;
+  color: var(--tone-color, var(--muted));
+  background: color-mix(in oklab, var(--tone-color, var(--muted)) 12%, transparent);
+}
+
+.stat-card[data-tone="danger"] {
+  --tone-color: var(--danger);
+}
+.stat-card[data-tone="warning"] {
+  --tone-color: var(--warning);
+}
+.stat-card[data-tone="success"] {
+  --tone-color: var(--success);
+}
+.stat-card[data-tone="info"] {
+  --tone-color: var(--accent);
+}
+
+.panel {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--separator);
+  background: color-mix(in oklab, var(--surface-secondary) 55%, transparent);
+}
+
+.panel__title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.panel__body {
+  padding: 1rem;
+}
+
+/* ===== 状态徽标 ===== */
+
+.status-dot {
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-inline-end: 0.375rem;
+  border-radius: 9999px;
+  background: currentColor;
+  vertical-align: middle;
+}
+
+.status-dot[data-live="true"] {
+  animation: status-pulse 2s ease-out infinite;
+}
+
+/* ===== 数据表格 ===== */
+
+.table-shell {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+}
+
+.table-shell .table-root {
+  border-radius: inherit;
+}
+
+.owaf-table .table__header {
+  background: transparent;
+}
+
+.owaf-table .table__column {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: color-mix(in oklab, var(--surface-secondary) 55%, transparent);
+  /* 表头不换行：窄屏下宁可横向滚动，也不要把中文压成竖排 */
+  white-space: nowrap;
+}
+
+/* 单元格保持可换行，但徽标与操作按钮不折断 */
+.owaf-table .table__cell {
+  vertical-align: middle;
+}
+
+.owaf-table .table__cell [data-slot="chip"],
+.owaf-table .table__cell [class*="chip"] {
+  white-space: nowrap;
+}
+
+.owaf-table .table__row {
+  transition: background-color 0.18s var(--ease-fluid);
+}
+
+.owaf-table .table__row:hover .table__cell,
+.owaf-table .table__row[data-hovered="true"] .table__cell {
+  background: color-mix(in oklab, var(--accent) 5%, transparent);
+}
+
+.owaf-table .table__row[data-selected="true"] .table__cell {
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}
+
+/* ===== 窄屏适配 ===== */
+
+/* HeroUI Tabs.List 默认 inline-flex 且 tab 宽 100%，窄屏下会把视口撑破；
+   改为标签栏横向滚动（Cloudflare 式），tab 按内容宽度排列 */
+.tabs__list {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs__list::-webkit-scrollbar {
+  display: none;
+}
+
+.tabs__list > .tabs__tab {
+  width: auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* ===== 登录页 ===== */
+
+.login-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--background);
+}
+
+.login-header {
+  border-bottom: 1px solid var(--border);
+}
+
+.login-header-inner,
+.login-footer-inner {
+  width: 100%;
+  max-width: 74rem;
+  margin: 0 auto;
+  padding-inline: 1.5rem;
+}
+
+.login-header-inner {
+  display: flex;
+  height: 4rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.login-brandmark {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.login-brandmark-icon {
+  display: grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border-radius: 0.5rem;
+  color: var(--accent-foreground);
+  background: var(--accent);
+}
+
+.login-brandmark-text {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.login-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.login-main {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 3rem;
+  width: 100%;
+  max-width: 74rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+
+.login-story {
+  display: none;
+}
+
+@media (min-width: 64rem) {
+  .login-main {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    gap: 5rem;
+    padding: 4.5rem 2rem;
+  }
+
+  .login-story {
+    display: block;
+    max-width: 32rem;
+  }
+}
+
+.login-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.625rem;
+  color: var(--accent);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.login-eyebrow::before {
+  content: "";
+  width: 1.5rem;
+  height: 1px;
+  background: currentColor;
+}
+
+.login-story-title {
+  margin-top: 1.25rem;
+  font-size: clamp(2.25rem, 3.6vw, 2.75rem);
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+}
+
+.login-story-title-dim {
+  color: color-mix(in oklab, var(--foreground) 48%, transparent);
+}
+
+.login-story-desc {
+  max-width: 26rem;
+  margin-top: 1.25rem;
+  color: var(--muted);
+  font-size: 0.9375rem;
+  line-height: 1.7;
+}
+
+.login-capabilities {
+  margin-top: 2.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.login-capability {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  gap: 0.75rem;
+  padding-block: 1.125rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.login-capability-index {
+  padding-top: 0.125rem;
+  color: var(--accent);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
+.login-capability-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.login-capability-desc {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 26rem;
+  margin: 0 auto;
+  padding: 2rem 1.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.875rem;
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+}
+
+@media (min-width: 40rem) {
+  .login-card {
+    padding: 2.5rem;
+  }
+}
+
+.login-card-head {
+  margin-bottom: 1.75rem;
+}
+
+.login-card-title {
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.login-card-desc {
+  margin-top: 0.375rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.login-field {
+  width: 100%;
+}
+
+.login-label {
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.login-submit {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.login-form-note {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.login-footer {
+  border-top: 1px solid var(--border);
+}
+
+.login-footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-block: 1.25rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+/* ===== 无障碍：尊重减少动效偏好 ===== */
+
+@media (prefers-reduced-motion: reduce) {
+  .enter,
+  .status-dot[data-live="true"] {
+    animation: none;
+  }
+
+  .stat-card,
+  .nav-link,
+  .owaf-table .table__row {
+    transition: none;
+  }
+
+  .stat-card:hover {
+    transform: none;
+  }
+}

@@ -2,8 +2,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/frontend"
-bun install --frozen-lockfile
-bun run build
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm install --frozen-lockfile
+  pnpm run build
+else
+  bun install --frozen-lockfile
+  bun run build
+fi
 rm -rf "$ROOT/internal/core/adminweb/dist"
 cp -r "$ROOT/frontend/out" "$ROOT/internal/core/adminweb/dist"
 cd "$ROOT/wasm-pow-solver"

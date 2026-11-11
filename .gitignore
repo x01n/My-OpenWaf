@@ -62,3 +62,4 @@ internal/core/rules/zz_*_test.go
 asttool
 log.txt
 1.txt
+frontend/out/

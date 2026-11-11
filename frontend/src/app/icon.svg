@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- My-OpenWaf 站点图标：与侧栏 brand-badge 一致的半盾语义 -->
+  <rect width="32" height="32" rx="7" fill="#2f6bd8" />
+  <path
+    d="M16 6.5 24 10v6.4c0 4.6-3.1 8.3-8 9.6-4.9-1.3-8-5-8-9.6V10l8-3.5Z"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="2"
+    stroke-linejoin="round"
+  />
+  <path d="M16 6.5V26" stroke="#ffffff" stroke-width="2" stroke-linecap="round" />
+</svg>

@@ -406,14 +406,27 @@ func (m *pathRegexMatcher) Match(ctx MatchCtx) bool {
 
 type queryContainsMatcher struct{ substr string }
 
+/**
+ * decodedQuery 返回 URL 解码后的查询串；解码失败时原样返回。
+ *
+ * 匹配器对 raw 与 decoded 双份匹配：攻击载荷常用 %20/%3D 等编码规避
+ * 对原始查询串的正则（如 `union[\s+]select` 无法命中 `union%20select`）。
+ */
+func decodedQuery(raw string) string {
+	if q, err := url.QueryUnescape(raw); err == nil {
+		return q
+	}
+	return raw
+}
+
 func (m *queryContainsMatcher) Match(ctx MatchCtx) bool {
-	return strings.Contains(ctx.Query, m.substr)
+	return strings.Contains(ctx.Query, m.substr) || strings.Contains(decodedQuery(ctx.Query), m.substr)
 }
 
 type queryRegexMatcher struct{ re *regexp.Regexp }
 
 func (m *queryRegexMatcher) Match(ctx MatchCtx) bool {
-	return m.re.MatchString(ctx.Query)
+	return m.re.MatchString(ctx.Query) || m.re.MatchString(decodedQuery(ctx.Query))
 }
 
 type headerContainsMatcher struct{ name, substr string }

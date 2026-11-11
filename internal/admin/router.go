@@ -461,5 +461,25 @@ func serveStaticFile(c *app.RequestContext, webFS fs.FS, path string) {
 		c.String(404, "not found")
 		return
 	}
+	c.Response.Header.Set("Cache-Control", adminweb.CacheControl(resolvedPath))
+	c.Response.Header.Set("Vary", "Accept-Encoding")
+	// 仅在客户端声明支持时压缩，避免对老代理下发其无法解码的字节流。
+	if acceptsGzip(string(c.Request.Header.Peek("Accept-Encoding"))) {
+		if body, encoding := adminweb.CompressedBody(resolvedPath, data); encoding != "" {
+			c.Response.Header.Set("Content-Encoding", encoding)
+			data = body
+		}
+	}
 	c.Data(200, adminweb.ContentType(resolvedPath), data)
+}
+
+/** acceptsGzip 判断请求头是否接受 gzip 编码。 */
+func acceptsGzip(header string) bool {
+	for _, part := range strings.Split(header, ",") {
+		token := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if strings.EqualFold(token, "gzip") {
+			return true
+		}
+	}
+	return false
 }
