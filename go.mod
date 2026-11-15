@@ -9,7 +9,7 @@ require (
 	github.com/cloudwego/gopkg v0.2.1
 	github.com/cloudwego/hertz v0.10.6
 	github.com/dgraph-io/ristretto v1.0.1
-	github.com/emmansun/gmsm v0.45.2
+	github.com/emmansun/gmsm v0.45.3
 	github.com/gen2brain/webp v0.6.4
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-sql-driver/mysql v1.10.1
